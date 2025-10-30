@@ -1,0 +1,70 @@
+{
+    "dry_run": false,
+    "max_open_trades": 100,
+    "max_entry_position_adjustment": 12,
+    "timeframe": "1h",
+    "exchange": {
+        "name": "binance",
+        "key": "<API_KEY>",
+        "secret": "<API_SECRET>",
+        "sandbox": false,
+        "ccxt_config": {
+            "wsProxy": "<PROXY_URL>",
+            "httpsProxy": "<PROXY_URL>", 
+            "enableRateLimit": true,
+            "rateLimit": 30,
+            "timeout": 30000
+        },
+        "ccxt_async_config": {
+            "wsProxy": "<PROXY_URL>",
+            "httpsProxy": "<PROXY_URL>", 
+            "enableRateLimit": true,
+            "rateLimit": 30,
+            "timeout": 30000
+        }
+    },
+    "telegram": {
+        "enabled": true,
+        "token": "<TELEGRAM_BOT_TOKEN>",
+        "chat_id": "<TELEGRAM_CHAT_ID>",
+        "balance_dust_level": 0.01,
+        "notification_settings": {
+            "status": "off",
+            "warning": "off",
+            "startup": "on",
+            "entry": "on",
+            "entry_cancel": "on",
+            "entry_fill": "on",
+            "exit": {
+                "roi": "on",
+                "emergency_exit": "on",
+                "force_exit": "on",
+                "stoploss_on_exchange": "on",
+                "trailing_stop_loss": "on",
+                "exit_cancel": "on",
+                "exit_fill": "on",
+                "protection_trigger": "on"
+            },
+            "show_candle": "off",
+            "strategy_msg": {
+                "enabled": "on",
+                "msg_in_title": "on"
+            }
+        }
+    },
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 10800,
+        "verbosity": "error",
+        "enable_openapi": true,
+        "jwt_secret_key": "<JWT_SECRET_KEY>",
+        "ws_token": "<WS_TOKEN>",
+        "CORS_origins": ["*"],
+        "username": "<USERNAME>",
+        "password": "<PASSWORD>"
+    },
+    "internals": {
+        "process_throttle_secs": 5
+    }
+  }

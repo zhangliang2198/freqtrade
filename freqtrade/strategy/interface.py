@@ -1272,10 +1272,11 @@ class IStrategy(ABC, HyperStrategyMixin):
             return
 
         max_workers = self.config.get("strategy_thread_workers")
+        enable_threading = self.config.get("strategy_threading", True)
         if not isinstance(max_workers, int) or max_workers <= 0:
             max_workers = min(len(pairs), 32)
 
-        if max_workers <= 1:
+        if max_workers <= 1 or not enable_threading:
             for pair in pairs:
                 self.analyze_pair(pair)
             return
