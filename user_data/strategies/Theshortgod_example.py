@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 INTERFACE_VERSION = 3
 
 
-class Theshortgod_V_1_0_1(IStrategy):
+class Theshortgod(IStrategy):
     can_short = True
 
     # Execute on 1h candles, using 8h informative data as context
