@@ -1,0 +1,103 @@
+{
+  "bot_name": "freqtrade-backtest",
+  "strategy": "Theshortgod",
+  "timerange": "20220101-20251025",
+  "timeframe": "1h",
+  "stake_currency": "USDT",
+  "stake_amount": "unlimited",
+  "dry_run": true,
+  "dry_run_wallet": 2400,
+  "trading_mode": "futures",
+  "margin_mode": "cross",
+  "dataformat_ohlcv": "feather",
+  "dataformat_trades": "feather",
+  "max_open_trades": 300,
+  "tradable_balance_ratio": 0.99,
+  "cancel_open_orders_on_exit": true,
+  "force_entry_enable": true,
+  "fiat_display_currency": "CNY",
+  "exchange": {
+    "name": "binance",
+    "ccxt_config": {
+      "enableRateLimit": true,
+      "rateLimit": 50,
+      "timeout": 30000
+    },
+    "ccxt_async_config": {
+      "enableRateLimit": true,
+      "rateLimit": 50,
+      "timeout": 30000
+    },
+    "pair_blacklist": [
+      ".*_.*",
+      ".*DOWN.*",
+      ".*UP.*",
+      ".*BEAR.*",
+      ".*BULL.*"
+    ],
+    "pair_whitelist": [
+      "ATOM/USDT:USDT",
+      "ONT/USDT:USDT",
+      "IOTA/USDT:USDT",
+      "SKL/USDT:USDT",
+      "GRT/USDT:USDT",
+      "1INCH/USDT:USDT",
+      "C98/USDT:USDT",
+      "USDC/USDT:USDT",
+      "ID/USDT:USDT",
+      "ARB/USDT:USDT",
+      "EDU/USDT:USDT",
+      "1000BONK/USDT:USDT",
+      "PYTH/USDT:USDT",
+      "SUPER/USDT:USDT",
+      "ENA/USDT:USDT",
+      "W/USDT:USDT",
+      "CHILLGUY/USDT:USDT",
+      "KAIA/USDT:USDT",
+      "AERO/USDT:USDT",
+      "IP/USDT:USDT",
+      "SOPH/USDT:USDT"
+    ]
+  },
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
+    ],
+  "unfilledtimeout": {
+    "entry": 3,
+    "exit": 2,
+    "exit_timeout_count": 0,
+    "unit": "minutes"
+  },
+  "order_types": {
+    "entry": "limit",
+    "exit": "limit",
+    "emergency_exit": "limit",
+    "force_entry": "limit",
+    "force_exit": "limit",
+    "stoploss": "limit",
+    "stoploss_on_exchange": false,
+    "stoploss_on_exchange_interval": 60,
+    "stoploss_on_exchange_limit_ratio": 0.99
+  },
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1,
+    "price_last_balance": 0,
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1,
+    "price_last_balance": 0
+  },
+  "internals": {
+    "process_throttle_secs": 15
+  }
+}

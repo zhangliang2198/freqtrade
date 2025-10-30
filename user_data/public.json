@@ -1,8 +1,10 @@
 {
     "bot_name": "theshortgod",
-    "dry_run": true,
+    "dry_run": false,
     "dry_run_wallet": 10000,
     "grinding_enable": true,
+    "$schema": "https:schema.freqtrade.io/schema.json",
+    "db_url": "sqlite:///AltShort_Pro_8h_DCA9.sqlite",
     "stake_currency": "USDT",
     "fiat_display_currency": "USDT",
     "stake_amount": "unlimited",
