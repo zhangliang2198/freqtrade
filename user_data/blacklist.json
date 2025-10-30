@@ -1,0 +1,11 @@
+{
+    "exchange": {
+      "pair_blacklist": [
+        "(BNB)/.*",
+        "(1000.*).*/.*",
+        ".*(_PREMIUM|BEAR|BULL|HALF|HEDGE|UP|DOWN|[1235][SL])/.*",
+        ".*BTC.*",
+        ".*ETH.*"
+      ]
+    }
+  }

@@ -1,0 +1,128 @@
+{
+    "strategy": "Theshortgod_V_1_0_1",
+    "strategy_path": "user_data/strategy",
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+    "candle_type_def": "mark",
+    "timeframe": "1h",
+    "timerange":"20220101-20251009",
+    "dataformat_ohlcv": "feather",
+    "dataformat_trades": "feather",
+    
+    "stake_currency": "USDT",
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 0.99,
+    "dry_run_wallet": 10000,
+    
+    "max_open_trades": 300,
+    "max_entry_position_adjustment": 10,
+    
+    "pairlists": [
+        {
+            "method": "VolumePairList",
+            "number_assets": 600,
+            "sort_key": "quoteVolume",
+            "refresh_period": 1800
+        },
+        { "method": "FullTradesFilter" },
+        { "method": "AgeFilter", "min_days_listed": 30 },
+        {
+            "method": "PriceFilter",
+            "low_price_ratio": 0.002,
+            "max_price": 50000
+        },
+        {
+            "method": "SpreadFilter",
+            "max_spread_ratio": 0.004
+        },
+        {
+            "method": "VolatilityFilter",
+            "lookback_days": 14,
+            "min_volatility": 0.05,
+            "max_volatility": 0.50,
+            "refresh_period": 86400
+        },
+        {
+            "method": "RangeStabilityFilter",
+            "lookback_days": 10,
+            "min_rate_of_change": 0.05,
+            "refresh_period": 86400
+        },
+        {
+            "method": "ShuffleFilter",
+            "seed": 42
+        },
+        {
+            "method": "OffsetFilter",
+            "offset": 0,
+            "number_assets": 450
+        }
+    ],
+    
+    "exchange": {
+        "name": "binance",
+        "key": "",
+        "secret": "",
+        "ccxt_config": {},
+        "ccxt_async_config": {},
+        "pair_whitelist": [],
+        "pair_blacklist": []
+    },
+    
+    "entry_pricing": {
+        "price_side": "same",
+        "use_order_book": false,
+        "order_book_top": 1,
+        "price_last_balance": 0.0,
+        "check_depth_of_market": {
+            "enabled": false,
+            "bids_to_ask_delta": 1
+        }
+    },
+    
+    "exit_pricing": {
+        "price_side": "same",
+        "use_order_book": false,
+        "order_book_top": 1,
+        "price_last_balance": 0.0
+    },
+    
+    "order_types": {
+        "entry": "limit",
+        "exit": "limit",
+        "emergency_exit": "market",
+        "force_entry": "market",
+        "force_exit": "market",
+        "stoploss": "market",
+        "stoploss_on_exchange": false,
+        "stoploss_on_exchange_interval": 60,
+        "stoploss_on_exchange_limit_ratio": 0.99
+    },
+    
+    "unfilledtimeout": {
+        "entry": 10,
+        "exit": 10,
+        "exit_timeout_count": 0,
+        "unit": "minutes"
+    },
+    
+    "api_server": {
+        "enabled": false,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8080,
+        "verbosity": "error",
+        "enable_openapi": false,
+        "jwt_secret_key": "",
+        "ws_token": "",
+        "CORS_origins": [],
+        "username": "",
+        "password": ""
+    },
+    
+    "bot_name": "theshortgod_backtest",
+    "initial_state": "running",
+    "force_entry_enable": true,
+    "internals": {
+        "process_throttle_secs": 5
+    }
+}

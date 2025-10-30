@@ -1,3 +1,11 @@
 {
-    "strategy_thread_workers": 32
+    "strategy": "Theshortgod_V_1_0_1",
+    "strategy_thread_workers": 32,
+    "add_config_files": [
+        "./trading_futures.json",
+        "./pairlist_short.json",
+        "./blacklist.json",
+        "./public.json",
+        "./private.json"
+    ]
 }

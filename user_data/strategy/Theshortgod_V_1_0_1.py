@@ -32,70 +32,70 @@ Strategy summary:
 class Theshortgod_V_1_0_1(IStrategy):
     can_short = True
 
-    # 在1小时K线上执行，同时使用8小时信息数据作为上下文
+    # Execute on 1h candles, using 8h informative data as context
     timeframe = "1h"
     informative_timeframe = "8h"
 
     process_only_new_candles = True
-    startup_candle_count = 400  # 需要足够的历史数据用于百分位计算
+    startup_candle_count = 400  # Need sufficient historical data for percentile calculations
 
-    # 禁用静态止损；依赖custom_exit进行退出
-    # 原始设置参考-8%在10倍杠杆下（约0.8%变动）
+    # Disable static stoploss; rely on custom_exit for exits
+    # Original setting reference: -8% at 10x leverage (~0.8% price move)
     stoploss = -1000
-    use_custom_stoploss = False  # 本策略用 custom_exit 管理回撤式止盈，硬止损保底
+    use_custom_stoploss = False  # This strategy uses custom_exit for drawdown-based profit taking, hard stop as backup
 
-    # 启用仓位调整/DCA
+    # Enable position adjustment/DCA
     position_adjustment_enable = True
 
-    # --- 资金分配参数（可超参优化）---
-    # single_trade_cap 定义每笔交易资金上限，越大风险越大（2000/15）看比较好
+    # --- Capital allocation parameters (hyperopt-optimizable) ---
+    # single_trade_cap defines capital limit per trade, higher = more risk (2000/15 looks good)
     single_trade_cap = 18
 
-    # 首次入场规模占single_trade_cap的比例
+    # Initial entry size as ratio of single_trade_cap
     first_entry_ratio = 0.19
 
-    # add_seq_X值定义连续DCA入场的相对规模
-    # 可根据市场条件调整
+    # add_seq_X values define relative size for sequential DCA entries
+    # Can be adjusted based on market conditions
     add_seq_1 = DecimalParameter(0.05, 0.2, default=0.10, decimals=2, space="buy", optimize=False)
     add_seq_2 = DecimalParameter(0.05, 0.2, default=0.10, decimals=2, space="buy", optimize=False)
     add_seq_3 = DecimalParameter(0.10, 0.30, default=0.20, decimals=2, space="buy", optimize=False)
     add_seq_4 = DecimalParameter(0.20, 0.50, default=0.40, decimals=2, space="buy", optimize=False)
 
-    # 全局仓位上限限制总仓位使用
+    # Global exposure cap limits total position usage
     global_exposure_cap = DecimalParameter(
         0.3, 0.8, default=0.50, decimals=2, space="buy", optimize=False
     )
 
-    # 连续DCA入场之间的冷却时间（天）
+    # Cooldown time between consecutive DCA entries (days)
     add_cooldown_days = IntParameter(1, 10, default=3, space="buy", optimize=False)
 
-    # 当ATR%表示高波动时缩放规模的软上限
+    # Soft cap for scaling size when ATR% indicates high volatility
     atrp_soft_cap = DecimalParameter(
         0.05, 0.30, default=0.18, decimals=2, space="buy", optimize=True
     )
 
-    # DCA前必须达到的利润阈值（负值）
+    # Profit threshold (negative value) required before DCA
     dca_trigger_loss = DecimalParameter(
         -15.0, -0.5, default=-5.0, decimals=2, space="buy", optimize=False
     )
 
-    # 激活跟踪逻辑的利润水平
+    # Profit level to activate trailing logic
     trail_start = DecimalParameter(0.15, 2.00, default=0.5, decimals=2, space="sell", optimize=True)
-    # trail_step为每增加5%利润扩大回撤空间
+    # trail_step expands drawdown tolerance for each 5% profit increase
     trail_step = DecimalParameter(0.02, 0.10, default=0.05, decimals=2, space="sell", optimize=True)
 
-    # 8小时高位百分位过滤器配置（3-30天高位）
+    # 8h high percentile filter configuration (3-30 day highs)
     highpct_len = IntParameter(15, 90, default=30, space="buy", optimize=True)
     highpct_th = DecimalParameter(0.80, 0.98, default=0.90, decimals=2, space="buy", optimize=True)
 
-    # 基于滚动成交量的流动性过滤器
+    # Liquidity filter based on rolling volume
     vol_sma_len = IntParameter(10, 40, default=20, space="buy", optimize=False)
     min_dollar_vol = IntParameter(200000, 2000000, default=500000, space="buy", optimize=False)
 
     max_dca_loss = DecimalParameter(-1.0, -400.0, default=-80.0, decimals=1, space="buy")
     max_single_loss = DecimalParameter(-1.0, -500.0, default=-400.0, decimals=1, space="sell")
 
-    # 绘图覆盖配置
+    # Plot overlay configuration
     plot_config = {
         "main_plot": {
             "ema50_8h": {"color": "orange"},
@@ -109,9 +109,9 @@ class Theshortgod_V_1_0_1(IStrategy):
     }
 
     minimal_roi = {
-        "0": 15,  # 瞬间暴跌75%+的情况
+        "0": 15,  # Case of instant 75%+ crash
     }
-    trailing_stop = False  # 不用内建 trailing，改用 custom_exit 做“回撤式”止盈
+    trailing_stop = False  # Don't use built-in trailing, use custom_exit for "drawdown-based" profit taking
 
     # ------- Leverage settings -------
     def leverage(
@@ -182,9 +182,9 @@ class Theshortgod_V_1_0_1(IStrategy):
             if entry_mask.any() and entry_mask.iloc[-1]:
                 last_row = df.iloc[-1]
                 logger.info(
-                    f"交易对: {metadata['pair']} | "
-                    f"价格: {last_row['close']:.4f} | "
-                    f"高点百分比: {last_row.get('high_pct_8h', 0):.2%}"
+                    f"Pair: {metadata['pair']} | "
+                    f"Price: {last_row['close']:.4f} | "
+                    f"High Percentile: {last_row.get('high_pct_8h', 0):.2%}"
                 )
 
         return df
@@ -194,10 +194,10 @@ class Theshortgod_V_1_0_1(IStrategy):
         df["exit_short"] = 0
         return df
 
-    # ===== 自定义资金管理 =====
+    # ===== Custom capital management =====
     def _current_exposure_ratio(self, wallets) -> float:
         """
-        粗略估计当前资金占用（名义），用于不超过 global_exposure_cap。
+        Roughly estimate current capital usage (notional) to stay under global_exposure_cap.
         """
         try:
             total = float(wallets.get_total_balance())
@@ -209,7 +209,7 @@ class Theshortgod_V_1_0_1(IStrategy):
 
     def _pair_cap_after_atr(self, df: pd.DataFrame) -> float:
         """
-        按 8h ATR% 软限额缩放单币可用 cap（波动越大，可用 cap 越小）。
+        Scale per-pair available cap by 8h ATR% soft limit (higher volatility = smaller cap).
         """
         if df.empty or "atrp_8h" not in df.columns:
             return float(self.single_trade_cap)
@@ -240,9 +240,9 @@ class Theshortgod_V_1_0_1(IStrategy):
         **kwargs,
     ) -> float:
         """
-        管控“是否允许新开仓”与“初始开仓金额”：
-          - 若全局占用 > cap → 不开仓（返回 0）
-          - 初始开仓 = min(pair_cap_after_atr * first_entry_ratio, 余额允许)
+        Control whether new position is allowed and initial position size:
+          - If global usage > cap → no new position (return 0)
+          - Initial stake = min(pair_cap_after_atr * first_entry_ratio, available balance)
         """
         if side != "short":
             return 0.0
@@ -253,12 +253,12 @@ class Theshortgod_V_1_0_1(IStrategy):
             if exposure >= float(self.global_exposure_cap.value):
                 return 0.0
 
-        # 如果ATR数据缺失则中止DCA
+        # Abort DCA if ATR data missing
         df, _ = self.dp.get_analyzed_dataframe(pair=pair, timeframe=self.timeframe)
         pair_cap = self._pair_cap_after_atr(df)
         first_stake = pair_cap * float(self.first_entry_ratio)
 
-        # 遵守平台最大仓位约束
+        # Respect platform max position constraints
         return max(0.0, min(first_stake, max_stake))
 
     # ===== DCA logic (enforces cooldown / loss thresholds) =====
@@ -271,37 +271,37 @@ class Theshortgod_V_1_0_1(IStrategy):
         **kwargs,
     ) -> Optional[Tuple[str, float]]:
         """
-        返回 ("sell", amount) 代表继续加仓做空（增加空头头寸）。
-        注意：Freqtrade 中对空头的"buy/sell"语义请以版本文档为准，这里沿用 adjust_trade_position 接口约定：
-          - 正向增加仓位用 "sell"。
+        Return ("sell", amount) represents continuing to add to short position.
+        Note: For Freqtrade short "buy/sell" semantics refer to version docs, following adjust_trade_position interface:
+          - Use "sell" to increase position.
 
-        优化逻辑：
-          1. 只在整点小时检查（避免价格噪音）
-          2. 只在自上次加仓以来的最高价格点加仓（做空策略中，最高价=最大亏损点）
+        Optimization logic:
+          1. Only check at hourly candles (avoid price noise)
+          2. Only add at highest price since last DCA (in short strategy, highest price = max loss point)
         """
 
-        # 【整点检查】只在新K线开始时检查加仓条件
+        # [Hourly Check] Only check DCA conditions at new candle start
         current_candle_start = current_time.replace(minute=0, second=0, microsecond=0)
         last_check_candle = trade.get_custom_data("last_dca_check_candle", None)
 
-        # 如果在同一根K线内已经检查过，跳过
+        # Skip if already checked within same candle
         if last_check_candle == current_candle_start.isoformat():
             return None
 
-        # 记录本次检查的K线时间
+        # Record current candle check time
         trade.set_custom_data("last_dca_check_candle", current_candle_start.isoformat())
 
-        # 【跟踪最高价格】自上次加仓以来的最高价格（做空策略中代表最大亏损）
+        # [Track Highest Price] Highest price since last DCA (represents max loss in short strategy)
         last_high = float(trade.get_custom_data("high_since_last_dca", 0.0))
 
-        # 更新最高价格记录
+        # Update highest price record
         if current_rate > last_high:
             trade.set_custom_data("high_since_last_dca", current_rate)
             last_high = current_rate
             logger.debug(
-                f"【更新加仓参考高点】{trade.pair} | "
-                f"新高点: {current_rate:.4f} | "
-                f"当前亏损: {current_profit:.2%}"
+                f"[Update DCA Reference High]{trade.pair} | "
+                f"New high: {current_rate:.4f} | "
+                f"Current loss: {current_profit:.2%}"
             )
 
         # Skip if global exposure already at cap
@@ -310,7 +310,7 @@ class Theshortgod_V_1_0_1(IStrategy):
             exposure = self._current_exposure_ratio(wallets)
             if exposure >= float(self.global_exposure_cap.value):
                 logger.debug(
-                    f"【跳过加仓】{trade.pair} | 原因: 全局仓位占用过高 ({exposure:.2%})"
+                    f"[Skip DCA]{trade.pair} | Reason: Global exposure too high ({exposure:.2%})"
                 )
                 return None
 
@@ -332,17 +332,17 @@ class Theshortgod_V_1_0_1(IStrategy):
         if not np.isfinite(current_profit) or current_profit > trigger_loss:
             return None
 
-        # 【最高点检查】只在价格等于或非常接近最高点时加仓
-        # 允许0.05%的误差范围（避免因为微小价格波动错过加仓机会）
+        # [High Point Check] Only add when price equals or very close to highest point
+        # Allow 0.05% tolerance (avoid missing DCA due to minor price fluctuations)
         if last_high > 0:
             price_diff_pct = abs(last_high - current_rate) / last_high
-            if price_diff_pct > 0.0005:  # 0.05%误差
+            if price_diff_pct > 0.0005:  # 0.05% tolerance
                 logger.debug(
-                    f"【跳过加仓】{trade.pair} | "
-                    f"原因: 未达最高点 | "
-                    f"当前价格: {current_rate:.4f} | "
-                    f"最高点: {last_high:.4f} | "
-                    f"差异: {price_diff_pct:.4%}"
+                    f"[Skip DCA]{trade.pair} | "
+                    f"Reason: Not at highest point | "
+                    f"Current price: {current_rate:.4f} | "
+                    f"Highest point: {last_high:.4f} | "
+                    f"Difference: {price_diff_pct:.4%}"
                 )
                 return None
 
@@ -351,7 +351,7 @@ class Theshortgod_V_1_0_1(IStrategy):
         pair_cap = self._pair_cap_after_atr(df)
 
         # Remaining capital available for this pair
-        used = float(trade.stake_amount)  # 已使用资金（非名义+保证金之分，这里按 stake）
+        used = float(trade.stake_amount)  # Used capital (based on stake, not notional+margin distinction)
         remain = max(pair_cap - used, 0.0)
         if remain <= 0:
             return None
@@ -368,7 +368,7 @@ class Theshortgod_V_1_0_1(IStrategy):
 
         if after_first >= len(add_seq):
             logger.debug(
-                f"【跳过加仓】{trade.pair} | 原因: 已达最大加仓次数 ({after_first}/{len(add_seq)})"
+                f"[Skip DCA]{trade.pair} | Reason: Max DCA count reached ({after_first}/{len(add_seq)})"
             )
             return None
 
@@ -388,23 +388,23 @@ class Theshortgod_V_1_0_1(IStrategy):
         # Log DCA activity for debugging
         atrp = df["atrp_8h"].iloc[-1] if "atrp_8h" in df.columns else 0
         logger.info(
-            f"【加仓 #{after_first + 1}】{trade.pair} | "
-            f"加仓金额: {will_add:.2f} USDT | "
-            f"总入场次数: {trade.nr_of_successful_entries + 1} | "
-            f"当前收益: {current_profit:.2%} | "
-            f"价格: {current_rate:.4f} | "
-            f"已用/上限: {used:.2f}/{pair_cap:.2f} | "
+            f"[DCA #{after_first + 1}】{trade.pair} | "
+            f"DCA amount: {will_add:.2f} USDT | "
+            f"Total entries: {trade.nr_of_successful_entries + 1} | "
+            f"Current profit: {current_profit:.2%} | "
+            f"Price: {current_rate:.4f} | "
+            f"Used/Cap: {used:.2f}/{pair_cap:.2f} | "
             f"ATR%: {atrp:.2%} | "
-            f"距上次: {delta_days}天 | "
-            f"加仓时高点: {last_high:.4f}"
+            f"Since last: {delta_days}days | "
+            f"High at DCA: {last_high:.4f}"
         )
 
-        # 加仓后重置最高价格记录，开始跟踪新一轮的价格变化
+        # Reset highest price record after DCA, start tracking new price changes
         trade.set_custom_data("high_since_last_dca", current_rate)
 
         return will_add, f"dca_{after_first + 1}"
 
-    # ===== 跟踪回撤退出 =====
+    # ===== Trailing drawdown exit =====
     def custom_exit(
         self,
         pair: str,
@@ -415,36 +415,36 @@ class Theshortgod_V_1_0_1(IStrategy):
         **kwargs,
     ):
         """
-        逻辑：
-          - 当利润 >= trail_start 时，记录 max_profit
-          - 若 (max_profit - current_profit) >= 动态阈值 → 触发退出
-          - 动态阈值：基础 0.03 + floor( (max_profit - trail_start)/0.05 ) * trail_step
-            （即每多 5% 盈利，回撤容忍 + trail_step）
+        Logic:
+          - When profit >= trail_start, record max_profit
+          - If (max_profit - current_profit) >= dynamic threshold → trigger exit
+          - Dynamic threshold: base 0.03 + floor( (max_profit - trail_start)/0.05 ) * trail_step
+            (i.e., for every 5% more profit, drawdown tolerance + trail_step)
         """
-        # 【实盘行为一致性】只在新K线开始时检查退出条件
-        # 计算当前K线的开始时间（对齐到整点小时）
+        # [Live Trading Consistency] Only check exit conditions at new candle start
+        # Calculate current candle start time (aligned to hour)
         current_candle_start = current_time.replace(minute=0, second=0, microsecond=0)
         last_check_candle = trade.get_custom_data("last_exit_check_candle", None)
 
 
-        # 如果在同一根K线内已经检查过，跳过（避免价格噪音）
+        # Skip if already checked within same candle（avoid price noise）
         if last_check_candle == current_candle_start.isoformat():
             return None
 
-        # 记录本次检查的K线时间
+        # Record current candle check time
         trade.set_custom_data("last_exit_check_candle", current_candle_start.isoformat())
 
-        # 1. 硬止损保护
+        # 1. Hard stoploss protection
         if current_profit <= float(self.max_single_loss.value):
-            logger.critical(f"🛑【硬止损】{pair} | {current_profit:.2%}")
+            logger.critical(f"[Hard Stoploss]{pair} | {current_profit:.2%}")
             return "hard_stoploss"
 
-        # 2. 多次DCA后的累积亏损保护
+        # 2. Cumulative loss protection after multiple DCA
         if trade.nr_of_successful_entries >= 3:
             max_allow = float(self.max_dca_loss.value)
             if current_profit <= max_allow:
                 logger.critical(
-                    f"🛑【DCA累积止损】{pair} | {current_profit:.2%} | 入场{trade.nr_of_successful_entries}次"
+                    f"[DCA Cumulative Stoploss]{pair} | {current_profit:.2%} | entries{trade.nr_of_successful_entries} times"
                 )
                 return "dca_max_loss"
 
@@ -457,15 +457,15 @@ class Theshortgod_V_1_0_1(IStrategy):
             if current_profit > maxp:
                 trade.set_custom_data("max_profit", current_profit)
                 logger.debug(
-                    f"【更新最高收益】{pair} | "
-                    f"新最高: {current_profit:.2%} | "
-                    f"价格: {current_rate:.4f}"
+                    f"[Update Max Profit]{pair} | "
+                    f"New max: {current_profit:.2%} | "
+                    f"Price: {current_rate:.4f}"
                 )
                 return None
 
-            # 推导允许回撤
-            # 示例: start=0.5, step=0.05
-            # 示例: max_profit=0.7 => over=0.2 => floor(...)=2 => allow=0.1
+            # Derive allowed drawdown
+            # Example: start=0.5, step=0.05
+            # Example: max_profit=0.7 => over=0.2 => floor(...)=2 => allow=0.1
             over = max(0.0, maxp - start)
             buckets = int(np.floor(over / 0.10))
             allow_draw = step * (1 + buckets)
@@ -473,19 +473,39 @@ class Theshortgod_V_1_0_1(IStrategy):
 
             if drawdown >= allow_draw:
                 logger.info(
-                    f"【回撤止盈】{pair} | "
-                    f"最高收益: {maxp:.2%} | "
-                    f"当前收益: {current_profit:.2%} | "
-                    f"回撤: {drawdown:.2%} | "
-                    f"允许回撤: {allow_draw:.2%} | "
-                    f"价格: {current_rate:.4f} | "
-                    f"持仓: {(current_time - trade.open_date_utc).days}天"
+                    f"[Drawdown Exit]{pair} | "
+                    f"Max profit: {maxp:.2%} | "
+                    f"Current profit: {current_profit:.2%} | "
+                    f"Drawdown: {drawdown:.2%} | "
+                    f"Allowed Drawdown: {allow_draw:.2%} | "
+                    f"Price: {current_rate:.4f} | "
+                    f"Position held: {(current_time - trade.open_date_utc).days}days"
                 )
                 return "trail_drawdown_exit"
 
         else:
-            # 当利润低于激活阈值时重置跟踪
+            # Reset tracking when profit below activation threshold
             if maxp > 0:
                 trade.set_custom_data("max_profit", -1.0)
 
         return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

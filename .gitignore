@@ -118,3 +118,4 @@ target/
 !config_examples/config_freqai.example.json
 branch.md
 docker-compose-*.yml
+private.json
