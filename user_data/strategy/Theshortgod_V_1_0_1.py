@@ -272,15 +272,46 @@ class Theshortgod_V_1_0_1(IStrategy):
     ) -> Optional[Tuple[str, float]]:
         """
         返回 ("sell", amount) 代表继续加仓做空（增加空头头寸）。
-        注意：Freqtrade 中对空头的“buy/sell”语义请以版本文档为准，这里沿用 adjust_trade_position 接口约定：
+        注意：Freqtrade 中对空头的"buy/sell"语义请以版本文档为准，这里沿用 adjust_trade_position 接口约定：
           - 正向增加仓位用 "sell"。
+
+        优化逻辑：
+          1. 只在整点小时检查（避免价格噪音）
+          2. 只在自上次加仓以来的最高价格点加仓（做空策略中，最高价=最大亏损点）
         """
+
+        # 【整点检查】只在新K线开始时检查加仓条件
+        current_candle_start = current_time.replace(minute=0, second=0, microsecond=0)
+        last_check_candle = trade.get_custom_data("last_dca_check_candle", None)
+
+        # 如果在同一根K线内已经检查过，跳过
+        if last_check_candle == current_candle_start.isoformat():
+            return None
+
+        # 记录本次检查的K线时间
+        trade.set_custom_data("last_dca_check_candle", current_candle_start.isoformat())
+
+        # 【跟踪最高价格】自上次加仓以来的最高价格（做空策略中代表最大亏损）
+        last_high = float(trade.get_custom_data("high_since_last_dca", 0.0))
+
+        # 更新最高价格记录
+        if current_rate > last_high:
+            trade.set_custom_data("high_since_last_dca", current_rate)
+            last_high = current_rate
+            logger.debug(
+                f"【更新加仓参考高点】{trade.pair} | "
+                f"新高点: {current_rate:.4f} | "
+                f"当前亏损: {current_profit:.2%}"
+            )
 
         # Skip if global exposure already at cap
         wallets = kwargs.get("wallets")
         if wallets:
             exposure = self._current_exposure_ratio(wallets)
             if exposure >= float(self.global_exposure_cap.value):
+                logger.debug(
+                    f"【跳过加仓】{trade.pair} | 原因: 全局仓位占用过高 ({exposure:.2%})"
+                )
                 return None
 
         # Honour the cooldown between filled entries
@@ -300,6 +331,20 @@ class Theshortgod_V_1_0_1(IStrategy):
         trigger_loss = float(self.dca_trigger_loss.value)
         if not np.isfinite(current_profit) or current_profit > trigger_loss:
             return None
+
+        # 【最高点检查】只在价格等于或非常接近最高点时加仓
+        # 允许0.05%的误差范围（避免因为微小价格波动错过加仓机会）
+        if last_high > 0:
+            price_diff_pct = abs(last_high - current_rate) / last_high
+            if price_diff_pct > 0.0005:  # 0.05%误差
+                logger.debug(
+                    f"【跳过加仓】{trade.pair} | "
+                    f"原因: 未达最高点 | "
+                    f"当前价格: {current_rate:.4f} | "
+                    f"最高点: {last_high:.4f} | "
+                    f"差异: {price_diff_pct:.4%}"
+                )
+                return None
 
         # Determine pair-specific cap after ATR scaling
         df, _ = self.dp.get_analyzed_dataframe(pair=trade.pair, timeframe=self.timeframe)
@@ -350,8 +395,12 @@ class Theshortgod_V_1_0_1(IStrategy):
             f"价格: {current_rate:.4f} | "
             f"已用/上限: {used:.2f}/{pair_cap:.2f} | "
             f"ATR%: {atrp:.2%} | "
-            f"距上次: {delta_days}天"
+            f"距上次: {delta_days}天 | "
+            f"加仓时高点: {last_high:.4f}"
         )
+
+        # 加仓后重置最高价格记录，开始跟踪新一轮的价格变化
+        trade.set_custom_data("high_since_last_dca", current_rate)
 
         return will_add, f"dca_{after_first + 1}"
 
@@ -377,6 +426,7 @@ class Theshortgod_V_1_0_1(IStrategy):
         current_candle_start = current_time.replace(minute=0, second=0, microsecond=0)
         last_check_candle = trade.get_custom_data("last_exit_check_candle", None)
 
+
         # 如果在同一根K线内已经检查过，跳过（避免价格噪音）
         if last_check_candle == current_candle_start.isoformat():
             return None
@@ -385,7 +435,6 @@ class Theshortgod_V_1_0_1(IStrategy):
         trade.set_custom_data("last_exit_check_candle", current_candle_start.isoformat())
 
         # 1. 硬止损保护
-
         if current_profit <= float(self.max_single_loss.value):
             logger.critical(f"🛑【硬止损】{pair} | {current_profit:.2%}")
             return "hard_stoploss"

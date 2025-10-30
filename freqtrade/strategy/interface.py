@@ -5,6 +5,7 @@ This module defines the interface to apply for strategies
 
 import logging
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from math import isinf, isnan
 
@@ -1267,8 +1268,27 @@ class IStrategy(ABC, HyperStrategyMixin):
         Analyze all pairs using analyze_pair().
         :param pairs: List of pairs to analyze
         """
-        for pair in pairs:
-            self.analyze_pair(pair)
+        if not pairs:
+            return
+
+        max_workers = self.config.get("strategy_thread_workers")
+        if not isinstance(max_workers, int) or max_workers <= 0:
+            max_workers = min(len(pairs), 32)
+
+        if max_workers <= 1:
+            for pair in pairs:
+                self.analyze_pair(pair)
+            return
+
+        # Execute analysis concurrently for faster processing when many pairs are tracked.
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self.analyze_pair, pair): pair for pair in pairs}
+            for future in as_completed(futures):
+                pair = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.error("Unable to analyze pair %s: %s", pair, exc, exc_info=True)
 
     def get_latest_candle(
         self,
