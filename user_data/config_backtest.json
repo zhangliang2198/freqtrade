@@ -2,7 +2,7 @@
     "strategy": "Theshortgod",
     "strategy_path": "user_data/strategy",
     "trading_mode": "futures",
-    "margin_mode": "isolated",
+    "margin_mode": "cross",
     "candle_type_def": "mark",
     "timeframe": "1h",
     "timerange": "20220101-20251009",
@@ -372,6 +372,7 @@
             "method": "StaticPairList"
         }
     ],
+    
     "entry_pricing": {
         "price_side": "same",
         "use_order_book": false,

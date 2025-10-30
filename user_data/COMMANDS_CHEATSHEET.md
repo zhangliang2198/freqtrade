@@ -63,6 +63,8 @@ freqtrade plot-profit --config user_data/config_backtest.json --timerange 202408
 
 ## 🔧 Parameter Optimization (Hyperopt)
 
+建议一遍又一遍地运行 500-1000 个周期，直到您总共达到至少 10000 个周期
+
 ```powershell
 # Optimize buy parameters (50 epochs)
 freqtrade hyperopt --config user_data/config_backtest.json --hyperopt-loss SharpeHyperOptLoss --spaces buy --epochs 50

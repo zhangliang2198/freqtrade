@@ -53,6 +53,7 @@ nav:
         - Producer/Consumer mode: producer-consumer.md
         - SQL Cheat-sheet: sql_cheatsheet.md
     - FAQ: faq.md
+    - FAQ (Chinese): faq.zh.md
     - Strategy migration: strategy_migration.md
     - Updating Freqtrade: updating.md
     - Deprecated Features: deprecated.md
