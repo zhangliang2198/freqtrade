@@ -1,3 +1,11 @@
+# 这是一个freqtrade的优化版本，可以用于实盘。
+
+交流讨论，版本发行说明，更多量化实盘技巧和策略，请入qq群：
+
+![alt text](小森林量化logo.png)
+
+# 下面是原版说明：
+
 # ![freqtrade](https://raw.githubusercontent.com/freqtrade/freqtrade/develop/docs/assets/freqtrade_poweredby.svg)
 
 [![Freqtrade CI](https://github.com/freqtrade/freqtrade/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/freqtrade/freqtrade/actions/)
