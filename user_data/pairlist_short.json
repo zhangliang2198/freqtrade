@@ -12,31 +12,17 @@
     },
     {
       "method": "AgeFilter",
-      "min_days_listed": 60
-    },
-    {
-      "method": "VolatilityFilter",
-      "lookback_days": 10,
-      "min_volatility": 0.02,
-      "max_volatility": 0.40,
-      "refresh_period": 86400
+      "min_days_listed": 30
     },
     {
       "method": "PriceFilter",
       "low_price_ratio": 0.005,
-      "min_price": 0.00001,
-      "max_price": 150
+      "min_price": 0.0003,
+      "max_price": 500
     },
     {
       "method": "SpreadFilter",
       "max_spread_ratio": 0.004
-    },
-    {
-      "method": "RangeStabilityFilter",
-      "lookback_days": 7,
-      "min_rate_of_change": 0.02,
-      "max_rate_of_change": 0.90,
-      "refresh_period": 86400
     },
     {
       "method": "ShuffleFilter",

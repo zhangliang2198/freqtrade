@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 INTERFACE_VERSION = 3
 
+# self.dp.send_msg()
 
 class Theshortgod(IStrategy):
     can_short = True

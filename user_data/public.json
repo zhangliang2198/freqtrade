@@ -13,6 +13,7 @@
     "cancel_open_orders_on_exit": false,
     "max_entry_position_adjustment": 10,
     "timeframe": "5m",
+    "allow_custom_messages": true,
     "unfilledtimeout": {
       "entry": 3,
       "exit": 2,
