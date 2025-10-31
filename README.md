@@ -13,6 +13,12 @@
 5. 梳理配置文件，参考 `config.json` 中配置；
 6. 添加优选山寨币对，参考 `pairlist_static.json`；
 7. 添加常用指令说明，参考 `/user_data/COMMANDS_CHEATSHEET.md`。
+   
+## 原始框架bug修复
+
+1. 使用 `mysql` 当作数据库时， `custom_data` 先查后写触发并发写会冲突，导致接下来任何查询/提交都会报错，文件：`custom_data.py`。
+  - get_custom_data() 加一个“若会话挂起则先 rollback 再查询”的容错，以杜绝因先前失败造成的后续读异常。
+  - 把 set_custom_data() 改为原子 upsert（PG 的 ON CONFLICT DO UPDATE / MySQL 的 ON DUPLICATE KEY UPDATE）。这样并发对同一键的写会被数据库合并为插入或更新，不再走“先查后插”的竞态路径。
 
 交流讨论，版本发行说明，更多量化实盘技巧和策略，请入`qq`群：
 
