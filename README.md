@@ -1,5 +1,11 @@
 # 这是一个freqtrade的优化版本，可以用于实盘
 
+fork自源仓库，每月同步一次源框架稳定代码。不断优化和添加功能。
+
+## 交流讨论，版本发行说明，更多量化实盘技巧和策略，请入`qq`群：
+
+<img src="小森林量化logo.png" alt="小森林量化QQ群" width="300">
+
 ## v1.0.2 对接 deepseek，开发AI相关功能
 
 进行中...
@@ -24,10 +30,6 @@
 1. 使用 `mysql` 当作数据库时， `custom_data` 先查后写触发并发写会冲突，导致接下来任何查询/提交都会报错，文件：`custom_data.py`。
   - `get_custom_data()` 加一个“若会话挂起则先 `rollback` 再查询”的容错，以杜绝因先前失败造成的后续读异常。
   - 把 `set_custom_data()` 改为原子 `upsert（PG 的 ON CONFLICT DO UPDATE / MySQL 的 ON DUPLICATE KEY UPDATE）`。这样并发对同一键的写会被数据库合并为插入或更新，不再走“先查后插”的竞态路径。
-
-### 交流讨论，版本发行说明，更多量化实盘技巧和策略，请入`qq`群：
-
-<img src="小森林量化logo.png" alt="小森林量化QQ群" width="300">
 
 # 下面是原版说明：
 
