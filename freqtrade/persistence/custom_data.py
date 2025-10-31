@@ -6,6 +6,7 @@ from typing import Any, ClassVar
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, select
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.exc import SQLAlchemyError, PendingRollbackError
 
 from freqtrade.constants import DATETIME_PRINT_FORMAT
 from freqtrade.persistence.base import ModelBase, SessionType
@@ -124,9 +125,20 @@ class CustomDataWrapper:
             ]
             if key is not None:
                 filters.append(_CustomData.cd_key.ilike(key))
-            filtered_custom_data = _CustomData.session.scalars(
-                select(_CustomData).filter(*filters)
-            ).all()
+            try:
+                filtered_custom_data = _CustomData.session.scalars(
+                    select(_CustomData).filter(*filters)
+                ).all()
+            except PendingRollbackError:
+                # A previous statement failed in this session. Recover and retry once.
+                _CustomData.session.rollback()
+                filtered_custom_data = _CustomData.session.scalars(
+                    select(_CustomData).filter(*filters)
+                ).all()
+            except SQLAlchemyError as e:
+                logger.exception(f"get_custom_data failed for key '{key}': {e}")
+                _CustomData.session.rollback()
+                filtered_custom_data = []
 
         else:
             filtered_custom_data = [
@@ -158,25 +170,101 @@ class CustomDataWrapper:
         if trade_id is None:
             trade_id = 0
 
+        # Database path: perform atomic upsert for MySQL/MariaDB and PostgreSQL
+        if CustomDataWrapper.use_db and value_db is not None:
+            now = dt_now()
+            try:
+                bind = _CustomData.session.get_bind()
+                dialect = bind.dialect.name if bind is not None else ""
+
+                # PostgreSQL: ON CONFLICT DO UPDATE
+                if dialect == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                    stmt = pg_insert(_CustomData.__table__).values(
+                        ft_trade_id=trade_id,
+                        cd_key=key,
+                        cd_type=value_type,
+                        cd_value=value_db,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[_CustomData.ft_trade_id, _CustomData.cd_key],
+                        set_={
+                            "cd_value": stmt.excluded.cd_value,
+                            "cd_type": stmt.excluded.cd_type,
+                            "updated_at": now,
+                        },
+                    )
+                    _CustomData.session.execute(stmt)
+                    _CustomData.session.commit()
+                    return
+
+                # MySQL / MariaDB: ON DUPLICATE KEY UPDATE
+                if dialect in ("mysql", "mariadb"):
+                    from sqlalchemy.dialects.mysql import insert as my_insert
+
+                    stmt = my_insert(_CustomData.__table__).values(
+                        ft_trade_id=trade_id,
+                        cd_key=key,
+                        cd_type=value_type,
+                        cd_value=value_db,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    stmt = stmt.on_duplicate_key_update(
+                        cd_value=value_db,
+                        cd_type=value_type,
+                        updated_at=now,
+                    )
+                    _CustomData.session.execute(stmt)
+                    _CustomData.session.commit()
+                    return
+
+                # Fallback for other dialects (e.g., sqlite): emulate upsert via get+update/insert
+                custom_data = CustomDataWrapper.get_custom_data(trade_id=trade_id, key=key)
+                if custom_data:
+                    data_entry = custom_data[0]
+                    data_entry.cd_value = value_db
+                    data_entry.cd_type = value_type
+                    data_entry.updated_at = now
+                    data_entry.value = value
+                    _CustomData.session.add(data_entry)
+                else:
+                    data_entry = _CustomData(
+                        ft_trade_id=trade_id,
+                        cd_key=key,
+                        cd_type=value_type,
+                        cd_value=value_db,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    data_entry.value = value
+                    _CustomData.session.add(data_entry)
+                _CustomData.session.commit()
+                return
+            except SQLAlchemyError as e:
+                # Ensure session is usable again and log for diagnostics
+                _CustomData.session.rollback()
+                logger.exception(f"set_custom_data upsert failed for key '{key}': {e}")
+                # As a last resort, do not raise to avoid crashing strategy flow
+                return
+
+        # In-memory path (backtesting / use_db=False)
         custom_data = CustomDataWrapper.get_custom_data(trade_id=trade_id, key=key)
         if custom_data:
             data_entry = custom_data[0]
-            data_entry.cd_value = value_db
+            data_entry.cd_value = value_db if value_db is not None else ""
+            data_entry.cd_type = value_type
             data_entry.updated_at = dt_now()
         else:
             data_entry = _CustomData(
                 ft_trade_id=trade_id,
                 cd_key=key,
                 cd_type=value_type,
-                cd_value=value_db,
+                cd_value=value_db if value_db is not None else "",
                 created_at=dt_now(),
             )
+            CustomDataWrapper.custom_data.append(data_entry)
         data_entry.value = value
-
-        if CustomDataWrapper.use_db and value_db is not None:
-            _CustomData.session.add(data_entry)
-            _CustomData.session.commit()
-        else:
-            if not custom_data:
-                CustomDataWrapper.custom_data.append(data_entry)
-            # Existing data will have updated interactively.
