@@ -118,6 +118,6 @@ target/
 !COMMANDS_CHEATSHEET.md
 branch.md
 docker-compose-*.yml
-private.json
+private.*
 Theshortgod.py
 Theshortgod.json
