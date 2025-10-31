@@ -1,6 +1,13 @@
-# 这是一个freqtrade的优化版本，可以用于实盘。
+# 这是一个freqtrade的优化版本，可以用于实盘
 
-交流讨论，版本发行说明，更多量化实盘技巧和策略，请入qq群：
+1. 将原串行分析交易对变成并行提升每轮K线处理速度；
+2. 添加几个策略，供参考，策略均在实盘运行；
+3. 文档全部中文化，参考 `/docs` 目录中的 `xx.zh.md` 文档，建议通读一遍；
+4. 增加mysql支持，请在配置中设置：`"db_url": "mysql+pymysql://<user>:<password>@localhost:3306/<dbname>"；
+5. 梳理配置文件，参考 `config.json` 中配置；
+6. 添加优选山寨币对，参考 `pairlist_static.json`。
+
+交流讨论，版本发行说明，更多量化实盘技巧和策略，请入`qq`群：
 
 <img src="小森林量化logo.png" alt="小森林量化QQ群" width="300">
 
