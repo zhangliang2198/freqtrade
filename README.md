@@ -27,26 +27,21 @@
 [![Coverage Status](https://coveralls.io/repos/github/freqtrade/freqtrade/badge.svg?branch=develop&service=github)](https://coveralls.io/github/freqtrade/freqtrade?branch=develop)
 [![Documentation](https://readthedocs.org/projects/freqtrade/badge/)](https://www.freqtrade.io)
 
-Freqtrade is a free and open source crypto trading bot written in Python. It is designed to support all major exchanges and be controlled via Telegram or webUI. It contains backtesting, plotting and money management tools as well as strategy optimization by machine learning.
+Freqtrade 是一个用 Python 编写的免费开源加密货币交易机器人。它被设计为支持所有主要交易所，并可通过 Telegram 或 Web UI 进行控制。它包含回测、绘图和资金管理工具，以及通过机器学习进行策略优化。
 
 ![freqtrade](https://raw.githubusercontent.com/freqtrade/freqtrade/develop/docs/assets/freqtrade-screenshot.png)
 
-## Disclaimer
+## 免责声明
 
-This software is for educational purposes only. Do not risk money which
-you are afraid to lose. USE THE SOFTWARE AT YOUR OWN RISK. THE AUTHORS
-AND ALL AFFILIATES ASSUME NO RESPONSIBILITY FOR YOUR TRADING RESULTS.
+本软件仅用于教育目的。请勿拿您不敢损失的资金去冒险。使用本软件风险自担。作者和所有关联方对您的交易结果不承担任何责任。
 
-Always start by running a trading bot in Dry-run and do not engage money
-before you understand how it works and what profit/loss you should
-expect.
+在您了解机器人的工作原理以及您应该期望的盈利/亏损之前，请务必从运行干跑交易机器人开始，不要投入真金白银。
 
-We strongly recommend you to have coding and Python knowledge. Do not
-hesitate to read the source code and understand the mechanism of this bot.
+我们强烈建议您具备编程和 Python 知识。请不要犹豫阅读源代码并了解此机器人的机制。
 
-## Supported Exchange marketplaces
+## 支持的交易所市场
 
-Please read the [exchange specific notes](docs/exchanges.md) to learn about eventual, special configurations needed for each exchange.
+请阅读[交易所特定说明](docs/exchanges.md)以了解每个交易所可能需要的特殊配置。
 
 - [X] [Binance](https://www.binance.com/)
 - [X] [BingX](https://bingx.com/invite/0EM9RX)
@@ -61,193 +56,172 @@ Please read the [exchange specific notes](docs/exchanges.md) to learn about even
 - [X] [MyOKX](https://okx.com/) (OKX EEA)
 - [ ] [potentially many others](https://github.com/ccxt/ccxt/). _(We cannot guarantee they will work)_
 
-### Supported Futures Exchanges (experimental)
+### 支持的期货交易所（实验性）
 
 - [X] [Binance](https://www.binance.com/)
 - [X] [Bitget](https://www.bitget.com/)
 - [X] [Gate.io](https://www.gate.io/ref/6266643)
-- [X] [Hyperliquid](https://hyperliquid.xyz/) (A decentralized exchange, or DEX)
+- [X] [Hyperliquid](https://hyperliquid.xyz/) (去中心化交易所，即 DEX)
 - [X] [OKX](https://okx.com/)
 - [X] [Bybit](https://bybit.com/)
 
-Please make sure to read the [exchange specific notes](docs/exchanges.md), as well as the [trading with leverage](docs/leverage.md) documentation before diving in.
+在深入了解之前，请务必阅读[交易所特定说明](docs/exchanges.md)以及[杠杆交易](docs/leverage.md)文档。
 
-### Community tested
+### 社区测试
 
-Exchanges confirmed working by the community:
+经社区确认可以工作的交易所：
 
 - [X] [Bitvavo](https://bitvavo.com/)
 - [X] [Kucoin](https://www.kucoin.com/)
 
-## Documentation
+## 文档
 
-We invite you to read the bot documentation to ensure you understand how the bot is working.
+我们邀请您阅读机器人文档，以确保您了解机器人的工作原理。
 
-Please find the complete documentation on the [freqtrade website](https://www.freqtrade.io).
+请在[freqtrade 网站](https://www.freqtrade.io)上查看完整文档。
 
-## Features
+## 功能特性
 
-- [x] **Based on Python 3.11+**: For botting on any operating system - Windows, macOS and Linux.
-- [x] **Persistence**: Persistence is achieved through sqlite.
-- [x] **Dry-run**: Run the bot without paying money.
-- [x] **Backtesting**: Run a simulation of your buy/sell strategy.
-- [x] **Strategy Optimization by machine learning**: Use machine learning to optimize your buy/sell strategy parameters with real exchange data.
-- [X] **Adaptive prediction modeling**: Build a smart strategy with FreqAI that self-trains to the market via adaptive machine learning methods. [Learn more](https://www.freqtrade.io/en/stable/freqai/)
-- [x] **Whitelist crypto-currencies**: Select which crypto-currency you want to trade or use dynamic whitelists.
-- [x] **Blacklist crypto-currencies**: Select which crypto-currency you want to avoid.
-- [x] **Builtin WebUI**: Builtin web UI to manage your bot.
-- [x] **Manageable via Telegram**: Manage the bot with Telegram.
-- [x] **Display profit/loss in fiat**: Display your profit/loss in fiat currency.
-- [x] **Performance status report**: Provide a performance status of your current trades.
+- [x] **基于 Python 3.11+**：可在任何操作系统上运行机器人 - Windows、macOS 和 Linux。
+- [x] **持久化**：通过 sqlite 实现持久化。
+- [x] **干跑**：在不花费真金白银的情况下运行机器人。
+- [x] **回测**：模拟您的买卖策略。
+- [x] **通过机器学习进行策略优化**：使用机器学习和真实交易所数据优化您的买卖策略参数。
+- [X] **自适应预测建模**：使用 FreqAI 构建智能策略，通过自适应机器学习方法自主训练适应市场。[了解更多](https://www.freqtrade.io/en/stable/freqai/)
+- [x] **加密货币白名单**：选择您想要交易的加密货币或使用动态白名单。
+- [x] **加密货币黑名单**：选择您想要避免的加密货币。
+- [x] **内置 WebUI**：内置 web UI 来管理您的机器人。
+- [x] **通过 Telegram 管理**：通过 Telegram 管理机器人。
+- [x] **以法币显示盈亏**：以法币显示您的盈利/亏损。
+- [x] **性能状态报告**：提供当前交易的性能状态。
 
-## Quick start
+## 快速开始
 
-Please refer to the [Docker Quickstart documentation](https://www.freqtrade.io/en/stable/docker_quickstart/) on how to get started quickly.
+请参考[Docker 快速开始文档](https://www.freqtrade.io/en/stable/docker_quickstart/)了解如何快速开始。
 
-For further (native) installation methods, please refer to the [Installation documentation page](https://www.freqtrade.io/en/stable/installation/).
+有关进一步的（原生）安装方法，请参考[安装文档页面](https://www.freqtrade.io/en/stable/installation/)。
 
-## Basic Usage
+## 基本用法
 
-### Bot commands
+### 机器人命令
 
 ```
-usage: freqtrade [-h] [-V]
+用法: freqtrade [-h] [-V]
                  {trade,create-userdir,new-config,show-config,new-strategy,download-data,convert-data,convert-trade-data,trades-to-ohlcv,list-data,backtesting,backtesting-show,backtesting-analysis,edge,hyperopt,hyperopt-list,hyperopt-show,list-exchanges,list-markets,list-pairs,list-strategies,list-hyperoptloss,list-freqaimodels,list-timeframes,show-trades,test-pairlist,convert-db,install-ui,plot-dataframe,plot-profit,webserver,strategy-updater,lookahead-analysis,recursive-analysis}
                  ...
 
-Free, open source crypto trading bot
+免费、开源的加密货币交易机器人
 
-positional arguments:
+位置参数:
   {trade,create-userdir,new-config,show-config,new-strategy,download-data,convert-data,convert-trade-data,trades-to-ohlcv,list-data,backtesting,backtesting-show,backtesting-analysis,edge,hyperopt,hyperopt-list,hyperopt-show,list-exchanges,list-markets,list-pairs,list-strategies,list-hyperoptloss,list-freqaimodels,list-timeframes,show-trades,test-pairlist,convert-db,install-ui,plot-dataframe,plot-profit,webserver,strategy-updater,lookahead-analysis,recursive-analysis}
-    trade               Trade module.
-    create-userdir      Create user-data directory.
-    new-config          Create new config
-    show-config         Show resolved config
-    new-strategy        Create new strategy
-    download-data       Download backtesting data.
-    convert-data        Convert candle (OHLCV) data from one format to
-                        another.
-    convert-trade-data  Convert trade data from one format to another.
-    trades-to-ohlcv     Convert trade data to OHLCV data.
-    list-data           List downloaded data.
-    backtesting         Backtesting module.
-    backtesting-show    Show past Backtest results
+    trade               交易模块。
+    create-userdir      创建用户数据目录。
+    new-config          创建新配置
+    show-config         显示已解析的配置
+    new-strategy        创建新策略
+    download-data       下载回测数据。
+    convert-data        将K线（OHLCV）数据从一种格式转换为另一种格式。
+    convert-trade-data  将交易数据从一种格式转换为另一种格式。
+    trades-to-ohlcv     将交易数据转换为OHLCV数据。
+    list-data           列出已下载的数据。
+    backtesting         回测模块。
+    backtesting-show    显示过去的回测结果
     backtesting-analysis
-                        Backtest Analysis module.
-    hyperopt            Hyperopt module.
-    hyperopt-list       List Hyperopt results
-    hyperopt-show       Show details of Hyperopt results
-    list-exchanges      Print available exchanges.
-    list-markets        Print markets on exchange.
-    list-pairs          Print pairs on exchange.
-    list-strategies     Print available strategies.
-    list-hyperoptloss   Print available hyperopt loss functions.
-    list-freqaimodels   Print available freqAI models.
-    list-timeframes     Print available timeframes for the exchange.
-    show-trades         Show trades.
-    test-pairlist       Test your pairlist configuration.
-    convert-db          Migrate database to different system
-    install-ui          Install FreqUI
-    plot-dataframe      Plot candles with indicators.
-    plot-profit         Generate plot showing profits.
-    webserver           Webserver module.
-    strategy-updater    updates outdated strategy files to the current version
-    lookahead-analysis  Check for potential look ahead bias.
-    recursive-analysis  Check for potential recursive formula issue.
+                        回测分析模块。
+    hyperopt            超参数优化模块。
+    hyperopt-list       列出超参数优化结果
+    hyperopt-show       显示超参数优化结果详情
+    list-exchanges      打印可用的交易所。
+    list-markets        打印交易所上的市场。
+    list-pairs          打印交易所上的交易对。
+    list-strategies     打印可用的策略。
+    list-hyperoptloss   打印可用的超参数优化损失函数。
+    list-freqaimodels   打印可用的freqAI模型。
+    list-timeframes     打印交易所的可用时间周期。
+    show-trades         显示交易。
+    test-pairlist       测试您的交易对列表配置。
+    convert-db          将数据库迁移到不同系统
+    install-ui          安装FreqUI
+    plot-dataframe      绘制带指标的K线图。
+    plot-profit         生成显示利润的图表。
+    webserver           Web服务器模块。
+    strategy-updater    将过时的策略文件更新到当前版本
+    lookahead-analysis  检查潜在的前瞻偏差。
+    recursive-analysis  检查潜在的递归公式问题。
 
-options:
-  -h, --help            show this help message and exit
-  -V, --version         show program's version number and exit
+选项:
+  -h, --help            显示此帮助信息并退出
+  -V, --version         显示程序版本号并退出
 ```
 
-### Telegram RPC commands
+### Telegram RPC 命令
 
-Telegram is not mandatory. However, this is a great way to control your bot. More details and the full command list on the [documentation](https://www.freqtrade.io/en/latest/telegram-usage/)
+Telegram 不是必需的。但是，这是控制您的机器人的好方法。更多详细信息和完整命令列表请参见[文档](https://www.freqtrade.io/en/latest/telegram-usage/)
 
-- `/start`: Starts the trader.
-- `/stop`: Stops the trader.
-- `/stopentry`: Stop entering new trades.
-- `/status <trade_id>|[table]`: Lists all or specific open trades.
-- `/profit [<n>]`: Lists cumulative profit from all finished trades, over the last n days.
-- `/profit_long [<n>]`: Lists cumulative profit from all finished long trades, over the last n days.
-- `/profit_short [<n>]`: Lists cumulative profit from all finished short trades, over the last n days.
-- `/forceexit <trade_id>|all`: Instantly exits the given trade (Ignoring `minimum_roi`).
-- `/fx <trade_id>|all`: Alias to `/forceexit`
-- `/performance`: Show performance of each finished trade grouped by pair
-- `/balance`: Show account balance per currency.
-- `/daily <n>`: Shows profit or loss per day, over the last n days.
-- `/help`: Show help message.
-- `/version`: Show version.
+- `/start`: 启动交易者。
+- `/stop`: 停止交易者。
+- `/stopentry`: 停止进入新交易。
+- `/status <trade_id>|[table]`: 列出所有或特定的未平仓交易。
+- `/profit [<n>]`: 列出过去n天内所有已完成交易的累计利润。
+- `/profit_long [<n>]`: 列出过去n天内所有已完成多头交易的累计利润。
+- `/profit_short [<n>]`: 列出过去n天内所有已完成空头交易的累计利润。
+- `/forceexit <trade_id>|all`: 立即退出指定交易（忽略`minimum_roi`）。
+- `/fx <trade_id>|all`: `/forceexit`的别名
+- `/performance`: 显示按交易对分组的每个已完成交易的表现
+- `/balance`: 显示每种货币的账户余额。
+- `/daily <n>`: 显示过去n天内每日的盈利或亏损。
+- `/help`: 显示帮助信息。
+- `/version`: 显示版本。
 
 
-## Development branches
+## 支持
 
-The project is currently setup in two main branches:
+### 帮助 / Discord
 
-- `develop` - This branch has often new features, but might also contain breaking changes. We try hard to keep this branch as stable as possible.
-- `stable` - This branch contains the latest stable release. This branch is generally well tested.
-- `feat/*` - These are feature branches, which are being worked on heavily. Please don't use these unless you want to test a specific feature.
+对于文档未涵盖的任何问题或有关机器人的更多信息，或者只是与志同道合的人交流，我们鼓励您加入 Freqtrade [discord 服务器](https://discord.gg/p7nuUNVfP7)。
 
-## Support
+### [错误 / 问题](https://github.com/freqtrade/freqtrade/issues?q=is%3Aissue)
 
-### Help / Discord
+如果您在机器人中发现错误，请先[搜索问题跟踪器](https://github.com/freqtrade/freqtrade/issues?q=is%3Aissue)。如果尚未报告，请[创建新问题](https://github.com/freqtrade/freqtrade/issues/new/choose)并确保您遵循模板指南，以便团队能够尽快为您提供帮助。
 
-For any questions not covered by the documentation or for further information about the bot, or to simply engage with like-minded individuals, we encourage you to join the Freqtrade [discord server](https://discord.gg/p7nuUNVfP7).
+对于创建的每个[问题](https://github.com/freqtrade/freqtrade/issues/new/choose)，请跟进并在达到平衡点时标记满意度或提醒关闭问题。
 
-### [Bugs / Issues](https://github.com/freqtrade/freqtrade/issues?q=is%3Aissue)
+--维护 github 的[社区政策](https://docs.github.com/en/site-policy/github-terms/github-community-code-of-conduct)--
 
-If you discover a bug in the bot, please
-[search the issue tracker](https://github.com/freqtrade/freqtrade/issues?q=is%3Aissue)
-first. If it hasn't been reported, please
-[create a new issue](https://github.com/freqtrade/freqtrade/issues/new/choose) and
-ensure you follow the template guide so that the team can assist you as
-quickly as possible.
+### [功能请求](https://github.com/freqtrade/freqtrade/labels/enhancement)
 
-For every [issue](https://github.com/freqtrade/freqtrade/issues/new/choose) created, kindly follow up and mark satisfaction or reminder to close issue when equilibrium ground is reached.
+您有改进机器人的好主意想要分享吗？请先搜索此功能是否[已经讨论过](https://github.com/freqtrade/freqtrade/labels/enhancement)。如果尚未请求，请[创建新请求](https://github.com/freqtrade/freqtrade/issues/new/choose)并确保您遵循模板指南，以免在错误报告中丢失。
 
---Maintain github's [community policy](https://docs.github.com/en/site-policy/github-terms/github-community-code-of-conduct)--
+### [拉取请求](https://github.com/freqtrade/freqtrade/pulls)
 
-### [Feature Requests](https://github.com/freqtrade/freqtrade/labels/enhancement)
+觉得机器人缺少某个功能？我们欢迎您的拉取请求！
 
-Have you a great idea to improve the bot you want to share? Please,
-first search if this feature was not [already discussed](https://github.com/freqtrade/freqtrade/labels/enhancement).
-If it hasn't been requested, please
-[create a new request](https://github.com/freqtrade/freqtrade/issues/new/choose)
-and ensure you follow the template guide so that it does not get lost
-in the bug reports.
+请阅读[贡献文档](https://github.com/freqtrade/freqtrade/blob/develop/CONTRIBUTING.md)以在发送拉取请求之前了解要求。
 
-### [Pull Requests](https://github.com/freqtrade/freqtrade/pulls)
+贡献不一定需要编程 - 也许可以从改进文档开始？
+标记为[好的第一个问题](https://github.com/freqtrade/freqtrade/labels/good%20first%20issue)的问题可以是很好的第一次贡献，并将帮助您熟悉代码库。
 
-Feel like the bot is missing a feature? We welcome your pull requests!
+__注意__在开始任何主要的新功能工作之前，_请打开一个描述您计划做什么的问题_或在[discord](https://discord.gg/p7nuUNVfP7)上与我们交谈（请为此使用 #dev 频道）。这将确保相关方可以就该功能提供有价值的反馈，并让其他人知道您正在处理它。
 
-Please read the
-[Contributing document](https://github.com/freqtrade/freqtrade/blob/develop/CONTRIBUTING.md)
-to understand the requirements before sending your pull-requests.
+__重要：__始终针对`develop`分支创建您的 PR，而不是`stable`。
 
-Coding is not a necessity to contribute - maybe start with improving the documentation?
-Issues labeled [good first issue](https://github.com/freqtrade/freqtrade/labels/good%20first%20issue) can be good first contributions, and will help get you familiar with the codebase.
+## 要求
 
-**Note** before starting any major new feature work, *please open an issue describing what you are planning to do* or talk to us on [discord](https://discord.gg/p7nuUNVfP7) (please use the #dev channel for this). This will ensure that interested parties can give valuable feedback on the feature, and let others know that you are working on it.
+### 时钟需要保持最新
 
-**Important:** Always create your PR against the `develop` branch, not `stable`.
+时钟必须准确，经常与 NTP 服务器同步，以避免与交易所通信时出现问题。
 
-## Requirements
+### 最低硬件要求
 
-### Up-to-date clock
+要运行此机器人，我们建议您使用最低配置的云实例：
 
-The clock must be accurate, synchronized to a NTP server very frequently to avoid problems with communication to the exchanges.
+- 最低（建议）系统要求：2GB RAM，1GB 磁盘空间，2vCPU
 
-### Minimum hardware required
-
-To run this bot we recommend you a cloud instance with a minimum of:
-
-- Minimal (advised) system requirements: 2GB RAM, 1GB disk space, 2vCPU
-
-### Software requirements
+### 软件要求
 
 - [Python >= 3.11](http://docs.python-guide.org/en/latest/starting/installation/)
 - [pip](https://pip.pypa.io/en/stable/installing/)
 - [git](https://git-scm.com/book/en/v2/Getting-Started-Installing-Git)
 - [TA-Lib](https://ta-lib.github.io/ta-lib-python/)
-- [virtualenv](https://virtualenv.pypa.io/en/stable/installation.html) (Recommended)
-- [Docker](https://www.docker.com/products/docker) (Recommended)
+- [virtualenv](https://virtualenv.pypa.io/en/stable/installation.html) (推荐)
+- [Docker](https://www.docker.com/products/docker) (推荐)
