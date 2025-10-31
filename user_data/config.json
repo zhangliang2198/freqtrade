@@ -7,6 +7,6 @@
         "./pairlist_short.json",
         "./blacklist.json",
         "./public.json",
-        "./private.json"
+        "./private.copy.json"
     ]
 }
