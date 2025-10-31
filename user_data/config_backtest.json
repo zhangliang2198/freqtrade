@@ -6,6 +6,8 @@
     "stake_currency": "USDT",
     "stake_amount": "unlimited",
     "dry_run": true,
+    "strategy_thread_workers": 32,
+    "strategy_threading": true,
     "dry_run_wallet": 2400,
     "trading_mode": "futures",
     "margin_mode": "cross",
