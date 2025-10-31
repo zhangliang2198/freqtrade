@@ -7,6 +7,11 @@
 ## v1.0.1
 
 1. 将原串行分析交易对变成并行提升每轮K线处理速度；
+   - 配置项:
+   ```json  
+   "strategy_threading": true,    
+   "strategy_thread_workers": 32,
+   ```
 2. 添加几个策略，供参考，策略均在实盘运行；
 3. 文档全部中文化，参考 `/docs` 目录中的 `xx.zh.md` 文档，建议通读一遍；
 4. 增加mysql支持，请执行；`pip install pymysql`(额外包需求已放在 `requirements-add.txt` 中)，在配置中设置：`"db_url": "mysql+pymysql://<user>:<password>@localhost:3306/<dbname>"`；
