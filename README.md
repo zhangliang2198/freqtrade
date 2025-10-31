@@ -2,7 +2,7 @@
 
 交流讨论，版本发行说明，更多量化实盘技巧和策略，请入qq群：
 
-![alt text](小森林量化logo.png)
+<img src="小森林量化logo.png" alt="小森林量化QQ群" width="300">
 
 # 下面是原版说明：
 
