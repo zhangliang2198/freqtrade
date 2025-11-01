@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, select
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.exc import SQLAlchemyError, PendingRollbackError
+from sqlalchemy.exc import SQLAlchemyError, PendingRollbackError, OperationalError
 
 from freqtrade.constants import DATETIME_PRINT_FORMAT
 from freqtrade.persistence.base import ModelBase, SessionType
@@ -218,9 +218,38 @@ class CustomDataWrapper:
                         cd_type=value_type,
                         updated_at=now,
                     )
-                    _CustomData.session.execute(stmt)
-                    _CustomData.session.commit()
-                    return
+                    # Retry on transient write conflicts (e.g., 1020 Record has changed)
+                    max_attempts = 5
+                    delay = 0.05
+                    for attempt in range(max_attempts):
+                        try:
+                            _CustomData.session.execute(stmt)
+                            _CustomData.session.commit()
+                            return
+                        except OperationalError as oe:  # type: ignore[assignment]
+                            # Inspect underlying DBAPI error code where available
+                            orig = getattr(oe, "orig", None)
+                            errcode = None
+                            if orig is not None and hasattr(orig, "args") and orig.args:
+                                errcode = orig.args[0]
+
+                            # MySQL/MariaDB transient conflicts / deadlocks / lock wait timeouts
+                            conflict = (
+                                errcode in (1020, 1205, 1213)
+                                or (orig is not None and "Record has changed since last read" in str(orig))
+                            )
+                            if conflict and attempt < max_attempts - 1:
+                                _CustomData.session.rollback()
+                                # Exponential backoff with cap
+                                import time
+
+                                time.sleep(delay)
+                                delay = min(delay * 2, 0.5)
+                                continue
+                            _CustomData.session.rollback()
+                            # Unexpected / unrecoverable error -> bubble up to outer handler
+                            raise
+                    # If all retries failed, fall through to non-atomic fallback path below
 
                 # Fallback for other dialects (e.g., sqlite): emulate upsert via get+update/insert
                 custom_data = CustomDataWrapper.get_custom_data(trade_id=trade_id, key=key)

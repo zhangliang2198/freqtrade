@@ -46,5 +46,19 @@
       "use_order_book": true,
       "order_book_top": 1,
       "price_last_balance": 0
+    },
+    "strategy_snapshot": {
+      "enabled": true,
+      "enable_detailed_logs": true,
+      "enable_strategy_logs": true,
+      "snapshot_frequency": 10
+    },
+    "strategy_account": {
+      "enabled": true,
+      "long_initial_balance": 2000,
+      "short_initial_balance": 2000,
+      "use_ratio": true,
+      "long_ratio": 0,
+      "short_ratio": 1
     }
   }
