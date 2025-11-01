@@ -18,7 +18,6 @@ fork自源仓库，每月同步一次源框架稳定代码。不断优化和添�
 
 **文档**：
 - 使用文档：[`docs/BaseStrategyWithSnapshot.zh.md`](docs/BaseStrategyWithSnapshot.zh.md)
-- 代码审查：[`docs/BaseStrategyWithSnapshot-CodeReview.zh.md`](docs/BaseStrategyWithSnapshot-CodeReview.zh.md)
 
 ## v1.0.1
 
