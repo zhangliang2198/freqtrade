@@ -19,6 +19,7 @@ from freqtrade.persistence.custom_data import _CustomData
 from freqtrade.persistence.key_value_store import _KeyValueStoreModel
 from freqtrade.persistence.migrations import check_migrate
 from freqtrade.persistence.pairlock import PairLock
+from freqtrade.persistence.strategy_snapshot import StrategySnapshot
 from freqtrade.persistence.trade_model import Order, Trade
 
 
@@ -91,6 +92,7 @@ def init_db(db_url: str) -> None:
     _CustomData.session = scoped_session(
         sessionmaker(bind=engine, autoflush=True), scopefunc=get_request_or_thread_id
     )
+    StrategySnapshot.session = Trade.session
 
     previous_tables = inspect(engine).get_table_names()
     ModelBase.metadata.create_all(engine)

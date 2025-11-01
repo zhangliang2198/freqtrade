@@ -6,9 +6,19 @@ fork自源仓库，每月同步一次源框架稳定代码。不断优化和添�
 
 <img src="小森林量化logo.png" alt="小森林量化QQ群" width="300">
 
-## v1.0.2 对接 deepseek，开发AI相关功能
+## v1.0.2 新增策略资金快照和账户分离功能
 
-进行中...
+添加 `BaseStrategyWithSnapshot` 策略基类，提供**资金快照记录**、**Long/Short 账户分离**、**严格资金限制**等功能。
+
+**新增文件**：
+- 核心：[`freqtrade/strategy/BaseStrategyWithSnapshot.py`](freqtrade/strategy/BaseStrategyWithSnapshot.py) - 策略基类
+- 数据库：[`freqtrade/persistence/strategy_snapshot.py`](freqtrade/persistence/strategy_snapshot.py) - 快照模型
+- 示例：[`user_data/strategies/ExampleStrategyWithAccountLimit.py`](user_data/strategies/ExampleStrategyWithAccountLimit.py) - 使用示例
+- 配置：[`config_examples/strategy_account_config.example.json`](config_examples/strategy_account_config.example.json) - 配置示例
+
+**文档**：
+- 使用文档：[`docs/BaseStrategyWithSnapshot.zh.md`](docs/BaseStrategyWithSnapshot.zh.md)
+- 代码审查：[`docs/BaseStrategyWithSnapshot-CodeReview.zh.md`](docs/BaseStrategyWithSnapshot-CodeReview.zh.md)
 
 ## v1.0.1
 

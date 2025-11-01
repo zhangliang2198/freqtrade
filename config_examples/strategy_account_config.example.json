@@ -1,0 +1,73 @@
+{
+    "// 策略账户配置说明": "此配置用于分离 long/short 账户资金，每个账户独立管理资金",
+
+    "strategy_account": {
+        "// 是否启用账户分离": "true=启用并严格限制, false=禁用（传统模式）",
+        "enabled": true,
+
+        "// Long账户初始资金": "做多账户的初始资金（USDT）",
+        "long_initial_balance": 2000,
+
+        "// Short账户初始资金": "做空账户的初始资金（USDT）",
+        "short_initial_balance": 2000,
+
+        "// 或者使用比例分配": "如果设置了比例，则忽略上面的具体金额",
+        "use_ratio": false,
+        "long_ratio": 0.5,
+        "short_ratio": 0.5
+    },
+
+    "strategy_snapshot": {
+        "// 是否启用资金快照": "记录每个bot loop的资金状态到数据库",
+        "enabled": true,
+
+        "// 是否输出详细日志": "在控制台输出详细的资金统计日志",
+        "enable_detailed_logs": true,
+
+        "// 是否输出策略特定日志": "子类的 log_strategy_specific_info 是否执行",
+        "enable_strategy_logs": true,
+
+        "// 快照保存频率": "每N个bot loop保存一次快照（1=每次都保存）",
+        "snapshot_frequency": 1
+    },
+
+    "// 完整示例": "----------------------------------------",
+
+    "// 示例1: 各2000 USDT，严格分离": {
+        "strategy_account": {
+            "enabled": true,
+            "long_initial_balance": 2000,
+            "short_initial_balance": 2000,
+            "strict_mode": true
+        },
+        "strategy_snapshot": {
+            "enabled": true,
+            "enable_detailed_logs": true,
+            "enable_strategy_logs": true
+        }
+    },
+
+    "// 示例2: 按比例分配，软限制": {
+        "strategy_account": {
+            "enabled": true,
+            "use_ratio": true,
+            "long_ratio": 0.3,
+            "short_ratio": 0.7
+        },
+        "strategy_snapshot": {
+            "enabled": true,
+            "enable_detailed_logs": false,
+            "enable_strategy_logs": true
+        }
+    },
+
+    "// 示例3: 不分离账户（传统模式）": {
+        "strategy_account": {
+            "enabled": false
+        },
+        "strategy_snapshot": {
+            "enabled": true,
+            "enable_detailed_logs": true
+        }
+    }
+}
