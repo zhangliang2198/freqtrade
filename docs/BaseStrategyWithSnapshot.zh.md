@@ -406,3 +406,7 @@ else:
 ### 资产报告
 
 ![alt text](image-2.png)
+
+## 记录表
+
+![alt text](image-3.png)
