@@ -252,11 +252,17 @@ class Telegram(RPCHandler):
             builder.proxy(proxy_url)
             builder.get_updates_proxy(proxy_url)
 
-        # 配置连接超时和读取超时
+        # 配置常规请求的超时设置
         builder.connect_timeout(30.0)
         builder.read_timeout(30.0)
         builder.write_timeout(30.0)
         builder.pool_timeout(30.0)
+
+        # 配置 get_updates 请求的超时设置(用于轮询)
+        builder.get_updates_connect_timeout(30.0)
+        builder.get_updates_read_timeout(30.0)
+        builder.get_updates_write_timeout(30.0)
+        builder.get_updates_pool_timeout(30.0)
 
         return builder.build()
 
@@ -374,13 +380,11 @@ class Telegram(RPCHandler):
                 await asyncio.sleep(2)
         if self._app.updater:
             # 增加超时时间和重试次数以应对网络不稳定
+            # 注意: read_timeout, write_timeout, connect_timeout, pool_timeout
+            # 已在 _init_telegram_app() 中通过 ApplicationBuilder 配置
             await self._app.updater.start_polling(
                 bootstrap_retries=20,  # 增加重试次数
                 timeout=60,  # 增加超时时间到60秒
-                read_timeout=60,  # 读取超时
-                write_timeout=60,  # 写入超时
-                connect_timeout=60,  # 连接超时
-                pool_timeout=60,  # 连接池超时
                 drop_pending_updates=True,
             )
             logger.info("Telegram bot 轮询已启动")
