@@ -7,6 +7,7 @@ import traceback
 from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from math import isclose
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from time import sleep
 from typing import Any
@@ -104,7 +105,7 @@ class FreqtradeBot(LoggingMixin):
         # Re-validate exchange compatibility
         self.exchange.validate_config(self.config)
 
-        init_db(self.config["db_url"])
+        init_db(self.config["db_url"], self.config)
 
         self.wallets = Wallets(self.config, self.exchange)
 
@@ -713,23 +714,70 @@ class FreqtradeBot(LoggingMixin):
     #
     # Modify positions / DCA logic and methods
     #
+    def _process_single_trade_adjustment(self, trade: Trade) -> None:
+        """
+        Process position adjustment for a single trade.
+        Private helper method for process_open_trade_positions.
+        """
+        try:
+            self.check_and_call_adjust_trade_position(trade)
+        except DependencyException as exception:
+            logger.warning(
+                f"Unable to adjust position of trade for {trade.pair}: {exception}"
+            )
+
     def process_open_trade_positions(self):
         """
         Tries to execute additional buy or sell orders for open trades (positions)
         """
-        # Walk through each pair and check if it needs changes
-        for trade in Trade.get_open_trades():
-            # If there is any open orders, wait for them to finish.
-            # TODO Remove to allow mul open orders
-            if trade.has_open_position or trade.has_open_orders:
-                # Do a wallets update (will be ratelimited to once per hour)
-                self.wallets.update(False)
-                try:
-                    self.check_and_call_adjust_trade_position(trade)
-                except DependencyException as exception:
-                    logger.warning(
-                        f"Unable to adjust position of trade for {trade.pair}: {exception}"
-                    )
+        trades = Trade.get_open_trades()
+        if not trades:
+            return
+
+        # Get threading configuration
+        max_workers = self.config.get("strategy_thread_workers")
+        enable_threading = self.config.get("strategy_threading", True)
+        if not isinstance(max_workers, int) or max_workers <= 0:
+            max_workers = min(len(trades), 32)
+
+        # Filter trades that need processing
+        trades_to_process = [
+            trade for trade in trades
+            if trade.has_open_position or trade.has_open_orders
+        ]
+
+        if not trades_to_process:
+            return
+
+        # Do a wallets update (will be ratelimited to once per hour)
+        self.wallets.update(False)
+
+        # Execute sequentially or in parallel based on configuration
+        if max_workers <= 1 or not enable_threading or len(trades_to_process) == 1:
+            # Sequential processing
+            for trade in trades_to_process:
+                self._process_single_trade_adjustment(trade)
+        else:
+            # Parallel processing
+            # WARNING: Parallel processing may have concurrency issues with:
+            # - Database operations (SQLAlchemy sessions)
+            # - Order creation (exchange API)
+            # - Wallet balance calculations
+            # Use with caution and monitor for issues.
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._process_single_trade_adjustment, trade): trade
+                    for trade in trades_to_process
+                }
+                for future in as_completed(futures):
+                    trade = futures[future]
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        logger.error(
+                            f"Error processing position adjustment for {trade.pair}: {exc}",
+                            exc_info=True
+                        )
 
     def check_and_call_adjust_trade_position(self, trade: Trade):
         """
@@ -1275,45 +1323,93 @@ class FreqtradeBot(LoggingMixin):
     # SELL / exit positions / close trades logic and methods
     #
 
+    def _process_single_trade_exit(self, trade: Trade) -> bool:
+        """
+        Process exit check for a single trade.
+        Private helper method for exit_positions.
+        Returns True if trade was closed, False otherwise.
+        """
+        if (
+            not trade.has_open_orders
+            and not trade.has_open_sl_orders
+            and trade.fee_open_currency is not None
+            and not self.wallets.check_exit_amount(trade)
+        ):
+            logger.warning(
+                f"Not enough {trade.safe_base_currency} in wallet to exit {trade}. "
+                "Trying to recover."
+            )
+            if self.handle_onexchange_order(trade):
+                # Trade was deleted. Don't continue.
+                return False
+
+        try:
+            try:
+                if self.strategy.order_types.get(
+                    "stoploss_on_exchange"
+                ) and self.handle_stoploss_on_exchange(trade):
+                    Trade.commit()
+                    return True
+
+            except InvalidOrderException as exception:
+                logger.warning(
+                    f"Unable to handle stoploss on exchange for {trade.pair}: {exception}"
+                )
+            # Check if we can exit our current position for this trade
+            if trade.has_open_position and trade.is_open and self.handle_trade(trade):
+                return True
+
+        except DependencyException as exception:
+            logger.warning(f"Unable to exit trade {trade.pair}: {exception}")
+
+        return False
+
     def exit_positions(self, trades: list[Trade]) -> int:
         """
         Tries to execute exit orders for open trades (positions)
         """
+        if not trades:
+            return 0
+
+        # Get threading configuration
+        max_workers = self.config.get("strategy_thread_workers")
+        enable_threading = self.config.get("strategy_threading", True)
+        if not isinstance(max_workers, int) or max_workers <= 0:
+            max_workers = min(len(trades), 32)
+
         trades_closed = 0
-        for trade in trades:
-            if (
-                not trade.has_open_orders
-                and not trade.has_open_sl_orders
-                and trade.fee_open_currency is not None
-                and not self.wallets.check_exit_amount(trade)
-            ):
-                logger.warning(
-                    f"Not enough {trade.safe_base_currency} in wallet to exit {trade}. "
-                    "Trying to recover."
-                )
-                if self.handle_onexchange_order(trade):
-                    # Trade was deleted. Don't continue.
-                    continue
+        trades_closed_lock = Lock()
 
-            try:
-                try:
-                    if self.strategy.order_types.get(
-                        "stoploss_on_exchange"
-                    ) and self.handle_stoploss_on_exchange(trade):
-                        trades_closed += 1
-                        Trade.commit()
-                        continue
-
-                except InvalidOrderException as exception:
-                    logger.warning(
-                        f"Unable to handle stoploss on exchange for {trade.pair}: {exception}"
-                    )
-                # Check if we can exit our current position for this trade
-                if trade.has_open_position and trade.is_open and self.handle_trade(trade):
+        # Execute sequentially or in parallel based on configuration
+        if max_workers <= 1 or not enable_threading or len(trades) == 1:
+            # Sequential processing (recommended for safety)
+            for trade in trades:
+                if self._process_single_trade_exit(trade):
                     trades_closed += 1
-
-            except DependencyException as exception:
-                logger.warning(f"Unable to exit trade {trade.pair}: {exception}")
+        else:
+            # Parallel processing
+            # WARNING: Parallel processing may have concurrency issues with:
+            # - Database operations (SQLAlchemy sessions)
+            # - Order creation (exchange API)
+            # - Wallet balance calculations
+            # Use with caution and monitor for issues.
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._process_single_trade_exit, trade): trade
+                    for trade in trades
+                }
+                for future in as_completed(futures):
+                    trade = futures[future]
+                    try:
+                        was_closed = future.result()
+                        if was_closed:
+                            with trades_closed_lock:
+                                trades_closed += 1
+                    except Exception as exc:
+                        logger.error(
+                            f"Error processing exit for {trade.pair}: {exc}",
+                            exc_info=True
+                        )
 
         # Updating wallets if any trade occurred
         if trades_closed:

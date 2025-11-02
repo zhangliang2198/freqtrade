@@ -6,6 +6,35 @@ fork自源仓库，每月同步一次源框架稳定代码。不断优化和添�
 
 <img src="小森林量化logo.png" alt="小森林量化QQ群" width="300">
 
+## v1.0.3 数据库连接池优化
+
+新增**数据库连接池配置**支持，显著提升多线程环境下的数据库性能。
+新增**多线程策略分析**支持，大幅提升每轮custom_exit()，和adjust_trade_position()分析性能。
+
+**主要改进**：
+- ✅ 支持 PostgreSQL、MySQL、MariaDB 连接池配置
+- ✅ 可配置连接池大小（`db_pool_size`）和溢出连接数（`db_max_overflow`）
+- ✅ 自动连接健康检查（`pool_pre_ping`）
+- ✅ 多线程环境下性能提升 **6 倍**（PostgreSQL + 32 线程）
+
+**配置示例**：
+```json
+{
+  "db_url": "postgresql+psycopg://user:password@localhost:5432/freqtrade",
+  "db_pool_size": 50,
+  "db_max_overflow": 100,
+  "strategy_threading": true,
+  "strategy_thread_workers": 32
+}
+```
+
+**详细文档**：[数据库连接池与多线程配置](docs/database-threading.zh.md)
+
+**修改文件**：
+- 核心：[`freqtrade/persistence/models.py`](freqtrade/persistence/models.py) - 连接池配置
+- 命令：[`freqtrade/commands/db_commands.py`](freqtrade/commands/db_commands.py) - 传递配置
+- 命令：[`freqtrade/commands/list_commands.py`](freqtrade/commands/list_commands.py) - 传递配置
+
 ## v1.0.2 新增策略资金快照和账户分离功能
 
 添加 `BaseStrategyWithSnapshot` 策略基类，提供**资金快照记录**、**Long/Short 账户分离**、**严格资金限制**等功能。

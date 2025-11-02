@@ -45,12 +45,13 @@ def get_request_or_thread_id() -> str | None:
 _SQL_DOCS_URL = "http://docs.sqlalchemy.org/en/latest/core/engines.html#database-urls"
 
 
-def init_db(db_url: str) -> None:
+def init_db(db_url: str, config: dict[str, Any] | None = None) -> None:
     """
     Initializes this module with the given config,
     registers all known command handlers
     and starts polling for message updates
     :param db_url: Database to use
+    :param config: Optional configuration dict for database pool settings
     :return: None
     """
     kwargs: dict[str, Any] = {}
@@ -71,6 +72,40 @@ def init_db(db_url: str) -> None:
             {
                 "connect_args": {"check_same_thread": False},
             }
+        )
+
+    # 为所有非 SQLite 数据库配置连接池（SQLite 使用 StaticPool）
+    # 支持：PostgreSQL、MySQL、MariaDB 等客户端-服务器数据库
+    if not db_url.startswith("sqlite"):
+        # 从配置获取连接池设置，或使用默认值
+        pool_size = 20  # 默认基础连接池大小
+        max_overflow = 40  # 默认溢出连接数
+
+        if config:
+            pool_size = config.get("db_pool_size", pool_size)
+            max_overflow = config.get("db_max_overflow", max_overflow)
+
+        kwargs.update(
+            {
+                "pool_size": pool_size,
+                "max_overflow": max_overflow,
+                "pool_pre_ping": True,  # 使用前验证连接是否有效
+            }
+        )
+
+        # 确定数据库类型用于日志记录
+        db_type = "未知数据库"
+        if db_url.startswith("postgresql"):
+            db_type = "PostgreSQL"
+        elif db_url.startswith("mysql"):
+            db_type = "MySQL"
+        elif db_url.startswith("mariadb"):
+            db_type = "MariaDB"
+
+        logger.info(
+            f"{db_type} 连接池已配置: "
+            f"pool_size={pool_size}, max_overflow={max_overflow}, "
+            f"total_max={pool_size + max_overflow}"
         )
 
     try:

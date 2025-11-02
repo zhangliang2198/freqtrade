@@ -369,7 +369,7 @@ def start_show_trades(args: dict[str, Any]) -> None:
         raise ConfigurationError("--db-url is required for this command.")
 
     logger.info(f'Using DB: "{parse_db_uri_for_logging(config["db_url"])}"')
-    init_db(config["db_url"])
+    init_db(config["db_url"], config)
     tfilter = []
 
     if config.get("trade_ids"):
