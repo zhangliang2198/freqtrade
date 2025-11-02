@@ -244,7 +244,21 @@ class Telegram(RPCHandler):
                 logger.info(f"using custom keyboard from config.json: {self._keyboard}")
 
     def _init_telegram_app(self):
-        return Application.builder().token(self._config["telegram"]["token"]).build()
+        builder = Application.builder().token(self._config["telegram"]["token"])
+
+        # 配置代理
+        if proxy_url := self._config["telegram"].get("proxy_url"):
+            logger.info(f"使用 Telegram 代理: {proxy_url}")
+            builder.proxy(proxy_url)
+            builder.get_updates_proxy(proxy_url)
+
+        # 配置连接超时和读取超时
+        builder.connect_timeout(30.0)
+        builder.read_timeout(30.0)
+        builder.write_timeout(30.0)
+        builder.pool_timeout(30.0)
+
+        return builder.build()
 
     def _init(self) -> None:
         """
@@ -351,22 +365,29 @@ class Telegram(RPCHandler):
                 break
             except Exception as ex:
                 logger.error(
-                    "Error starting Telegram bot (attempt %d/%d): %s", attempt + 1, retries, ex
+                    "启动 Telegram bot 时出错 (尝试 %d/%d): %s", attempt + 1, retries, ex
                 )
                 attempt += 1
                 if attempt == retries:
-                    logger.warning("Telegram init failed.")
+                    logger.warning("Telegram 初始化失败。")
                     return
                 await asyncio.sleep(2)
         if self._app.updater:
+            # 增加超时时间和重试次数以应对网络不稳定
             await self._app.updater.start_polling(
-                bootstrap_retries=10,
-                timeout=20,
+                bootstrap_retries=20,  # 增加重试次数
+                timeout=60,  # 增加超时时间到60秒
+                read_timeout=60,  # 读取超时
+                write_timeout=60,  # 写入超时
+                connect_timeout=60,  # 连接超时
+                pool_timeout=60,  # 连接池超时
                 drop_pending_updates=True,
             )
+            logger.info("Telegram bot 轮询已启动")
             while True:
                 await asyncio.sleep(10)
                 if not self._app.updater.running:
+                    logger.warning("Telegram updater 已停止运行")
                     break
 
     async def _cleanup_telegram(self) -> None:
@@ -2183,19 +2204,36 @@ class Telegram(RPCHandler):
                     message_thread_id=self._config["telegram"].get("topic_id"),
                 )
             except NetworkError as network_err:
-                # Sometimes the telegram server resets the current connection,
-                # if this is the case we send the message again.
+                # 有时 Telegram 服务器会重置当前连接,在这种情况下我们会重试发送消息
                 logger.warning(
-                    "Telegram NetworkError: %s! Trying one more time.", network_err.message
+                    "Telegram 网络错误: %s! 正在重试...", network_err.message
                 )
-                await self._app.bot.send_message(
-                    self._config["telegram"]["chat_id"],
-                    text=msg,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                    disable_notification=disable_notification,
-                    message_thread_id=self._config["telegram"].get("topic_id"),
-                )
+                # 增加重试次数和延迟
+                max_retries = 3
+                for retry in range(max_retries):
+                    try:
+                        await asyncio.sleep(2 * (retry + 1))  # 递增延迟
+                        await self._app.bot.send_message(
+                            self._config["telegram"]["chat_id"],
+                            text=msg,
+                            parse_mode=parse_mode,
+                            reply_markup=reply_markup,
+                            disable_notification=disable_notification,
+                            message_thread_id=self._config["telegram"].get("topic_id"),
+                        )
+                        logger.info("消息重试发送成功")
+                        break
+                    except NetworkError as retry_err:
+                        if retry == max_retries - 1:
+                            logger.error(
+                                "消息发送失败,已达到最大重试次数 (%d): %s",
+                                max_retries,
+                                retry_err.message
+                            )
+                            raise
+                        logger.warning(
+                            "重试 %d/%d 失败: %s", retry + 1, max_retries, retry_err.message
+                        )
         except TelegramError as telegram_err:
             logger.warning("TelegramError: %s! Giving up on that message.", telegram_err.message)
 
