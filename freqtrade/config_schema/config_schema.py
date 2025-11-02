@@ -933,6 +933,33 @@ CONF_SCHEMA = {
                     ),
                     "type": "object",
                 },
+                "http_pool": {
+                    "description": (
+                        "HTTP connection pool configuration for REST calls performed via ccxt."
+                    ),
+                    "type": "object",
+                    "properties": {
+                        "connections": {
+                            "description": "Base number of pooled HTTP connections.",
+                            "type": "integer",
+                            "minimum": 1,
+                        },
+                        "maxsize": {
+                            "description": (
+                                "Maximum number of connections including overflow capacity."
+                            ),
+                            "type": "integer",
+                            "minimum": 1,
+                        },
+                        "block": {
+                            "description": (
+                                "Block requests while the pool is exhausted instead of dropping."
+                            ),
+                            "type": "boolean",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
             },
             "required": ["name"],
         },

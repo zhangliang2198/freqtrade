@@ -187,12 +187,20 @@ class RPC:
         a remotely exposed function
         """
         # Fetch open trades
+        trades_needs_cleanup = False
         if trade_ids:
-            trades: Sequence[Trade] = Trade.get_trades(trade_filter=Trade.id.in_(trade_ids)).all()
+            result = Trade.get_trades(trade_filter=Trade.id.in_(trade_ids))
+            try:
+                trades = result.all()
+            finally:
+                Trade.session.remove()
         else:
             trades = Trade.get_open_trades()
+            trades_needs_cleanup = Trade.use_db
 
         if not trades:
+            if trades_needs_cleanup:
+                Trade.session.remove()
             raise RPCException("no active trade")
         else:
             results = []
@@ -285,6 +293,8 @@ class RPC:
                     )
                 )
                 results.append(trade_dict)
+            if trades_needs_cleanup:
+                Trade.session.remove()
             return results
 
     def _rpc_status_table(
@@ -397,7 +407,7 @@ class RPC:
         for day in range(0, timescale):
             profitday = start_date - time_offset(day)
             # Only query for necessary columns for performance reasons.
-            trades = Trade.session.execute(
+            stmt = (
                 select(Trade.close_profit_abs)
                 .filter(
                     Trade.is_open.is_(False),
@@ -405,7 +415,11 @@ class RPC:
                     Trade.close_date < (profitday + time_offset(1)),
                 )
                 .order_by(Trade.close_date)
-            ).all()
+            )
+            try:
+                trades = Trade.session.execute(stmt).all()
+            finally:
+                Trade.session.remove()
 
             curdayprofit = sum(
                 trade.close_profit_abs for trade in trades if trade.close_profit_abs is not None
@@ -445,26 +459,31 @@ class RPC:
     def _rpc_trade_history(self, limit: int, offset: int = 0, order_by_id: bool = False) -> dict:
         """Returns the X last trades"""
         order_by: Any = Trade.id if order_by_id else Trade.close_date.desc()
+        query = Trade.get_trades_query([Trade.is_open.is_(False)])
         if limit:
-            trades = Trade.session.scalars(
-                Trade.get_trades_query([Trade.is_open.is_(False)])
-                .order_by(order_by)
-                .limit(limit)
-                .offset(offset)
-            )
+            query = query.order_by(order_by).limit(limit).offset(offset)
         else:
-            trades = Trade.session.scalars(
-                Trade.get_trades_query([Trade.is_open.is_(False)]).order_by(Trade.close_date.desc())
-            )
+            query = query.order_by(Trade.close_date.desc())
 
-        output = [trade.to_json() for trade in trades]
-        total_trades = Trade.session.scalar(
-            select(func.count(Trade.id)).filter(Trade.is_open.is_(False))
-        )
+        trades_count = 0
+        output: list[dict] = []
+        try:
+            trades = Trade.session.scalars(query).all()
+            trades_count = len(trades)
+            output = [trade.to_json() for trade in trades]
+        finally:
+            Trade.session.remove()
+
+        try:
+            total_trades = Trade.session.scalar(
+                select(func.count(Trade.id)).filter(Trade.is_open.is_(False))
+            )
+        finally:
+            Trade.session.remove()
 
         return {
             "trades": output,
-            "trades_count": len(output),
+            "trades_count": trades_count,
             "offset": offset,
             "total_trades": total_trades,
         }
@@ -482,26 +501,30 @@ class RPC:
             else:
                 return "draws"
 
-        trades = Trade.get_trades([Trade.is_open.is_(False)], include_orders=False)
-        # Duration
-        dur: dict[str, list[float]] = {"wins": [], "draws": [], "losses": []}
-        # Exit reason
-        exit_reasons = {}
-        for trade in trades:
-            if trade.exit_reason not in exit_reasons:
-                exit_reasons[trade.exit_reason] = {"wins": 0, "losses": 0, "draws": 0}
-            exit_reasons[trade.exit_reason][trade_win_loss(trade)] += 1
+        result = Trade.get_trades([Trade.is_open.is_(False)])
+        try:
+            trades = result.all()
+            # Duration
+            dur: dict[str, list[float]] = {"wins": [], "draws": [], "losses": []}
+            # Exit reason
+            exit_reasons = {}
+            for trade in trades:
+                if trade.exit_reason not in exit_reasons:
+                    exit_reasons[trade.exit_reason] = {"wins": 0, "losses": 0, "draws": 0}
+                exit_reasons[trade.exit_reason][trade_win_loss(trade)] += 1
 
-            if trade.close_date is not None and trade.open_date is not None:
-                trade_dur = (trade.close_date - trade.open_date).total_seconds()
-                dur[trade_win_loss(trade)].append(trade_dur)
+                if trade.close_date is not None and trade.open_date is not None:
+                    trade_dur = (trade.close_date - trade.open_date).total_seconds()
+                    dur[trade_win_loss(trade)].append(trade_dur)
 
-        wins_dur = sum(dur["wins"]) / len(dur["wins"]) if len(dur["wins"]) > 0 else None
-        draws_dur = sum(dur["draws"]) / len(dur["draws"]) if len(dur["draws"]) > 0 else None
-        losses_dur = sum(dur["losses"]) / len(dur["losses"]) if len(dur["losses"]) > 0 else None
+            wins_dur = sum(dur["wins"]) / len(dur["wins"]) if len(dur["wins"]) > 0 else None
+            draws_dur = sum(dur["draws"]) / len(dur["draws"]) if len(dur["draws"]) > 0 else None
+            losses_dur = sum(dur["losses"]) / len(dur["losses"]) if len(dur["losses"]) > 0 else None
 
-        durations = {"wins": wins_dur, "draws": draws_dur, "losses": losses_dur}
-        return {"exit_reasons": exit_reasons, "durations": durations}
+            durations = {"wins": wins_dur, "draws": draws_dur, "losses": losses_dur}
+            return {"exit_reasons": exit_reasons, "durations": durations}
+        finally:
+            Trade.session.remove()
 
     def _collect_trade_statistics_data(
         self,
@@ -593,11 +616,16 @@ class RPC:
             dir_filter = Trade.is_short.is_(True)
             trade_filter = trade_filter & dir_filter
 
-        trades: Sequence[Trade] = Trade.session.scalars(
-            Trade.get_trades_query(trade_filter, include_orders=False).order_by(Trade.id)
-        ).all()
-
-        stats = self._collect_trade_statistics_data(trades, stake_currency, fiat_display_currency)
+        query = Trade.get_trades_query(trade_filter, include_orders=True).order_by(Trade.id)
+        trades: Sequence[Trade] = []
+        stats: dict[str, Any] = {}
+        try:
+            trades = Trade.session.scalars(query).all()
+            stats = self._collect_trade_statistics_data(
+                trades, stake_currency, fiat_display_currency
+            )
+        finally:
+            Trade.session.remove()
 
         profit_all_coin = stats["profit_all_coin"]
         profit_all_ratio = stats["profit_all_ratio"]
@@ -931,7 +959,11 @@ class RPC:
         Handler for reload_trade_from_exchange.
         Reloads a trade from it's orders, should manual interaction have happened.
         """
-        trade = Trade.get_trades(trade_filter=[Trade.id == trade_id]).first()
+        result = Trade.get_trades(trade_filter=[Trade.id == trade_id])
+        try:
+            trade = result.first()
+        finally:
+            Trade.session.remove()
         if not trade:
             raise RPCException(f"Could not find trade with id {trade_id}.")
 
@@ -1009,12 +1041,16 @@ class RPC:
                 return {"result": "Created exit orders for all open trades."}
 
             # Query for trade
-            trade = Trade.get_trades(
+            result = Trade.get_trades(
                 trade_filter=[
                     Trade.id == trade_id,
                     Trade.is_open.is_(True),
                 ]
-            ).first()
+            )
+            try:
+                trade = result.first()
+            finally:
+                Trade.session.remove()
             if not trade:
                 logger.warning("force_exit: Invalid argument received")
                 raise RPCException("invalid argument")
@@ -1065,9 +1101,11 @@ class RPC:
         # check if valid pair
 
         # check if pair already has an open pair
-        trade: Trade | None = Trade.get_trades(
-            [Trade.is_open.is_(True), Trade.pair == pair]
-        ).first()
+        result = Trade.get_trades([Trade.is_open.is_(True), Trade.pair == pair])
+        try:
+            trade = result.first()
+        finally:
+            Trade.session.remove()
         is_short = order_side == SignalDirection.SHORT
         if trade:
             is_short = trade.is_short
@@ -1106,7 +1144,11 @@ class RPC:
                 mode="pos_adjust" if trade else "initial",
             ):
                 Trade.commit()
-                trade = Trade.get_trades([Trade.is_open.is_(True), Trade.pair == pair]).first()
+                result = Trade.get_trades([Trade.is_open.is_(True), Trade.pair == pair])
+                try:
+                    trade = result.first()
+                finally:
+                    Trade.session.remove()
                 return trade
             else:
                 raise RPCException(f"Failed to enter position for {pair}.")
@@ -1116,12 +1158,16 @@ class RPC:
             raise RPCException("trader is not running")
         with self._freqtrade._exit_lock:
             # Query for trade
-            trade = Trade.get_trades(
+            result = Trade.get_trades(
                 trade_filter=[
                     Trade.id == trade_id,
                     Trade.is_open.is_(True),
                 ]
-            ).first()
+            )
+            try:
+                trade = result.first()
+            finally:
+                Trade.session.remove()
             if not trade:
                 logger.warning("cancel_open_order: Invalid trade_id received.")
                 raise RPCException("Invalid trade_id.")
@@ -1147,7 +1193,11 @@ class RPC:
         """
         with self._freqtrade._exit_lock:
             c_count = 0
-            trade = Trade.get_trades(trade_filter=[Trade.id == trade_id]).first()
+            result = Trade.get_trades(trade_filter=[Trade.id == trade_id])
+            try:
+                trade = result.first()
+            finally:
+                Trade.session.remove()
             if not trade:
                 logger.warning("delete trade: Invalid argument received")
                 raise RPCException(f"Trade with id '{trade_id}' not found.")
@@ -1198,34 +1248,46 @@ class RPC:
                 "id", "key", "type", "value", "created_at", "updated_at"
         """
 
-        trades: Sequence[Trade]
+        results: list[dict[str, Any]] = []
         if trade_id is None:
             # Get all open trades
-            trades = Trade.session.scalars(
+            query = (
                 Trade.get_trades_query([Trade.is_open.is_(True)])
                 .order_by(Trade.id)
                 .limit(limit)
                 .offset(offset)
-            ).all()
-        else:
-            trades = Trade.get_trades(trade_filter=[Trade.id == trade_id]).all()
-
-        if not trades:
-            raise RPCException(
-                f"No trade found for trade_id: {trade_id}" if trade_id else "No open trades found."
             )
+            try:
+                trades = Trade.session.scalars(query).all()
+                if not trades:
+                    raise RPCException("No open trades found.")
+                results = self._format_custom_data(trades, key, trade_id=None)
+            finally:
+                Trade.session.remove()
+        else:
+            result = Trade.get_trades(trade_filter=[Trade.id == trade_id])
+            try:
+                trades = result.all()
+                if not trades:
+                    raise RPCException(f"No trade found for trade_id: {trade_id}")
+                results = self._format_custom_data(trades, key, trade_id=trade_id)
+            finally:
+                Trade.session.remove()
 
-        results = []
+        return results
+
+    @staticmethod
+    def _format_custom_data(
+        trades: Sequence[Trade], key: str | None, trade_id: int | None
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
         for trade in trades:
-            # Depending on whether a specific key is provided, retrieve custom data accordingly.
             if key:
                 data = trade.get_custom_data_entry(key=key)
-                # If data exists, wrap it in a list so the output remains consistent.
                 custom_data = [data] if data else []
             else:
                 custom_data = trade.get_all_custom_data()
 
-            # Format and Append result for the trade if any custom data was found.
             if custom_data:
                 formatted_custom_data = [
                     {
@@ -1239,16 +1301,11 @@ class RPC:
                 ]
                 results.append({"trade_id": trade.id, "custom_data": formatted_custom_data})
 
-            # Handle case when there is no custom data found across trades.
-            if not results:
-                message_details = ""
-                if key:
-                    message_details += f"with key '{key}' "
-                message_details += (
-                    f"found for Trade ID: {trade_id}." if trade_id else "found for any open trades."
-                )
-                raise RPCException(f"No custom-data {message_details}")
-
+        if not results:
+            detail = f"with key '{key}' " if key else ""
+            if trade_id is not None:
+                raise RPCException(f"No custom-data {detail}found for Trade ID: {trade_id}.")
+            raise RPCException(f"No custom-data {detail}found for any open trades.")
         return results
 
     def _rpc_performance(self) -> list[dict[str, Any]]:

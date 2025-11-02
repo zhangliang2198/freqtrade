@@ -43,3 +43,8 @@ SELECT count(*) as active_connections
 FROM pg_stat_activity 
 WHERE state = 'active' AND datname = 'theshortgod_copy';
 
+-- 7. 查看占用连接
+SELECT pid, usename, state, query
+FROM pg_stat_activity
+WHERE
+    state = 'idle in transaction';

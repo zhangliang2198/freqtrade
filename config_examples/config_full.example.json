@@ -118,6 +118,11 @@
         // "unknown_fee_rate": 1,
         "ccxt_config": {},
         "ccxt_async_config": {},
+        "http_pool": {
+            "connections": 40,
+            "maxsize": 80,
+            "block": false
+        },
         "pair_whitelist": [
             "ALGO/BTC",
             "ATOM/BTC",

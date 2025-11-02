@@ -1,0 +1,84 @@
+{
+  "// 说明": "交易对筛选并行处理配置示例",
+  
+  "// 全局并行配置": "应用于所有过滤器（除非单个过滤器明确覆盖）",
+  "pairlist_enable_parallel": true,
+  "pairlist_parallel_workers": 4,
+  
+  "pairlists": [
+    {
+      "method": "VolumePairList",
+      "number_assets": 600,
+      "sort_key": "quoteVolume",
+      "min_value": 0,
+      "refresh_period": 86400,
+      "// 说明": "生成器不需要并行"
+    },
+    {
+      "method": "FullTradesFilter",
+      "// 说明": "简单检查，不需要并行"
+    },
+    {
+      "method": "AgeFilter",
+      "min_days_listed": 30,
+      "enable_parallel": false,
+      "// 说明": "AgeFilter 已经在数据获取层面并行，验证阶段不需要并行"
+    },
+    {
+      "method": "PriceFilter",
+      "low_price_ratio": 0.005,
+      "min_price": 0.0003,
+      "max_price": 500,
+      "enable_parallel": true,
+      "parallel_workers": 8,
+      "// 说明": "价格验证很快，适合并行，可以使用更多线程"
+    },
+    {
+      "method": "SpreadFilter",
+      "max_spread_ratio": 0.004,
+      "enable_parallel": true,
+      "parallel_workers": 8,
+      "// 说明": "价差验证也很快，适合并行"
+    },
+    {
+      "method": "ShuffleFilter",
+      "seed": 42,
+      "// 说明": "只是打乱顺序，不需要并行"
+    },
+    {
+      "method": "OffsetFilter",
+      "offset": 0,
+      "number_assets": 450,
+      "// 说明": "只是截取，不需要并行"
+    }
+  ],
+  
+  "// 配置说明": {
+    "pairlist_enable_parallel": "全局启用并行处理（默认 false）",
+    "pairlist_parallel_workers": "全局并行工作线程数（默认 4）",
+    "enable_parallel": "单个过滤器是否启用并行（覆盖全局配置）",
+    "parallel_workers": "单个过滤器的并行线程数（覆盖全局配置）",
+    
+    "建议": {
+      "交易对数量 < 50": "不建议启用并行",
+      "交易对数量 50-200": "parallel_workers = 2-4",
+      "交易对数量 > 200": "parallel_workers = 4-8",
+      
+      "适合并行的过滤器": [
+        "PriceFilter - 每个交易对独立验证价格",
+        "SpreadFilter - 每个交易对独立验证价差",
+        "VolatilityFilter - 每个交易对独立计算波动率",
+        "PrecisionFilter - 每个交易对独立验证精度"
+      ],
+      
+      "不适合并行的过滤器": [
+        "AgeFilter - 已经批量并行获取数据",
+        "PerformanceFilter - 需要访问数据库",
+        "FullTradesFilter - 只是简单检查",
+        "ShuffleFilter - 只是打乱顺序",
+        "OffsetFilter - 只是截取"
+      ]
+    }
+  }
+}
+

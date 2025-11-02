@@ -245,6 +245,9 @@ class FreqtradeBot(LoggingMixin):
         self.update_all_liquidation_prices()
         self.update_funding_fees()
 
+        # 预加载历史数据以加快启动速度
+        self.startup_preload_data()
+
     def process(self) -> None:
         """
         Queries the persistence layer for open trades and handles them,
@@ -378,8 +381,58 @@ class FreqtradeBot(LoggingMixin):
                     )
                 )
 
+    def startup_preload_data(self) -> None:
+        """
+        在启动时预加载历史数据,避免重新下载所有数据
+        """
+        if not self.config.get("preload_ohlcv_data", False):
+            return
+
+        try:
+            from freqtrade.data.preload import preload_ohlcv_data
+
+            # 获取交易对列表 (首次启动时可能为空)
+            pairs = self.active_pair_whitelist
+            if not pairs:
+                # 尝试从 pairlist 获取
+                pairs = self.pairlists.whitelist[:100]  # 限制数量避免过长
+
+            if not pairs:
+                logger.info("⚠️ 没有交易对,跳过数据预加载")
+                return
+
+            # 收集 informative pairs
+            informative_pairs = self.strategy.gather_informative_pairs()
+
+            logger.info(f"📥 开始预加载历史数据 ({len(pairs)} 个交易对)...")
+
+            loaded, total = preload_ohlcv_data(
+                exchange=self.exchange,
+                pairs=pairs,
+                timeframe=self.strategy.timeframe,
+                config=self.config,
+                candle_type=self.config.get("candle_type_def"),
+                informative_pairs=informative_pairs,
+            )
+
+            if loaded > 0:
+                logger.info(
+                    f"✅ 预加载完成: {loaded}/{total} 个数据集 "
+                    f"({loaded/total*100:.1f}%),启动速度将显著提升"
+                )
+            else:
+                logger.info("ℹ️ 未找到历史数据,将从交易所下载")
+
+        except Exception as e:
+            logger.warning(f"⚠️ 数据预加载失败: {e},将从交易所下载数据")
+            logger.debug(f"预加载错误详情: {e}", exc_info=True)
+
     def startup_backpopulate_precision(self) -> None:
-        trades = Trade.get_trades([Trade.contract_size.is_(None)])
+        result = Trade.get_trades([Trade.contract_size.is_(None)])
+        try:
+            trades = result.all()
+        finally:
+            Trade.session.remove()
         for trade in trades:
             if trade.exchange != self.exchange.id:
                 continue

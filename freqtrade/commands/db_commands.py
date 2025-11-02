@@ -25,13 +25,17 @@ def start_convert_db(args: dict[str, Any]) -> None:
 
     trade_count = 0
     pairlock_count = 0
-    for trade in Trade.get_trades():
-        trade_count += 1
-        make_transient(trade)
-        for o in trade.orders:
-            make_transient(o)
+    result = Trade.get_trades()
+    try:
+        for trade in result:
+            trade_count += 1
+            make_transient(trade)
+            for o in trade.orders:
+                make_transient(o)
 
-        session_target.add(trade)
+            session_target.add(trade)
+    finally:
+        Trade.session.remove()
 
     session_target.commit()
 

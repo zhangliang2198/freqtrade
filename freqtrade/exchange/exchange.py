@@ -17,6 +17,7 @@ from typing import Any, Literal, TypeGuard, TypeVar
 import ccxt
 import ccxt.pro as ccxt_pro
 from cachetools import TTLCache
+from requests.adapters import HTTPAdapter
 from ccxt import TICK_SIZE
 from dateutil import parser
 from pandas import DataFrame, concat
@@ -405,6 +406,33 @@ class Exchange:
             raise OperationalException(f"Exchange {name} is not supported") from e
         except ccxt.BaseError as e:
             raise OperationalException(f"Initialization of ccxt failed. Reason: {e}") from e
+
+        session = getattr(api, "session", None)
+        if session and hasattr(session, "mount"):
+            http_pool_conf = exchange_config.get("http_pool", {})
+            pool_connections = http_pool_conf.get("connections")
+            pool_maxsize = http_pool_conf.get("maxsize")
+            pool_block = http_pool_conf.get("block")
+
+            if pool_connections is None and pool_maxsize is None and pool_block is None:
+                pool_connections = 40
+                pool_maxsize = 40
+                pool_block = False
+            else:
+                if pool_connections is None:
+                    pool_connections = 40
+                if pool_maxsize is None:
+                    pool_maxsize = pool_connections
+                if pool_block is None:
+                    pool_block = False
+
+            adapter = HTTPAdapter(
+                pool_connections=pool_connections,
+                pool_maxsize=pool_maxsize,
+                pool_block=pool_block,
+            )
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
 
         return api
 

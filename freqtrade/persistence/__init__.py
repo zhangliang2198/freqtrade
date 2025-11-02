@@ -1,6 +1,6 @@
 # flake8: noqa: F401
 
-from freqtrade.persistence.custom_data import CustomDataWrapper
+from freqtrade.persistence.custom_data import CustomDataWrapper, _CustomData
 from freqtrade.persistence.key_value_store import KeyStoreKeys, KeyValueStore
 from freqtrade.persistence.models import init_db
 from freqtrade.persistence.pairlock_middleware import PairLocks
@@ -10,3 +10,18 @@ from freqtrade.persistence.usedb_context import (
     disable_database_use,
     enable_database_use,
 )
+
+__all__ = [
+    "CustomDataWrapper",
+    "_CustomData",
+    "KeyStoreKeys",
+    "KeyValueStore",
+    "init_db",
+    "PairLocks",
+    "LocalTrade",
+    "Order",
+    "Trade",
+    "FtNoDBContext",
+    "disable_database_use",
+    "enable_database_use",
+]

@@ -31,7 +31,17 @@ class PairListManager(LoggingMixin):
         self._pairlist_handlers: list[IPairList] = []
         self._tickers_needed = False
         self._dataprovider: DataProvider | None = dataprovider
+
+        # 全局并行配置
+        self._enable_parallel = config.get("pairlist_enable_parallel", False)
+        self._parallel_workers = config.get("pairlist_parallel_workers", 4)
+
         for pairlist_handler_config in self._config.get("pairlists", []):
+            # 如果全局启用并行，且单个过滤器未明确配置，则应用全局配置
+            if self._enable_parallel and "enable_parallel" not in pairlist_handler_config:
+                pairlist_handler_config["enable_parallel"] = True
+                pairlist_handler_config["parallel_workers"] = self._parallel_workers
+
             pairlist_handler = PairListResolver.load_pairlist(
                 pairlist_handler_config["method"],
                 exchange=exchange,
@@ -60,6 +70,11 @@ class PairListManager(LoggingMixin):
 
         refresh_period = config.get("pairlist_refresh_period", 3600)
         LoggingMixin.__init__(self, logger, refresh_period)
+
+        if self._enable_parallel:
+            logger.info(
+                f"PairListManager 已启用全局并行处理模式 - 工作线程数: {self._parallel_workers}"
+            )
 
     def _check_backtest(self) -> None:
         if self._config["runmode"] not in (RunMode.BACKTEST, RunMode.HYPEROPT):

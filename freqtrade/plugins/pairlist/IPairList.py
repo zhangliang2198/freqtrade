@@ -4,6 +4,7 @@ PairList Handler base class
 
 import logging
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from enum import Enum
 from typing import Any, Literal, TypedDict
@@ -96,7 +97,17 @@ class IPairList(LoggingMixin, ABC):
         self._pairlistconfig = pairlistconfig
         self._pairlist_pos = pairlist_pos
         self.refresh_period = self._pairlistconfig.get("refresh_period", 1800)
+
+        # 并行处理配置
+        self._enable_parallel = self._pairlistconfig.get("enable_parallel", False)
+        self._parallel_workers = self._pairlistconfig.get("parallel_workers", 4)
+
         LoggingMixin.__init__(self, logger, self.refresh_period)
+
+        if self._enable_parallel:
+            logger.info(
+                f"{self.name} - 已启用并行处理模式，工作线程数: {self._parallel_workers}"
+            )
 
     @property
     def name(self) -> str:
@@ -200,14 +211,75 @@ class IPairList(LoggingMixin, ABC):
         :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: new whitelist
         """
-        if self._enabled:
-            # Copy list since we're modifying this list
-            for p in deepcopy(pairlist):
-                # Filter out assets
-                if not self._validate_pair(p, tickers[p] if p in tickers else None):
-                    pairlist.remove(p)
+        if not self._enabled:
+            return pairlist
+
+        # 如果启用并行且交易对数量足够多，使用并行处理
+        if self._enable_parallel and len(pairlist) > 10:
+            return self._filter_pairlist_parallel(pairlist, tickers)
+        else:
+            return self._filter_pairlist_sequential(pairlist, tickers)
+
+    def _filter_pairlist_sequential(self, pairlist: list[str], tickers: Tickers) -> list[str]:
+        """
+        串行过滤交易对（原始实现）
+
+        :param pairlist: 要过滤的交易对列表
+        :param tickers: Ticker 数据
+        :return: 过滤后的交易对列表
+        """
+        # Copy list since we're modifying this list
+        for p in deepcopy(pairlist):
+            # Filter out assets
+            if not self._validate_pair(p, tickers[p] if p in tickers else None):
+                pairlist.remove(p)
 
         return pairlist
+
+    def _filter_pairlist_parallel(self, pairlist: list[str], tickers: Tickers) -> list[str]:
+        """
+        并行过滤交易对
+
+        使用线程池并行验证每个交易对，然后收集结果
+
+        注意：
+        - 避免在 _validate_pair 中访问共享资源（如数据库）
+        - 确保 _validate_pair 是线程安全的
+
+        :param pairlist: 要过滤的交易对列表
+        :param tickers: Ticker 数据
+        :return: 过滤后的交易对列表
+        """
+        valid_pairs = []
+
+        # 使用线程池并行验证
+        # 注意：线程数不宜过多，避免资源竞争
+        with ThreadPoolExecutor(max_workers=self._parallel_workers) as executor:
+            # 提交所有验证任务
+            future_to_pair = {
+                executor.submit(
+                    self._validate_pair,
+                    pair,
+                    tickers[pair] if pair in tickers else None
+                ): pair
+                for pair in pairlist
+            }
+
+            # 收集结果，保持原始顺序
+            pair_results = {}
+            for future in as_completed(future_to_pair):
+                pair = future_to_pair[future]
+                try:
+                    is_valid = future.result()
+                    pair_results[pair] = is_valid
+                except Exception as exc:
+                    logger.warning(f"{self.name} - 验证交易对 {pair} 时发生异常: {exc}")
+                    pair_results[pair] = False
+
+            # 按原始顺序过滤
+            valid_pairs = [p for p in pairlist if pair_results.get(p, False)]
+
+        return valid_pairs
 
     def verify_blacklist(self, pairlist: list[str], logmethod) -> list[str]:
         """

@@ -80,16 +80,21 @@ def init_db(db_url: str, config: dict[str, Any] | None = None) -> None:
         # 从配置获取连接池设置，或使用默认值
         pool_size = 20  # 默认基础连接池大小
         max_overflow = 40  # 默认溢出连接数
+        pool_recycle = 3600  # 默认每小时回收连接
+        pool_pre_ping = True  # 默认启用连接健康检查
 
         if config:
             pool_size = config.get("db_pool_size", pool_size)
             max_overflow = config.get("db_max_overflow", max_overflow)
+            pool_recycle = config.get("db_pool_recycle", pool_recycle)
+            pool_pre_ping = config.get("db_pool_pre_ping", pool_pre_ping)
 
         kwargs.update(
             {
                 "pool_size": pool_size,
                 "max_overflow": max_overflow,
-                "pool_pre_ping": True,  # 使用前验证连接是否有效
+                "pool_recycle": pool_recycle,  # 定期回收连接,防止连接过期
+                "pool_pre_ping": pool_pre_ping,  # 使用前验证连接是否有效
             }
         )
 

@@ -37,7 +37,11 @@ def migrate_binance_futures_names(config: Config):
 
 def _migrate_binance_futures_db(config: Config):
     logger.info("Migrating binance futures pairs in database.")
-    trades = Trade.get_trades([Trade.exchange == "binance", Trade.trading_mode == "FUTURES"]).all()
+    result = Trade.get_trades([Trade.exchange == "binance", Trade.trading_mode == "FUTURES"])
+    try:
+        trades = result.all()
+    finally:
+        Trade.session.remove()
     for trade in trades:
         if ":" in trade.pair:
             # already migrated

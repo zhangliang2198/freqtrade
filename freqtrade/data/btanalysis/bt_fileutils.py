@@ -530,7 +530,11 @@ def load_trades_from_db(db_url: str, strategy: str | None = None) -> pd.DataFram
     filters = []
     if strategy:
         filters.append(Trade.strategy == strategy)
-    trades = trade_list_to_dataframe(list(Trade.get_trades(filters).all()))
+    result = Trade.get_trades(filters)
+    try:
+        trades = trade_list_to_dataframe(list(result.all()))
+    finally:
+        Trade.session.remove()
 
     return trades
 

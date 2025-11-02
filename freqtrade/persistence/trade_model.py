@@ -24,7 +24,7 @@ from sqlalchemy import (
     func,
     select,
 )
-from sqlalchemy.orm import Mapped, lazyload, mapped_column, relationship, validates
+from sqlalchemy.orm import Mapped, lazyload, mapped_column, relationship, selectinload, validates
 
 from freqtrade.constants import (
     CANCELED_EXCHANGE_STATES,
@@ -1512,9 +1512,11 @@ class LocalTrade:
         get open trade count
         """
         if Trade.use_db:
-            return Trade.session.execute(
-                select(func.count(Trade.id)).filter(Trade.is_open.is_(True))
-            ).scalar_one()
+            stmt = select(func.count(Trade.id)).filter(Trade.is_open.is_(True))
+            try:
+                return Trade.session.execute(stmt).scalar_one()
+            finally:
+                Trade.session.remove()
         else:
             return LocalTrade.bt_open_open_trade_count
 
@@ -1787,21 +1789,20 @@ class Trade(ModelBase, LocalTrade):
                            and will implicitly only return closed trades.
         :return: unsorted List[Trade]
         """
-        if Trade.use_db:
-            trade_filter = []
-            if pair:
-                trade_filter.append(Trade.pair == pair)
-            if open_date:
-                trade_filter.append(Trade.open_date > open_date)
-            if close_date:
-                trade_filter.append(Trade.close_date > close_date)
-            if is_open is not None:
-                trade_filter.append(Trade.is_open.is_(is_open))
-            return cast(list[LocalTrade], Trade.get_trades(trade_filter).all())
-        else:
+        if not Trade.use_db:
             return LocalTrade.get_trades_proxy(
                 pair=pair, is_open=is_open, open_date=open_date, close_date=close_date
             )
+        trade_filter = []
+        if pair:
+            trade_filter.append(Trade.pair == pair)
+        if open_date:
+            trade_filter.append(Trade.open_date > open_date)
+        if close_date:
+            trade_filter.append(Trade.close_date > close_date)
+        if is_open is not None:
+            trade_filter.append(Trade.is_open.is_(is_open))
+        return cast(list[LocalTrade], Trade.get_trades(trade_filter).all())
 
     @staticmethod
     def get_trades_query(trade_filter=None, include_orders: bool = True) -> Select:
@@ -1822,7 +1823,9 @@ class Trade(ModelBase, LocalTrade):
             this_query = select(Trade).filter(*trade_filter)
         else:
             this_query = select(Trade)
-        if not include_orders:
+        if include_orders:
+            this_query = this_query.options(selectinload(Trade.orders))
+        else:
             # Don't load order relations
             # Consider using noload or raiseload instead of lazyload
             this_query = this_query.options(lazyload(Trade.orders))
@@ -1850,13 +1853,14 @@ class Trade(ModelBase, LocalTrade):
         Returns all open trades which don't have open fees set correctly
         NOTE: Not supported in Backtesting.
         """
-        return Trade.get_trades(
+        result = Trade.get_trades(
             [
                 Trade.fee_open_currency.is_(None),
                 Trade.orders.any(),
                 Trade.is_open.is_(True),
             ]
-        ).all()
+        )
+        return result.all()
 
     @staticmethod
     def get_closed_trades_without_assigned_fees():
@@ -1864,13 +1868,14 @@ class Trade(ModelBase, LocalTrade):
         Returns all closed trades which don't have fees set correctly
         NOTE: Not supported in Backtesting.
         """
-        return Trade.get_trades(
+        result = Trade.get_trades(
             [
                 Trade.fee_close_currency.is_(None),
                 Trade.orders.any(),
                 Trade.is_open.is_(False),
             ]
-        ).all()
+        )
+        return result.all()
 
     @staticmethod
     def get_total_closed_profit() -> float:
@@ -1878,9 +1883,11 @@ class Trade(ModelBase, LocalTrade):
         Retrieves total realized profit
         """
         if Trade.use_db:
-            total_profit = Trade.session.execute(
-                select(func.sum(Trade.close_profit_abs)).filter(Trade.is_open.is_(False))
-            ).scalar_one()
+            stmt = select(func.sum(Trade.close_profit_abs)).filter(Trade.is_open.is_(False))
+            try:
+                total_profit = Trade.session.execute(stmt).scalar_one()
+            finally:
+                Trade.session.remove()
         else:
             total_profit = sum(
                 t.close_profit_abs  # type: ignore
@@ -1895,9 +1902,11 @@ class Trade(ModelBase, LocalTrade):
         in stake currency
         """
         if Trade.use_db:
-            total_open_stake_amount = Trade.session.scalar(
-                select(func.sum(Trade.stake_amount)).filter(Trade.is_open.is_(True))
-            )
+            stmt = select(func.sum(Trade.stake_amount)).filter(Trade.is_open.is_(True))
+            try:
+                total_open_stake_amount = Trade.session.scalar(stmt)
+            finally:
+                Trade.session.remove()
         else:
             total_open_stake_amount = sum(
                 t.stake_amount for t in LocalTrade.get_trades_proxy(is_open=True)
@@ -1970,7 +1979,10 @@ class Trade(ModelBase, LocalTrade):
         if start_date:
             filters.append(Trade.close_date >= start_date)
         pair_rates_query = Trade._generic_performance_query([Trade.pair], filters)
-        pair_rates = Trade.session.execute(pair_rates_query).all()
+        try:
+            pair_rates = Trade.session.execute(pair_rates_query).all()
+        finally:
+            Trade.session.remove()
         return [
             {
                 "pair": pair,
@@ -1996,7 +2008,10 @@ class Trade(ModelBase, LocalTrade):
             filters.append(Trade.pair == pair)
 
         pair_rates_query = Trade._generic_performance_query([Trade.enter_tag], filters, "Other")
-        enter_tag_perf = Trade.session.execute(pair_rates_query).all()
+        try:
+            enter_tag_perf = Trade.session.execute(pair_rates_query).all()
+        finally:
+            Trade.session.remove()
 
         return [
             {
@@ -2022,7 +2037,10 @@ class Trade(ModelBase, LocalTrade):
             filters.append(Trade.pair == pair)
 
         pair_rates_query = Trade._generic_performance_query([Trade.exit_reason], filters, "Other")
-        sell_tag_perf = Trade.session.execute(pair_rates_query).all()
+        try:
+            sell_tag_perf = Trade.session.execute(pair_rates_query).all()
+        finally:
+            Trade.session.remove()
 
         return [
             {
@@ -2046,7 +2064,7 @@ class Trade(ModelBase, LocalTrade):
         filters: list = [Trade.is_open.is_(False)]
         if pair is not None:
             filters.append(Trade.pair == pair)
-        mix_tag_perf = Trade.session.execute(
+        mix_stmt = (
             select(
                 Trade.id,
                 Trade.enter_tag,
@@ -2058,7 +2076,11 @@ class Trade(ModelBase, LocalTrade):
             .filter(*filters)
             .group_by(Trade.id)
             .order_by(desc("profit_sum_abs"))
-        ).all()
+        )
+        try:
+            mix_tag_perf = Trade.session.execute(mix_stmt).all()
+        finally:
+            Trade.session.remove()
 
         resp: list[dict] = []
         for _, enter_tag, exit_reason, profit, profit_abs, count in mix_tag_perf:
@@ -2104,7 +2126,10 @@ class Trade(ModelBase, LocalTrade):
         trade_filter.append(Trade.is_open.is_(False))
 
         pair_rates_query = Trade._generic_performance_query([Trade.pair], trade_filter)
-        best_pair = Trade.session.execute(pair_rates_query).first()
+        try:
+            best_pair = Trade.session.execute(pair_rates_query).first()
+        finally:
+            Trade.session.remove()
         # returns pair, profit_ratio, abs_profit, count
         return best_pair
 
@@ -2118,9 +2143,13 @@ class Trade(ModelBase, LocalTrade):
         if not trade_filter:
             trade_filter = []
         trade_filter.append(Order.status == "closed")
-        trading_volume = Trade.session.execute(
+        stmt = (
             select(func.sum(Order.cost).label("volume"))
             .join(Order._trade_live)
             .filter(*trade_filter)
-        ).scalar_one()
+        )
+        try:
+            trading_volume = Trade.session.execute(stmt).scalar_one()
+        finally:
+            Trade.session.remove()
         return trading_volume or 0.0

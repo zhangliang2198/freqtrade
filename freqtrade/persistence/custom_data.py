@@ -70,13 +70,24 @@ class _CustomData(ModelBase):
         return will be for generic values not tied to a trade
         :param trade_id: id of the Trade
         """
+        if not CustomDataWrapper.use_db:
+            return [
+                data
+                for data in CustomDataWrapper.custom_data
+                if (trade_id is None or data.ft_trade_id == trade_id)
+                and (key is None or data.cd_key.casefold() == key.casefold())
+            ]
+
         filters = []
         if trade_id is not None:
             filters.append(_CustomData.ft_trade_id == trade_id)
         if key is not None:
             filters.append(_CustomData.cd_key.ilike(key))
 
-        return _CustomData.session.scalars(select(_CustomData).filter(*filters)).all()
+        try:
+            return _CustomData.session.scalars(select(_CustomData).filter(*filters)).all()
+        finally:
+            _CustomData.session.remove()
 
 
 class CustomDataWrapper:
@@ -114,8 +125,17 @@ class CustomDataWrapper:
 
     @staticmethod
     def delete_custom_data(trade_id: int) -> None:
-        _CustomData.session.query(_CustomData).filter(_CustomData.ft_trade_id == trade_id).delete()
-        _CustomData.session.commit()
+        if not CustomDataWrapper.use_db:
+            CustomDataWrapper.custom_data = [
+                data for data in CustomDataWrapper.custom_data if data.ft_trade_id != trade_id
+            ]
+            return
+
+        try:
+            _CustomData.session.query(_CustomData).filter(_CustomData.ft_trade_id == trade_id).delete()
+            _CustomData.session.commit()
+        finally:
+            _CustomData.session.remove()
 
     @staticmethod
     def get_custom_data(*, trade_id: int, key: str | None = None) -> list[_CustomData]:
@@ -139,6 +159,8 @@ class CustomDataWrapper:
                 logger.exception(f"get_custom_data failed for key '{key}': {e}")
                 _CustomData.session.rollback()
                 filtered_custom_data = []
+            finally:
+                _CustomData.session.remove()
 
         else:
             filtered_custom_data = [
@@ -279,6 +301,8 @@ class CustomDataWrapper:
                 logger.exception(f"set_custom_data upsert failed for key '{key}': {e}")
                 # As a last resort, do not raise to avoid crashing strategy flow
                 return
+            finally:
+                _CustomData.session.remove()
 
         # In-memory path (backtesting / use_db=False)
         custom_data = CustomDataWrapper.get_custom_data(trade_id=trade_id, key=key)

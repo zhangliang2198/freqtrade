@@ -203,7 +203,10 @@ def set_startup_time() -> None:
     if st is None:
         from freqtrade.persistence import Trade
 
-        t = Trade.session.query(Trade).order_by(Trade.open_date.asc()).first()
+        try:
+            t = Trade.session.query(Trade).order_by(Trade.open_date.asc()).first()
+        finally:
+            Trade.session.remove()
         if t is not None:
             KeyValueStore.store_value("bot_start_time", t.open_date_utc)
         else:

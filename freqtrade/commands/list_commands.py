@@ -375,7 +375,11 @@ def start_show_trades(args: dict[str, Any]) -> None:
     if config.get("trade_ids"):
         tfilter.append(Trade.id.in_(config["trade_ids"]))
 
-    trades = Trade.get_trades(tfilter).all()
+    result = Trade.get_trades(tfilter)
+    try:
+        trades = result.all()
+    finally:
+        Trade.session.remove()
     logger.info(f"Printing {len(trades)} Trades: ")
     if config.get("print_json", False):
         print(json.dumps([trade.to_json() for trade in trades], indent=4))
