@@ -49,7 +49,7 @@ bug：修复使用 `mysql/pgsql `时，且开启多线程处理的情况下，�
 ## v1.0.3 数据库连接池优化
 
 新增**数据库连接池配置**支持，显著提升多线程环境下的数据库性能。
-新增**多线程策略分析**支持，大幅提升每轮 `custom_exit()`，和 `adjust_trade_position()` 分析性能。
+新增**多线程策略分析**支持，大幅提升每轮 `custom_exit()`，和 `adjust_trade_position()` 分析性能，对于每轮需要加入  `AI` 评测的策略尤为重要。
 
 **主要改进**：
 - ✅ 支持 PostgreSQL、MySQL、MariaDB 连接池配置
