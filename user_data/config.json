@@ -1,7 +1,6 @@
 {
     "strategy": "Theshortgod",
-    "strategy_threading": true,
-    "strategy_thread_workers": 32,
+
     "add_config_files": [
         "./trading_futures.json",
         "./pairlist_short.json",

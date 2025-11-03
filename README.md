@@ -6,6 +6,44 @@ fork自源仓库，每月同步一次源框架稳定代码。不断优化和添�
 
 <img src="小森林量化logo.png" alt="小森林量化QQ群" width="300">
 
+## v1.0.5 新增 Telegram 代理支持
+
+功能：不用再设置 http_proxy 环境变量了，直接在配置文件中添加代理配置即可。
+```json
+"telegram": {
+  "proxy_url": "http://127.0.0.1:10809"
+}
+```
+
+bug：修复使用mysql/pgsql时，且开启多线程处理的情况下，原框架session不释放导致连接耗尽的问题。
+
+注意：现在开启多线程处理， http_pool 请务必设置大一点，参考如下配置：
+
+```json
+    "exchange": {
+      "http_pool": {
+        "connections": 40,
+        "maxsize": 80,
+        "block": false
+      }
+    }
+```
+
+## v1.0.4 解除ccxt默认10个连接池的限制
+
+使用如下配置，增加http连接池大小，提升多线程环境下的交易所API请求性能。
+
+**配置示例**：
+```json
+    "exchange": {
+      "http_pool": {
+        "connections": 40,
+        "maxsize": 80,
+        "block": false
+      }
+    }
+```
+
 ## v1.0.3 数据库连接池优化
 
 新增**数据库连接池配置**支持，显著提升多线程环境下的数据库性能。
