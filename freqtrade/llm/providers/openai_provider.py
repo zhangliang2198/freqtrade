@@ -1,5 +1,5 @@
 """
-OpenAI LLM Provider
+OpenAI 大语言模型提供商
 """
 
 from typing import Dict, Any
@@ -12,22 +12,22 @@ logger = logging.getLogger(__name__)
 
 class OpenAIProvider(LLMProvider):
     """
-    OpenAI API provider for GPT models
+    OpenAI API 的 GPT 模型提供商
 
-    Supports models like gpt-4o, gpt-4o-mini, gpt-4-turbo, etc.
+    支持如 gpt-4o、gpt-4o-mini、gpt-4-turbo 等模型。
     """
 
     def __init__(self, config: Dict[str, Any]):
         """
-        Initialize OpenAI provider
+        初始化 OpenAI 提供商
 
         Args:
-            config: Configuration dictionary containing:
-                - model: Model name (e.g., "gpt-4o")
-                - api_key: OpenAI API key
-                - base_url: Optional custom API endpoint
-                - timeout: Request timeout in seconds
-                - max_retries: Maximum retry attempts
+            config: 配置字典，包含：
+                - model: 模型名称（例如："gpt-4o"）
+                - api_key: OpenAI API 密钥
+                - base_url: 可选的自定义 API 端点
+                - timeout: 请求超时时间（秒）
+                - max_retries: 最大重试次数
         """
         super().__init__(config)
 
@@ -35,15 +35,15 @@ class OpenAIProvider(LLMProvider):
         self.base_url = config.get("base_url")
 
         if not self.api_key:
-            raise ValueError("OpenAI API key is required")
+            raise ValueError("需要 OpenAI API 密钥")
 
-        # Lazy import to avoid dependency if not used
+        # 延迟导入，避免未使用时的依赖
         try:
             from openai import OpenAI
         except ImportError:
             raise ImportError(
-                "OpenAI package is required for OpenAIProvider. "
-                "Install with: pip install openai>=1.0.0"
+                "OpenAIProvider 需要 OpenAI 包。"
+                "请使用以下命令安装：pip install openai>=1.0.0"
             )
 
         self.client = OpenAI(
@@ -53,18 +53,18 @@ class OpenAIProvider(LLMProvider):
             max_retries=self.max_retries
         )
 
-        logger.info(f"OpenAI provider initialized with model: {self.model}")
+        logger.info(f"OpenAI 提供商已初始化，使用模型：{self.model}")
 
     def complete(self, prompt: str, temperature: float = 0.1) -> str:
         """
-        Call OpenAI API to complete a prompt
+        调用 OpenAI API 完成提示
 
         Args:
-            prompt: The input prompt
-            temperature: Temperature parameter (0.0-1.0)
+            prompt: 输入提示
+            temperature: 温度参数（0.0-1.0）
 
         Returns:
-            The model's response text in JSON format
+            模型的 JSON 格式响应文本
         """
         try:
             response = self.client.chat.completions.create(
@@ -72,8 +72,8 @@ class OpenAIProvider(LLMProvider):
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a professional cryptocurrency trading analyst. "
-                                   "Always respond in valid JSON format."
+                        "content": "你是一名专业的加密货币交易分析师。"
+                                   "请始终以有效的 JSON 格式响应。"
                     },
                     {"role": "user", "content": prompt}
                 ],
@@ -81,7 +81,7 @@ class OpenAIProvider(LLMProvider):
                 response_format={"type": "json_object"}
             )
 
-            # Store usage information
+            # 存储使用信息
             usage = response.usage
             self.last_usage = {
                 "tokens_used": usage.total_tokens,
@@ -93,21 +93,21 @@ class OpenAIProvider(LLMProvider):
             return response.choices[0].message.content
 
         except Exception as e:
-            logger.error(f"OpenAI API call failed: {e}")
+            logger.error(f"OpenAI API 调用失败：{e}")
             raise
 
     def get_usage_info(self) -> Dict[str, Any]:
-        """Get usage information from the last API call"""
+        """获取最后一次 API 调用的使用信息"""
         return self.last_usage
 
     def _calculate_cost(self, usage) -> float:
         """
-        Calculate the cost based on token usage
+        根据令牌使用量计算成本
 
-        Pricing as of 2024 (update as needed):
-        - gpt-4o: $5/1M input, $15/1M output
-        - gpt-4o-mini: $0.15/1M input, $0.6/1M output
-        - gpt-4-turbo: $10/1M input, $30/1M output
+        2024 年价格（需要时更新）：
+        - gpt-4o：输入 $5/100万，输出 $15/100万
+        - gpt-4o-mini：输入 $0.15/100万，输出 $0.6/100万
+        - gpt-4-turbo：输入 $10/100万，输出 $30/100万
         """
         pricing = {
             "gpt-4o": {"input": 5.0, "output": 15.0},
@@ -117,7 +117,7 @@ class OpenAIProvider(LLMProvider):
             "gpt-3.5-turbo": {"input": 0.5, "output": 1.5},
         }
 
-        # Default pricing if model not found
+        # 如果找不到模型，使用默认定价
         model_pricing = pricing.get(self.model, {"input": 5.0, "output": 15.0})
 
         input_cost = (usage.prompt_tokens / 1_000_000) * model_pricing["input"]

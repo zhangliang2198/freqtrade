@@ -11,7 +11,7 @@
 
 ### 1. **零额外依赖** ⭐⭐⭐
 - **只需**: `jinja2` (用于 Prompt 模板)
-- **不需要**: `openai`, `anthropic` 或其他 LLM SDK
+- **不需要**: `openai`, `anthropic` 或其他 LLM SDK；
 - **原理**: 使用通用 HTTP 方式调用任意 LLM API
 
 ### 2. **完全通用** ⭐⭐⭐

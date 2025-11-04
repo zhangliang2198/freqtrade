@@ -1,5 +1,5 @@
 {
-    "bot_name": "theshortgod",
+    "bot_name": "Freqtrade",
     "dry_run": true,
     "dry_run_wallet": 10000,
     "grinding_enable": true,

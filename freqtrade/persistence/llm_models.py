@@ -1,7 +1,7 @@
 """
-LLM Decision Logging Models
+LLM 决策日志模型
 
-Database models for logging LLM trading decisions and performance metrics.
+用于记录 LLM 交易决策和性能指标的数据库模型。
 """
 
 import logging
@@ -15,16 +15,15 @@ from freqtrade.persistence.base import ModelBase, SessionType
 
 logger = logging.getLogger(__name__)
 
-
 class LLMDecision(ModelBase):
     """
-    LLM Decision Log Table
+    LLM 决策日志表
 
-    Records every LLM decision made during trading, including:
-    - Request context
-    - Model response
-    - Performance metrics
-    - Cost tracking
+    记录交易过程中做出的每个 LLM 决策，包括：
+    - 请求上下文
+    - 模型响应
+    - 性能指标
+    - 成本跟踪
     """
 
     __tablename__ = "llm_decisions"
@@ -32,40 +31,40 @@ class LLMDecision(ModelBase):
 
     session: ClassVar[SessionType]
 
-    # Indexes for common queries
+    # 常用查询的索引
     __table_args__ = (
         Index("ix_llm_decisions_pair_created", "pair", "created_at"),
         Index("ix_llm_decisions_strategy_point", "strategy", "decision_point"),
         Index("ix_llm_decisions_success", "success"),
     )
 
-    # Primary key
+    # 主键
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
-    # Relationship to trades table
+    # 与交易表的关联
     trade_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("trades.id"), nullable=True, index=True
     )
 
-    # Trading context
+    # 交易上下文
     pair: Mapped[str] = mapped_column(String(25), nullable=False, index=True)
     strategy: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
 
-    # Decision point
+    # 决策点
     decision_point: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    # Possible values: 'entry', 'exit', 'stake', 'adjust_position', 'leverage'
+    # 可能的值: 'entry', 'exit', 'stake', 'adjust_position', 'leverage'
 
-    # LLM configuration
+    # LLM 配置
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
 
-    # Request and response (optional, controlled by config)
+    # 请求和响应（可选，由配置控制）
     prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Parsed decision results
+    # 解析后的决策结果
     decision: Mapped[str] = mapped_column(String(50), nullable=False)
-    # Possible values depend on decision_point:
+    # 可能的值取决于 decision_point:
     # - entry: 'buy', 'sell', 'hold'
     # - exit: 'exit', 'hold'
     # - stake: 'adjust', 'default'
@@ -75,20 +74,20 @@ class LLMDecision(ModelBase):
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Decision parameters (JSON string)
+    # 决策参数（JSON 字符串）
     parameters: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # Example: '{"stake_multiplier": 1.5, "leverage": 3.0}'
+    # 示例: '{"stake_multiplier": 1.5, "leverage": 3.0}'
 
-    # Performance metrics
+    # 性能指标
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     tokens_used: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
-    # Status
+    # 状态
     success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Timestamp
+    # 时间戳
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow, index=True
     )
@@ -109,25 +108,28 @@ class LLMDecision(ModelBase):
         limit: int = 100
     ):
         """
-        Get recent LLM decisions
+        获取最近的 LLM 决策
 
         Args:
-            session: Database session
-            strategy: Optional strategy name filter
-            decision_point: Optional decision point filter
-            limit: Maximum number of results
+            session: 数据库会话
+            strategy: 可选的策略名称过滤器
+            decision_point: 可选的决策点过滤器
+            limit: 最大结果数量
 
         Returns:
-            List of LLMDecision objects
+            LLMDecision 对象列表
         """
-        query = session.query(cls)
+        try:
+            query = session.query(cls)
 
-        if strategy:
-            query = query.filter(cls.strategy == strategy)
-        if decision_point:
-            query = query.filter(cls.decision_point == decision_point)
+            if strategy:
+                query = query.filter(cls.strategy == strategy)
+            if decision_point:
+                query = query.filter(cls.decision_point == decision_point)
 
-        return query.order_by(cls.created_at.desc()).limit(limit).all()
+            return query.order_by(cls.created_at.desc()).limit(limit).all()
+        finally:
+            session.remove()
 
     @classmethod
     def get_success_rate(
@@ -137,29 +139,32 @@ class LLMDecision(ModelBase):
         decision_point: Optional[str] = None
     ) -> float:
         """
-        Calculate LLM success rate
+        计算 LLM 成功率
 
         Args:
-            session: Database session
-            strategy: Optional strategy name filter
-            decision_point: Optional decision point filter
+            session: 数据库会话
+            strategy: 可选的策略名称过滤器
+            decision_point: 可选的决策点过滤器
 
         Returns:
-            Success rate as a percentage (0.0-100.0)
+            成功率百分比 (0.0-100.0)
         """
-        query = session.query(cls)
+        try:
+            query = session.query(cls)
 
-        if strategy:
-            query = query.filter(cls.strategy == strategy)
-        if decision_point:
-            query = query.filter(cls.decision_point == decision_point)
+            if strategy:
+                query = query.filter(cls.strategy == strategy)
+            if decision_point:
+                query = query.filter(cls.decision_point == decision_point)
 
-        total = query.count()
-        if total == 0:
-            return 0.0
+            total = query.count()
+            if total == 0:
+                return 0.0
 
-        success = query.filter(cls.success == True).count()
-        return (success / total) * 100
+            success = query.filter(cls.success == True).count()
+            return (success / total) * 100
+        finally:
+            session.remove()
 
     @classmethod
     def get_total_cost(
@@ -168,32 +173,33 @@ class LLMDecision(ModelBase):
         strategy: Optional[str] = None
     ) -> float:
         """
-        Calculate total LLM cost
+        计算 LLM 总成本
 
         Args:
-            session: Database session
-            strategy: Optional strategy name filter
+            session: 数据库会话
+            strategy: 可选的策略名称过滤器
 
         Returns:
-            Total cost in USD
+            总成本（美元）
         """
         from sqlalchemy import func
 
-        query = session.query(func.sum(cls.cost_usd))
+        try:
+            query = session.query(func.sum(cls.cost_usd))
 
-        if strategy:
-            query = query.filter(cls.strategy == strategy)
+            if strategy:
+                query = query.filter(cls.strategy == strategy)
 
-        result = query.filter(cls.success == True).scalar()
-        return float(result or 0.0)
-
-
+            result = query.filter(cls.success == True).scalar()
+            return float(result or 0.0)
+        finally:
+            session.remove()
 class LLMPerformanceMetric(ModelBase):
     """
-    LLM Performance Metrics Table
+    LLM 性能指标表
 
-    Aggregated statistics for LLM performance analysis.
-    Typically populated by a periodic aggregation task.
+    用于 LLM 性能分析的聚合统计数据。
+    通常由定期聚合任务填充。
     """
 
     __tablename__ = "llm_performance_metrics"
@@ -211,36 +217,36 @@ class LLMPerformanceMetric(ModelBase):
         ),
     )
 
-    # Primary key
+    # 主键
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
-    # Dimensions
+    # 维度
     strategy: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     decision_point: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     time_bucket: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
-    # Time bucket for aggregation (e.g., hourly or daily)
+    # 聚合时间桶（例如：每小时或每天）
 
-    # Call statistics
+    # 调用统计
     total_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     success_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cache_hits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    # Performance statistics
+    # 性能统计
     avg_latency_ms: Mapped[float] = mapped_column(Float, nullable=False)
     p95_latency_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     p99_latency_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
-    # Cost statistics
+    # 成本统计
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
-    # Decision quality
+    # 决策质量
     avg_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     decision_distribution: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # JSON string: {"buy": 10, "hold": 5, "sell": 2}
+    # JSON 字符串: {"buy": 10, "hold": 5, "sell": 2}
 
-    # Timestamp
+    # 时间戳
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
     )
@@ -251,14 +257,12 @@ class LLMPerformanceMetric(ModelBase):
             f"decision_point={self.decision_point}, time_bucket={self.time_bucket}, "
             f"total_calls={self.total_calls}, avg_latency={self.avg_latency_ms}ms)"
         )
-
-
 class LLMStrategySnapshot(ModelBase):
     """
-    LLM Strategy Snapshot Table
+    LLM 策略快照表
 
-    Extends strategy snapshots with LLM-specific metrics.
-    Links to the main strategy_snapshots table.
+    使用 LLM 特定指标扩展策略快照。
+    链接到主 strategy_snapshots 表。
     """
 
     __tablename__ = "llm_strategy_snapshots"
@@ -266,32 +270,32 @@ class LLMStrategySnapshot(ModelBase):
 
     session: ClassVar[SessionType]
 
-    # Primary key
+    # 主键
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
-    # Link to strategy_snapshots table (optional, may not exist)
+    # 链接到 strategy_snapshots 表（可选，可能不存在）
     snapshot_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    # Alternative: store strategy and timestamp directly
+    # 替代方案：直接存储策略和时间戳
     strategy: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
-    # LLM usage statistics
+    # LLM 使用统计
     total_llm_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     llm_cache_hit_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
-    # Decision distribution (JSON strings)
+    # 决策分布（JSON 字符串）
     entry_decisions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     exit_decisions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Cost statistics
+    # 成本统计
     cumulative_llm_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
-    # Effect evaluation (optional, requires correlation analysis)
+    # 效果评估（可选，需要相关性分析）
     llm_entry_win_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     llm_exit_timing_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
-    # Timestamp
+    # 时间戳
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
     )
@@ -302,16 +306,15 @@ class LLMStrategySnapshot(ModelBase):
             f"total_calls={self.total_llm_calls}, cost=${self.cumulative_llm_cost_usd:.4f})"
         )
 
-
 def init_llm_tables(engine):
     """
-    Initialize LLM-related database tables
+    初始化 LLM 相关数据库表
 
     Args:
-        engine: SQLAlchemy engine
+        engine: SQLAlchemy 引擎
 
-    This function should be called during database initialization
-    to create the LLM tables if they don't exist.
+    此函数应在数据库初始化期间调用，
+    以创建不存在的 LLM 表。
     """
     try:
         ModelBase.metadata.create_all(
@@ -322,7 +325,7 @@ def init_llm_tables(engine):
                 LLMStrategySnapshot.__table__,
             ]
         )
-        logger.info("LLM database tables initialized successfully")
+        logger.info("LLM 数据库表初始化成功")
     except Exception as e:
-        logger.error(f"Failed to initialize LLM tables: {e}")
+        logger.error(f"初始化 LLM 表失败: {e}")
         raise

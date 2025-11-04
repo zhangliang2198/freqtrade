@@ -1,7 +1,7 @@
 """
-Context Builder
+上下文构建器
 
-Converts market data into LLM-friendly context.
+将市场数据转换为适合LLM使用的上下文。
 """
 
 from typing import Dict, Any, Optional
@@ -14,18 +14,18 @@ logger = logging.getLogger(__name__)
 
 class ContextBuilder:
     """
-    Builds context data for LLM decision making
+    为LLM决策构建上下文数据
 
-    Transforms raw market data (dataframes, trade objects, etc.)
-    into structured context dictionaries that can be used in prompts.
+    将原始市场数据（数据框、交易对象等）
+    转换为可在提示中使用的结构化上下文字典。
     """
 
     def __init__(self, config: Dict[str, Any]):
         """
-        Initialize the context builder
+        初始化上下文构建器
 
         Args:
-            config: Context configuration from llm_config.context
+            config: 来自llm_config.context的上下文配置
         """
         self.config = config
         self.lookback_candles = config.get("lookback_candles", 100)
@@ -42,18 +42,18 @@ class ContextBuilder:
         portfolio_state: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """
-        Build context for entry decision
+        构建入场决策的上下文
 
         Args:
-            dataframe: Analyzed dataframe with indicators
-            metadata: Strategy metadata (pair, etc.)
-            portfolio_state: Optional current portfolio state
+            dataframe: 包含指标的分析数据框
+            metadata: 策略元数据（交易对等）
+            portfolio_state: 可选的当前投资组合状态
 
         Returns:
-            Context dictionary for entry decision
+            入场决策的上下文字典
         """
         if len(dataframe) == 0:
-            raise ValueError("Empty dataframe provided")
+            raise ValueError("提供了空的数据框")
 
         recent_data = dataframe.tail(self.lookback_candles)
         current_candle = dataframe.iloc[-1]
@@ -65,15 +65,15 @@ class ContextBuilder:
             "market_summary": self._summarize_market(recent_data),
         }
 
-        # Add indicators
+        # 添加指标
         if self.include_indicators:
             context["indicators"] = self._extract_indicators(current_candle)
 
-        # Add recent candles
+        # 添加最近的K线
         if self.include_recent_trades:
             context["recent_candles"] = self._format_recent_candles(recent_data, num=10)
 
-        # Add portfolio state
+        # 添加投资组合状态
         if self.include_portfolio_state and portfolio_state:
             context["portfolio"] = portfolio_state
 
@@ -86,21 +86,21 @@ class ContextBuilder:
         dataframe: pd.DataFrame
     ) -> Dict[str, Any]:
         """
-        Build context for exit decision
+        构建出场决策的上下文
 
         Args:
-            trade: Trade object
-            current_rate: Current market rate
-            dataframe: Current analyzed dataframe
+            trade: 交易对象
+            current_rate: 当前市场价格
+            dataframe: 当前分析的数据框
 
         Returns:
-            Context dictionary for exit decision
+            出场决策的上下文字典
         """
-        # Calculate current profit
+        # 计算当前利润
         current_profit_pct = trade.calc_profit_ratio(current_rate) * 100
         current_profit_abs = trade.calc_profit(current_rate)
 
-        # Calculate holding duration
+        # 计算持有时间
         holding_duration_minutes = (
             (datetime.utcnow() - trade.open_date).total_seconds() / 60
         )
@@ -116,13 +116,13 @@ class ContextBuilder:
             "entry_tag": trade.enter_tag,
         }
 
-        # Add optional fields
+        # 添加可选字段
         if trade.max_rate:
             context["max_rate"] = float(trade.max_rate)
         if trade.min_rate:
             context["min_rate"] = float(trade.min_rate)
 
-        # Add current indicators
+        # 添加当前指标
         if self.include_indicators and len(dataframe) > 0:
             context["current_indicators"] = self._extract_indicators(dataframe.iloc[-1])
 
@@ -136,16 +136,16 @@ class ContextBuilder:
         available_balance: float
     ) -> Dict[str, Any]:
         """
-        Build context for stake amount decision
+        构建投资金额决策的上下文
 
         Args:
-            pair: Trading pair
-            current_rate: Current market rate
-            dataframe: Analyzed dataframe
-            available_balance: Available balance for trading
+            pair: 交易对
+            current_rate: 当前市场价格
+            dataframe: 分析的数据框
+            available_balance: 可用于交易的余额
 
         Returns:
-            Context dictionary for stake decision
+            投资决策的上下文字典
         """
         recent_data = dataframe.tail(self.lookback_candles)
 
@@ -157,7 +157,7 @@ class ContextBuilder:
             "volatility": self._calculate_volatility(dataframe),
         }
 
-        # Add current indicators
+        # 添加当前指标
         if self.include_indicators and len(dataframe) > 0:
             context["indicators"] = self._extract_indicators(dataframe.iloc[-1])
 
@@ -172,17 +172,17 @@ class ContextBuilder:
         dataframe: pd.DataFrame
     ) -> Dict[str, Any]:
         """
-        Build context for position adjustment decision
+        构建仓位调整决策的上下文
 
         Args:
-            trade: Trade object
-            current_time: Current timestamp
-            current_rate: Current market rate
-            current_profit: Current profit ratio
-            dataframe: Analyzed dataframe
+            trade: 交易对象
+            current_time: 当前时间戳
+            current_rate: 当前市场价格
+            current_profit: 当前利润率
+            dataframe: 分析的数据框
 
         Returns:
-            Context dictionary for adjustment decision
+            调整决策的上下文字典
         """
         holding_duration_minutes = (
             (current_time - trade.open_date).total_seconds() / 60
@@ -200,7 +200,7 @@ class ContextBuilder:
             "market_summary": self._summarize_market(recent_data),
         }
 
-        # Add indicators
+        # 添加指标
         if self.include_indicators and len(dataframe) > 0:
             context["indicators"] = self._extract_indicators(dataframe.iloc[-1])
 
@@ -215,17 +215,17 @@ class ContextBuilder:
         dataframe: pd.DataFrame
     ) -> Dict[str, Any]:
         """
-        Build context for leverage decision
+        构建杠杆决策的上下文
 
         Args:
-            pair: Trading pair
-            current_rate: Current market rate
-            proposed_leverage: Proposed leverage value
-            max_leverage: Maximum allowed leverage
-            dataframe: Analyzed dataframe
+            pair: 交易对
+            current_rate: 当前市场价格
+            proposed_leverage: 建议的杠杆值
+            max_leverage: 最大允许杠杆
+            dataframe: 分析的数据框
 
         Returns:
-            Context dictionary for leverage decision
+            杠杆决策的上下文字典
         """
         recent_data = dataframe.tail(self.lookback_candles)
 
@@ -238,7 +238,7 @@ class ContextBuilder:
             "market_summary": self._summarize_market(recent_data),
         }
 
-        # Add indicators
+        # 添加指标
         if self.include_indicators and len(dataframe) > 0:
             context["indicators"] = self._extract_indicators(dataframe.iloc[-1])
 
@@ -246,13 +246,13 @@ class ContextBuilder:
 
     def _format_candle(self, row: pd.Series) -> Dict[str, float]:
         """
-        Format a single candle into a dictionary
+        将单个K线格式化为字典
 
         Args:
-            row: DataFrame row representing a candle
+            row: 表示K线的DataFrame行
 
         Returns:
-            Dictionary with OHLCV data
+            包含OHLCV数据的字典
         """
         return {
             "open": float(row.get("open", 0)),
@@ -264,23 +264,23 @@ class ContextBuilder:
 
     def _summarize_market(self, df: pd.DataFrame) -> str:
         """
-        Create a text summary of market conditions
+        创建市场状况的文本摘要
 
         Args:
-            df: DataFrame with candle data
+            df: 包含K线数据的DataFrame
 
         Returns:
-            Human-readable market summary
+            人类可读的市场摘要
         """
         if len(df) == 0:
-            return "No market data available"
+            return "无可用市场数据"
 
         try:
             first_close = float(df.iloc[0]["close"])
             last_close = float(df.iloc[-1]["close"])
             recent_returns = (last_close / first_close - 1) * 100
 
-            # Determine trend
+            # 确定趋势
             if recent_returns > 2:
                 trend = "bullish"
             elif recent_returns < -2:
@@ -288,28 +288,28 @@ class ContextBuilder:
             else:
                 trend = "neutral"
 
-            # Calculate volatility
+            # 计算波动率
             volatility = self._calculate_volatility(df)
 
             return (
-                f"Recent {len(df)} candles: {trend} trend, "
-                f"{recent_returns:+.2f}% change, "
-                f"{volatility:.2f}% volatility"
+                f"最近 {len(df)} 根K线: {trend} 趋势, "
+                f"{recent_returns:+.2f}% 变化, "
+                f"{volatility:.2f}% 波动率"
             )
 
         except Exception as e:
-            logger.warning(f"Failed to summarize market: {e}")
-            return "Market data available but summary unavailable"
+            logger.warning(f"市场摘要生成失败: {e}")
+            return "市场数据可用但摘要不可用"
 
     def _extract_indicators(self, row: pd.Series) -> Dict[str, Any]:
         """
-        Extract technical indicators from a dataframe row
+        从数据框行中提取技术指标
 
         Args:
-            row: DataFrame row with indicator columns
+            row: 包含指标列的DataFrame行
 
         Returns:
-            Dictionary of indicator name -> value
+            指标名称到值的字典
         """
         indicators = {}
 
@@ -317,7 +317,7 @@ class ContextBuilder:
             if indicator_name in row.index:
                 value = row[indicator_name]
 
-                # Handle NaN values
+                # 处理NaN值
                 if pd.isna(value):
                     indicators[indicator_name] = None
                 else:
@@ -327,14 +327,14 @@ class ContextBuilder:
 
     def _format_recent_candles(self, df: pd.DataFrame, num: int = 10) -> list:
         """
-        Format recent candles into a list
+        将最近的K线格式化为列表
 
         Args:
-            df: DataFrame with candle data
-            num: Number of recent candles to include
+            df: 包含K线数据的DataFrame
+            num: 要包含的最近K线数量
 
         Returns:
-            List of formatted candles
+            格式化后的K线列表
         """
         candles = []
         start_idx = max(0, len(df) - num)
@@ -346,26 +346,26 @@ class ContextBuilder:
 
     def _calculate_volatility(self, df: pd.DataFrame, window: int = 20) -> float:
         """
-        Calculate price volatility (standard deviation of returns)
+        计算价格波动率（收益率的标准差）
 
         Args:
-            df: DataFrame with close prices
-            window: Window size for calculation
+            df: 包含收盘价的DataFrame
+            window: 计算窗口大小
 
         Returns:
-            Volatility as a percentage
+            波动率百分比
         """
         try:
             if len(df) < 2:
                 return 0.0
 
-            # Calculate returns
+            # 计算收益率
             returns = df["close"].pct_change().dropna()
 
             if len(returns) == 0:
                 return 0.0
 
-            # Use rolling window if enough data
+            # 如果数据足够，使用滚动窗口
             if len(returns) > window:
                 volatility = returns.tail(window).std()
             else:
@@ -374,5 +374,5 @@ class ContextBuilder:
             return float(volatility * 100)
 
         except Exception as e:
-            logger.warning(f"Failed to calculate volatility: {e}")
+            logger.warning(f"波动率计算失败: {e}")
             return 0.0

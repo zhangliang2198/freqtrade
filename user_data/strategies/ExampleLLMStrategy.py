@@ -1,8 +1,8 @@
 """
-Example LLM-Assisted Trading Strategy
+示例 LLM 辅助交易策略。
 
-This is an example strategy that uses LLM for all trading decisions.
-It serves as a template for creating your own LLM-powered strategies.
+这是一个使用 LLM 进行所有交易决策的示例策略。
+它作为创建您自己的 LLM 驱动策略的模板。
 """
 
 import pandas as pd
@@ -13,93 +13,93 @@ from freqtrade.strategy.LLMStrategy import LLMStrategy
 
 class ExampleLLMStrategy(LLMStrategy):
     """
-    Example LLM-Assisted Strategy
+    示例 LLM 辅助策略
 
-    This strategy demonstrates how to use the LLM integration for trading.
-    It calculates common technical indicators and lets the LLM make all
-    trading decisions based on those indicators.
+    此策略演示如何使用 LLM 集成进行交易。
+    它计算常见的技术指标，并让 LLM 基于这些指标做出所有
+    交易决策。
 
-    To use this strategy:
-    1. Configure LLM settings in your config.json (see config_examples/config_llm.example.json)
-    2. Set your API key as an environment variable
-    3. Run: freqtrade trade -c config.json --strategy ExampleLLMStrategy
+    使用此策略：
+    1. 在您的 config.json 中配置 LLM 设置 (参见 config_examples/config_llm.example.json)
+    2. 将您的 API 密钥设置为环境变量
+    3. 运行: freqtrade trade -c config.json --strategy ExampleLLMStrategy
     """
 
-    # Strategy interface version
+    # 策略接口版本
     INTERFACE_VERSION = 3
 
-    # Basic strategy parameters
+    # 基本策略参数
     timeframe = "5m"
 
-    # Risk management
+    # 风险管理
     stoploss = -0.10
     trailing_stop = False
     use_custom_stoploss = False
 
-    # ROI table (fallback if LLM doesn't exit)
+    # ROI 表 (如果 LLM 不出场则使用)
     minimal_roi = {
-        "0": 0.10,      # 10% profit
-        "30": 0.05,     # 5% profit after 30 minutes
-        "60": 0.03,     # 3% profit after 1 hour
-        "120": 0.01     # 1% profit after 2 hours
+        "0": 0.10,      # 10% 利润
+        "30": 0.05,     # 30分钟后 5% 利润
+        "60": 0.03,     # 1小时后 3% 利润
+        "120": 0.01     # 2小时后 1% 利润
     }
 
-    # Enable position adjustment (DCA/pyramiding)
+    # 启用仓位调整 (DCA/金字塔)
     position_adjustment_enable = True
     max_entry_position_adjustment = 3
 
-    # Startup candle count (for indicator calculation)
+    # 启动K线数量 (用于指标计算)
     startup_candle_count = 100
 
-    # Enable shorting if your exchange supports it
+    # 如果您的交易所支持，启用做空
     can_short = False
 
     def populate_indicators(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """
-        Calculate technical indicators
+        计算技术指标
 
-        The LLM will use these indicators to make trading decisions.
-        Add or remove indicators based on your trading style.
+        LLM 将使用这些指标做出交易决策。
+        根据您的交易风格添加或移除指标。
 
         Args:
-            dataframe: OHLCV data
-            metadata: Strategy metadata (pair, timeframe, etc.)
+            dataframe: OHLCV 数据
+            metadata: 策略元数据 (交易对、时间框架等)
 
         Returns:
-            Dataframe with indicators added
+            添加了指标的数据框
         """
-        # RSI (Relative Strength Index)
+        # RSI (相对强弱指数)
         dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
 
-        # MACD (Moving Average Convergence Divergence)
+        # MACD (移动平均收敛发散)
         macd = ta.MACD(dataframe)
         dataframe["macd"] = macd["macd"]
         dataframe["macdsignal"] = macd["macdsignal"]
         dataframe["macdhist"] = macd["macdhist"]
 
-        # Bollinger Bands
+        # 布林带
         bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2, nbdevdn=2)
         dataframe["bb_lower"] = bollinger["lowerband"]
         dataframe["bb_middle"] = bollinger["middleband"]
         dataframe["bb_upper"] = bollinger["upperband"]
         dataframe["bb_width"] = (dataframe["bb_upper"] - dataframe["bb_lower"]) / dataframe["bb_middle"]
 
-        # EMAs (Exponential Moving Averages)
+        # EMAs (指数移动平均线)
         dataframe["ema_9"] = ta.EMA(dataframe, timeperiod=9)
         dataframe["ema_21"] = ta.EMA(dataframe, timeperiod=21)
         dataframe["ema_50"] = ta.EMA(dataframe, timeperiod=50)
 
-        # Volume indicators
+        # 成交量指标
         dataframe["volume_mean"] = dataframe["volume"].rolling(window=20).mean()
         dataframe["volume_ratio"] = dataframe["volume"] / dataframe["volume_mean"]
 
-        # ATR (Average True Range) for volatility
+        # ATR (平均真实波幅) 用于波动性
         dataframe["atr"] = ta.ATR(dataframe, timeperiod=14)
 
-        # Trend indicators
+        # 趋势指标
         dataframe["adx"] = ta.ADX(dataframe, timeperiod=14)
 
-        # Stochastic
+        # 随机指标
         stoch = ta.STOCH(dataframe)
         dataframe["slowk"] = stoch["slowk"]
         dataframe["slowd"] = stoch["slowd"]
@@ -108,18 +108,18 @@ class ExampleLLMStrategy(LLMStrategy):
 
     def populate_exit_trend(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """
-        We use custom_exit for LLM-based exits, so this is not needed.
+        我们使用 custom_exit 进行基于 LLM 的出场，所以这里不需要。
         """
         return dataframe
 
-    # Optional: Override fallback methods for non-LLM behavior
+    # 可选: 覆盖回退方法以实现非 LLM 行为
 
     def _populate_entry_trend_fallback(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """
-        Fallback entry logic when LLM is not available
+        LLM 不可用时的回退入场逻辑
 
-        This is a simple example using RSI and MACD.
-        Feel free to customize or remove this.
+        这是一个使用 RSI 和 MACD 的简单示例。
+        随意自定义或移除此部分。
         """
         dataframe.loc[
             (
@@ -141,15 +141,15 @@ class ExampleLLMStrategy(LLMStrategy):
         current_profit: float
     ):
         """
-        Fallback exit logic when LLM is not available
+        LLM 不可用时的回退出场逻辑
 
-        Simple profit target example.
+        简单的利润目标示例。
         """
-        # Take profit at 5%
+        # 在 5% 时止盈
         if current_profit > 0.05:
             return "profit_target_5pct"
 
-        # Stop loss at -8%
+        # 在 -8% 时止损
         if current_profit < -0.08:
             return "stop_loss_8pct"
 

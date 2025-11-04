@@ -8,7 +8,7 @@ LLM 辅助交易策略允许您使用大语言模型（如 GPT-4、Claude）来�
 - **出场决策** (`custom_exit`)：判断是否平仓
 - **仓位管理** (`custom_stake_amount`)：动态调整开仓金额
 - **加仓决策** (`adjust_trade_position`)：判断是否加仓或减仓
-- **杠杆控制** (`leverage`)：根据市场状况调整杠杆
+- **杠杆控制** (`leverage`)：根据市场状况调整杠杆。
 
 ## 快速开始
 

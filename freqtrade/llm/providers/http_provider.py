@@ -31,7 +31,7 @@ class HttpLLMProvider(LLMProvider):
         """
         初始化 HTTP LLM 提供商
 
-        参数:
+        Args:
             config: 配置字典，包含:
                 - api_url: API 端点 URL
                 - api_key: API 密钥（可选）
@@ -60,14 +60,14 @@ class HttpLLMProvider(LLMProvider):
         """
         通过 HTTP 调用 LLM API
 
-        参数:
+        Args:
             prompt: 输入提示词
             temperature: 温度参数 (0.0-1.0)
 
-        返回:
+        Returns:
             LLM 响应文本
 
-        异常:
+        Raises:
             Exception: 当 API 调用失败时
         """
         # 构建请求头

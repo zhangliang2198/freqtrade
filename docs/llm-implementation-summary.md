@@ -13,7 +13,7 @@
 
 #### 1. LLM 提供商层 (`freqtrade/llm/providers/`)
 
-- **基类** (`base.py`) - 定义统一接口
+- **基类** (`base.py`) - 定义统一接口；
 - **OpenAI Provider** (`openai_provider.py`) - 支持 GPT-4o, GPT-4o-mini 等
 - **Anthropic Provider** (`anthropic_provider.py`) - 支持 Claude 3.5 Sonnet, Haiku 等
 - **Ollama Provider** (`ollama_provider.py`) - 支持本地模型（Llama 3, Mistral 等）

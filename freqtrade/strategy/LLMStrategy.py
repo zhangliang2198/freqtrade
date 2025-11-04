@@ -1,43 +1,43 @@
 """
-LLM-Assisted Strategy Base Class
+LLM 辅助策略基类
 
-Provides a base class for strategies that use LLM for trading decisions.
+为使用 LLM 进行交易决策的策略提供基类。
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime
 
 import pandas as pd
 
-from freqtrade.strategy import IStrategy
+from freqtrade.strategy import BaseStrategyWithSnapshot
 from freqtrade.llm.engine import LLMDecisionEngine, LLMRequest
 
 logger = logging.getLogger(__name__)
 
 
-class LLMStrategy(IStrategy):
+class LLMStrategy(BaseStrategyWithSnapshot):
     """
-    LLM-Assisted Strategy Base Class
+    LLM 辅助策略基类
 
-    This base class integrates LLM decision making into the Freqtrade strategy framework.
-    It provides LLM-powered implementations of key decision points:
-    - Entry signals (populate_entry_trend)
-    - Exit signals (custom_exit)
-    - Position sizing (custom_stake_amount)
-    - Position adjustment (adjust_trade_position)
-    - Leverage control (leverage)
+    此基类将 LLM 决策集成到 Freqtrade 策略框架中。
+    它提供由 LLM 驱动的关键决策点实现：
+    - 入场信号 (populate_entry_trend)
+    - 出场信号 (custom_exit)
+    - 仓位大小 (custom_stake_amount)
+    - 仓位调整 (adjust_trade_position)
+    - 杠杆控制 (leverage)
 
-    Subclasses must implement populate_indicators() and can override
-    any decision method to customize behavior.
+    子类必须实现 populate_indicators() 并可以覆盖
+    任何决策方法来自定义行为。
 
-    Example:
+    示例:
         class MyLLMStrategy(LLMStrategy):
             timeframe = "5m"
             stoploss = -0.10
 
             def populate_indicators(self, dataframe, metadata):
-                # Add your indicators
+                # 添加您的指标
                 dataframe['rsi'] = ta.RSI(dataframe)
                 return dataframe
     """
@@ -48,12 +48,20 @@ class LLMStrategy(IStrategy):
     # LLM engine instance (initialized in bot_start)
     llm_engine: Optional[LLMDecisionEngine] = None
 
+    def __init__(self, config) -> None:
+        """
+        初始化 LLM 策略
+
+        调用父类初始化以启用资产快照和账户分离功能
+        """
+        super().__init__(config)
+
     def bot_start(self, **kwargs) -> None:
         """
-        Initialize the LLM decision engine when the bot starts
+        机器人启动时初始化 LLM 决策引擎
 
-        This is called once at bot startup. If LLM is enabled in config,
-        it initializes the decision engine.
+        这在机器人启动时调用一次。如果配置中启用了 LLM，
+        则初始化决策引擎。
         """
         llm_config = self.config.get("llm_config", {})
 
@@ -64,41 +72,37 @@ class LLMStrategy(IStrategy):
                     strategy_name=self.__class__.__name__
                 )
                 logger.info(
-                    f"LLM Decision Engine initialized for {self.__class__.__name__} "
-                    f"using {llm_config['provider']}/{llm_config['model']}"
+                    f"LLM 决策引擎已为 {self.__class__.__name__} 初始化，"
+                    f"使用 {llm_config['provider']}/{llm_config['model']}"
                 )
 
-                # Create default templates if requested
-                if llm_config.get("create_default_templates", False):
-                    self.llm_engine.prompt_manager.create_default_templates()
-
             except Exception as e:
-                logger.error(f"Failed to initialize LLM engine: {e}", exc_info=True)
+                logger.error(f"初始化 LLM 引擎失败: {e}", exc_info=True)
                 self.llm_engine = None
-                logger.warning("Strategy will continue without LLM assistance")
+                logger.warning("策略将在没有 LLM 辅助的情况下继续运行")
         else:
-            logger.info("LLM is disabled in config")
+            logger.info("配置中 LLM 已禁用")
 
     def populate_entry_trend(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """
-        Use LLM to determine entry signals
+        使用 LLM 确定入场信号
 
         Args:
-            dataframe: Dataframe with indicators
-            metadata: Additional information like pair
+            dataframe: 包含指标的数据框
+            metadata: 附加信息如交易对
 
         Returns:
-            Dataframe with entry signals added
+            添加了入场信号的数据框
         """
         if not self.llm_engine:
             return self._populate_entry_trend_fallback(dataframe, metadata)
 
-        # Only decide on the last candle
+        # 只在最后一根K线上做决策
         if len(dataframe) < 1:
             return dataframe
 
         try:
-            # Build context
+            # 构建上下文
             portfolio_state = self._get_portfolio_state() if hasattr(self, 'wallets') else None
             context = self.llm_engine.context_builder.build_entry_context(
                 dataframe=dataframe,
@@ -106,17 +110,17 @@ class LLMStrategy(IStrategy):
                 portfolio_state=portfolio_state
             )
 
-            # Create request
+            # 创建请求
             request = LLMRequest(
                 decision_point="entry",
                 pair=metadata["pair"],
                 context=context
             )
 
-            # Get LLM decision
+            # 获取 LLM 决策
             response = self.llm_engine.decide(request)
 
-            # Apply decision
+            # 应用决策
             if response.decision == "buy":
                 dataframe.loc[dataframe.index[-1], "enter_long"] = 1
                 confidence_tag = f"llm_entry_c{int(response.confidence * 100)}"
@@ -127,10 +131,10 @@ class LLMStrategy(IStrategy):
                 confidence_tag = f"llm_short_c{int(response.confidence * 100)}"
                 dataframe.loc[dataframe.index[-1], "enter_tag"] = confidence_tag
 
-            # 'hold' decision means no entry
+            # 'hold' 决策表示不入场
 
         except Exception as e:
-            logger.error(f"LLM entry decision failed: {e}", exc_info=True)
+            logger.error(f"LLM 入场决策失败: {e}", exc_info=True)
 
         return dataframe
 
@@ -144,36 +148,36 @@ class LLMStrategy(IStrategy):
         **kwargs
     ) -> Optional[str]:
         """
-        Use LLM to determine if position should be exited
+        使用 LLM 确定是否应该退出仓位
 
         Args:
-            pair: Trading pair
-            trade: Trade object
-            current_time: Current timestamp
-            current_rate: Current market rate
-            current_profit: Current profit ratio
+            pair: 交易对
+            trade: 交易对象
+            current_time: 当前时间戳
+            current_rate: 当前市场价格
+            current_profit: 当前利润率
 
         Returns:
-            Exit reason string if should exit, None otherwise
+            如果应该退出则返回退出原因字符串，否则返回 None
         """
         if not self.llm_engine:
             return self._custom_exit_fallback(pair, trade, current_time, current_rate, current_profit)
 
         try:
-            # Get current dataframe
+            # 获取当前数据框
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
 
             if len(dataframe) == 0:
                 return None
 
-            # Build context
+            # 构建上下文
             context = self.llm_engine.context_builder.build_exit_context(
                 trade=trade,
                 current_rate=current_rate,
                 dataframe=dataframe
             )
 
-            # Create request
+            # 创建请求
             request = LLMRequest(
                 decision_point="exit",
                 pair=pair,
@@ -181,17 +185,17 @@ class LLMStrategy(IStrategy):
                 trade_id=trade.id
             )
 
-            # Get LLM decision
+            # 获取 LLM 决策
             response = self.llm_engine.decide(request)
 
-            # Apply decision
+            # 应用决策
             if response.decision in ["exit", "sell"]:
-                # Truncate reasoning to fit in exit reason
+                # 截断推理以适应退出原因
                 reason = response.reasoning[:30] if response.reasoning else "llm_exit"
                 return f"llm_{reason.replace(' ', '_')}"
 
         except Exception as e:
-            logger.error(f"LLM exit decision failed: {e}", exc_info=True)
+            logger.error(f"LLM 出场决策失败: {e}", exc_info=True)
 
         return None
 
@@ -209,39 +213,39 @@ class LLMStrategy(IStrategy):
         **kwargs
     ) -> float:
         """
-        Use LLM to dynamically adjust position size
+        使用 LLM 动态调整仓位大小
 
         Args:
-            pair: Trading pair
-            current_time: Current timestamp
-            current_rate: Current market rate
-            proposed_stake: Proposed stake amount
-            min_stake: Minimum stake amount
-            max_stake: Maximum stake amount
-            leverage: Current leverage
-            entry_tag: Entry tag
-            side: Trade side (long/short)
+            pair: 交易对
+            current_time: 当前时间戳
+            current_rate: 当前市场价格
+            proposed_stake: 建议的投入金额
+            min_stake: 最小投入金额
+            max_stake: 最大投入金额
+            leverage: 当前杠杆
+            entry_tag: 入场标签
+            side: 交易方向 (多头/空头)
 
         Returns:
-            Adjusted stake amount
+            调整后的投入金额
         """
         if not self.llm_engine:
             return proposed_stake
 
         try:
-            # Get available balance
+            # 获取可用余额
             if hasattr(self, 'wallets') and self.wallets:
                 available_balance = self.wallets.get_free(self.config["stake_currency"])
             else:
                 available_balance = proposed_stake
 
-            # Get current dataframe
+            # 获取当前数据框
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
 
             if len(dataframe) == 0:
                 return proposed_stake
 
-            # Build context
+            # 构建上下文
             context = self.llm_engine.context_builder.build_stake_context(
                 pair=pair,
                 current_rate=current_rate,
@@ -249,49 +253,49 @@ class LLMStrategy(IStrategy):
                 available_balance=available_balance
             )
 
-            # Create request
+            # 创建请求
             request = LLMRequest(
                 decision_point="stake",
                 pair=pair,
                 context=context
             )
 
-            # Get LLM decision
+            # 获取 LLM 决策
             response = self.llm_engine.decide(request)
 
-            # Apply decision
+            # 应用决策
             if response.decision == "default":
                 return proposed_stake
 
-            # Get stake multiplier from parameters
+            # 从参数中获取投入倍数
             stake_multiplier = response.parameters.get("stake_multiplier", 1.0)
 
-            # Get limits from config
+            # 从配置中获取限制
             point_config = self.llm_engine.config.get("decision_points", {}).get("stake", {})
             min_multiplier = point_config.get("min_stake_multiplier", 0.5)
             max_multiplier = point_config.get("max_stake_multiplier", 2.0)
 
-            # Clamp multiplier
+            # 限制倍数范围
             stake_multiplier = max(min_multiplier, min(stake_multiplier, max_multiplier))
 
-            # Calculate adjusted stake
+            # 计算调整后的投入
             adjusted_stake = proposed_stake * stake_multiplier
 
-            # Ensure within bounds
+            # 确保在限制范围内
             if min_stake:
                 adjusted_stake = max(adjusted_stake, min_stake)
             adjusted_stake = min(adjusted_stake, max_stake)
 
             logger.info(
-                f"LLM adjusted stake for {pair}: "
+                f"LLM 调整了 {pair} 的仓位: "
                 f"{proposed_stake:.2f} -> {adjusted_stake:.2f} "
                 f"(multiplier: {stake_multiplier:.2f})"
             )
 
             return adjusted_stake
-
+    
         except Exception as e:
-            logger.error(f"LLM stake decision failed: {e}", exc_info=True)
+            logger.error(f"LLM 仓位调整决策失败: {e}", exc_info=True)
             return proposed_stake
 
     def adjust_trade_position(
@@ -309,31 +313,31 @@ class LLMStrategy(IStrategy):
         **kwargs
     ) -> Optional[float]:
         """
-        Use LLM to determine if position should be adjusted (DCA/pyramid)
+        使用 LLM 确定是否应该调整仓位 (DCA/金字塔)
 
         Args:
-            trade: Trade object
-            current_time: Current timestamp
-            current_rate: Current market rate
-            current_profit: Current profit ratio
-            min_stake: Minimum stake for adjustment
-            max_stake: Maximum stake for adjustment
-            (other parameters as per Freqtrade interface)
+            trade: 交易对象
+            current_time: 当前时间戳
+            current_rate: 当前市场价格
+            current_profit: 当前利润率
+            min_stake: 调整的最小投入金额
+            max_stake: 调整的最大投入金额
+            (其他参数按照 Freqtrade 接口)
 
         Returns:
-            Stake amount to add (positive) or remove (negative), or None for no change
+            要添加 (正数) 或移除 (负数) 的投入金额，无变化则返回 None
         """
         if not self.llm_engine:
             return None
 
         try:
-            # Get current dataframe
+            # 获取当前数据框
             dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
 
             if len(dataframe) == 0:
                 return None
 
-            # Build context
+            # 构建上下文
             context = self.llm_engine.context_builder.build_adjust_position_context(
                 trade=trade,
                 current_time=current_time,
@@ -342,7 +346,7 @@ class LLMStrategy(IStrategy):
                 dataframe=dataframe
             )
 
-            # Create request
+            # 创建请求
             request = LLMRequest(
                 decision_point="adjust_position",
                 pair=trade.pair,
@@ -350,36 +354,36 @@ class LLMStrategy(IStrategy):
                 trade_id=trade.id
             )
 
-            # Get LLM decision
+            # 获取 LLM 决策
             response = self.llm_engine.decide(request)
 
-            # Apply decision
+            # 应用决策
             if response.decision == "no_change":
                 return None
 
-            # Get adjustment ratio from parameters
+            # 从参数中获取调整比例
             adjustment_ratio = response.parameters.get("adjustment_ratio", 0.0)
 
-            # Get max ratio from config
+            # 从配置中获取最大比例
             point_config = self.llm_engine.config.get("decision_points", {}).get("adjust_position", {})
             max_ratio = point_config.get("max_adjustment_ratio", 0.3)
 
-            # Clamp ratio
+            # 限制比例范围
             adjustment_ratio = max(-max_ratio, min(adjustment_ratio, max_ratio))
 
-            # Calculate adjustment stake
+            # 计算调整投入
             adjustment_stake = trade.stake_amount * adjustment_ratio
 
-            # Check if adjustment is significant enough
+            # 检查调整是否足够显著
             if min_stake and abs(adjustment_stake) < min_stake:
                 return None
 
-            # Ensure within max_stake limits
+            # 确保在最大投入限制内
             if adjustment_stake > 0:
                 adjustment_stake = min(adjustment_stake, max_stake)
 
             logger.info(
-                f"LLM position adjustment for {trade.pair}: "
+                f"LLM 调整了 {trade.pair} 的持仓: "
                 f"{'add' if adjustment_stake > 0 else 'reduce'} "
                 f"{abs(adjustment_stake):.2f} (ratio: {adjustment_ratio:.2%})"
             )
@@ -387,7 +391,7 @@ class LLMStrategy(IStrategy):
             return adjustment_stake
 
         except Exception as e:
-            logger.error(f"LLM adjust position decision failed: {e}", exc_info=True)
+            logger.error(f"LLM 调仓决策失败: {e}", exc_info=True)
             return None
 
     def leverage(
@@ -402,31 +406,31 @@ class LLMStrategy(IStrategy):
         **kwargs
     ) -> float:
         """
-        Use LLM to dynamically adjust leverage
+        使用 LLM 动态调整杠杆
 
         Args:
-            pair: Trading pair
-            current_time: Current timestamp
-            current_rate: Current market rate
-            proposed_leverage: Proposed leverage value
-            max_leverage: Maximum allowed leverage
-            entry_tag: Entry tag
-            side: Trade side (long/short)
+            pair: 交易对
+            current_time: 当前时间戳
+            current_rate: 当前市场价格
+            proposed_leverage: 建议的杠杆值
+            max_leverage: 允许的最大杠杆
+            entry_tag: 入场标签
+            side: 交易方向 (多头/空头)
 
         Returns:
-            Adjusted leverage value
+            调整后的杠杆值
         """
         if not self.llm_engine:
             return proposed_leverage
 
         try:
-            # Get current dataframe
+            # 获取当前数据框
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
 
             if len(dataframe) == 0:
                 return proposed_leverage
 
-            # Build context
+            # 构建上下文
             context = self.llm_engine.context_builder.build_leverage_context(
                 pair=pair,
                 current_rate=current_rate,
@@ -435,46 +439,46 @@ class LLMStrategy(IStrategy):
                 dataframe=dataframe
             )
 
-            # Create request
+            # 创建请求
             request = LLMRequest(
                 decision_point="leverage",
                 pair=pair,
                 context=context
             )
 
-            # Get LLM decision
+            # 获取 LLM 决策
             response = self.llm_engine.decide(request)
 
-            # Apply decision
+            # 应用决策
             if response.decision == "default":
                 return proposed_leverage
 
-            # Get leverage from parameters
+            # 从参数中获取杠杆
             llm_leverage = response.parameters.get("leverage", proposed_leverage)
 
-            # Get limits from config
+            # 从配置中获取限制
             point_config = self.llm_engine.config.get("decision_points", {}).get("leverage", {})
             min_leverage = point_config.get("min_leverage", 1.0)
             max_leverage_config = point_config.get("max_leverage", 10.0)
 
-            # Clamp leverage
+            # 限制杠杆范围
             llm_leverage = max(
                 min_leverage,
                 min(llm_leverage, max_leverage_config, max_leverage)
             )
 
             logger.info(
-                f"LLM adjusted leverage for {pair}: "
+                f"LLM 调整了 {pair} 的杠杆: "
                 f"{proposed_leverage:.1f}x -> {llm_leverage:.1f}x"
             )
 
             return llm_leverage
 
         except Exception as e:
-            logger.error(f"LLM leverage decision failed: {e}", exc_info=True)
+            logger.error(f"LLM 杠杆决策失败: {e}", exc_info=True)
             return proposed_leverage
 
-    # Fallback methods (called when LLM is not available)
+    # 回退方法 (当 LLM 不可用时调用)
 
     def _populate_entry_trend_fallback(
         self,
@@ -482,11 +486,11 @@ class LLMStrategy(IStrategy):
         metadata: dict
     ) -> pd.DataFrame:
         """
-        Fallback entry logic when LLM is not available
+        LLM 不可用时的回退入场逻辑
 
-        Default: no entries. Subclasses can override.
+        默认: 不入场。子类可以覆盖。
         """
-        # By default, don't enter any trades
+        # 默认情况下，不进行任何交易
         return dataframe
 
     def _custom_exit_fallback(
@@ -498,18 +502,18 @@ class LLMStrategy(IStrategy):
         current_profit: float
     ) -> Optional[str]:
         """
-        Fallback exit logic when LLM is not available
+        LLM 不可用时的回退出场逻辑
 
-        Default: no custom exits. Subclasses can override.
+        默认: 无自定义出场。子类可以覆盖。
         """
         return None
 
     def _get_portfolio_state(self) -> Optional[dict]:
         """
-        Get current portfolio state for context
+        获取当前投资组合状态作为上下文
 
         Returns:
-            Dictionary with portfolio information
+            包含投资组合信息的字典
         """
         if not hasattr(self, 'wallets') or not self.wallets:
             return None
@@ -517,7 +521,7 @@ class LLMStrategy(IStrategy):
         try:
             from freqtrade.persistence import Trade
 
-            # Get open trades
+            # 获取开仓交易
             open_trades = Trade.get_open_trades()
 
             return {
@@ -527,21 +531,61 @@ class LLMStrategy(IStrategy):
                 "total_balance": self.wallets.get_total(self.config["stake_currency"]),
             }
         except Exception as e:
-            logger.warning(f"Failed to get portfolio state: {e}")
+            logger.warning(f"获取持仓状态失败: {e}")
             return None
 
     def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
         """
-        Called at the start of each bot loop
+        在每个机器人循环开始时调用
 
-        Can be overridden to add custom behavior, like logging LLM stats.
+        先调用父类方法记录资产快照，再定期记录 LLM 统计信息。
         """
-        # Log LLM stats periodically (every 100 calls)
+        # 先调用父类方法，记录资产快照
+        super().bot_loop_start(current_time=current_time, **kwargs)
+
+        # 定期记录 LLM 统计信息 (每100次调用)
         if self.llm_engine and self.llm_engine.stats["total_calls"] % 100 == 0:
             stats = self.llm_engine.get_stats()
             logger.info(
-                f"LLM Stats: {stats['total_calls']} calls, "
+                f"LLM 统计: {stats['total_calls']} 次调用, "
                 f"{stats['cache_hit_rate']:.1%} cache hit rate, "
                 f"${stats['total_cost_usd']:.2f} total cost, "
                 f"{stats['errors']} errors"
             )
+
+    def log_strategy_specific_info(
+        self, current_time: datetime, asset_data: dict[str, Any], **kwargs
+    ) -> None:
+        """
+        记录 LLM 策略特定的信息
+
+        由父类 BaseStrategyWithSnapshot 在每个 loop 调用，
+        用于输出 LLM 引擎的状态信息。
+        """
+        if not self.llm_engine:
+            return
+
+        stats = self.llm_engine.get_stats()
+        logger.info("🤖 【LLM 引擎状态】")
+        logger.info(f"  总调用次数: {stats['total_calls']:>12}")
+        logger.info(f"  缓存命中率: {stats['cache_hit_rate']:>11.1%}")
+        logger.info(f"  总成本: ${stats['total_cost_usd']:>12.2f}")
+        logger.info(f"  错误次数: {stats['errors']:>12}")
+
+    def get_extra_snapshot_data(self, asset_data: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """
+        保存 LLM 统计信息到数据库快照
+
+        由父类 BaseStrategyWithSnapshot 调用，
+        返回的数据将保存到 strategy_snapshots 表的 extra_data 字段。
+        """
+        if not self.llm_engine:
+            return None
+
+        stats = self.llm_engine.get_stats()
+        return {
+            'llm_total_calls': stats['total_calls'],
+            'llm_cache_hit_rate': stats['cache_hit_rate'],
+            'llm_total_cost_usd': stats['total_cost_usd'],
+            'llm_errors': stats['errors'],
+        }

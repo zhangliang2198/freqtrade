@@ -1,5 +1,5 @@
 """
-Base LLM Provider Interface
+基础 LLM 提供商接口
 """
 
 from abc import ABC, abstractmethod
@@ -11,18 +11,18 @@ logger = logging.getLogger(__name__)
 
 class LLMProvider(ABC):
     """
-    Abstract base class for LLM providers
+    LLM 提供商的抽象基类
 
-    All LLM providers must implement this interface to ensure
-    consistent behavior across different models and APIs.
+    所有 LLM 提供商都必须实现此接口，以确保
+    不同模型和 API 之间的一致行为。
     """
 
     def __init__(self, config: Dict[str, Any]):
         """
-        Initialize the LLM provider
+        初始化 LLM 提供商
 
         Args:
-            config: Provider configuration dictionary
+            config: 提供商配置字典
         """
         self.config = config
         self.model = config.get("model")
@@ -33,42 +33,46 @@ class LLMProvider(ABC):
     @abstractmethod
     def complete(self, prompt: str, temperature: float = 0.1) -> str:
         """
-        Call the LLM to complete a prompt
+        调用 LLM 完成提示
 
         Args:
-            prompt: The input prompt
-            temperature: Temperature parameter (0.0-1.0), lower = more deterministic
+            prompt: 输入提示
+            temperature: 温度参数 (0.0-1.0)，值越低越确定性
 
         Returns:
-            The LLM response text
+            LLM 响应文本
 
         Raises:
-            Exception: If the API call fails
+            Exception: 如果 API 调用失败
         """
         pass
 
     @abstractmethod
     def get_usage_info(self) -> Dict[str, Any]:
         """
-        Get usage information from the last API call
+        获取上次 API 调用的使用信息
 
         Returns:
-            Dictionary containing:
-                - tokens_used: Total tokens consumed
-                - cost_usd: Estimated cost in USD
+            包含以下内容的字典：
+                - tokens_used: 消耗的总令牌数
+                - cost_usd: 估算的美元成本
         """
         pass
 
     def validate_config(self) -> bool:
         """
-        Validate the provider configuration
+        验证提供商配置
 
         Returns:
-            True if configuration is valid
+            如果配置有效则返回 True
+
+        Raises:
+            ValueError: 如果配置无效
         """
         required_fields = ["model"]
         for field in required_fields:
             if field not in self.config:
-                logger.error(f"Missing required config field: {field}")
-                return False
+                error_msg = f"缺少必需的配置字段: {field}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
         return True

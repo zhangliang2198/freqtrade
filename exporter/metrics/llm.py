@@ -1,7 +1,7 @@
 """
 LLM Metrics Collector
 
-Collects metrics about LLM usage for Prometheus export.
+Collects metrics about LLM usage for Prometheus export。
 """
 
 from typing import Generator

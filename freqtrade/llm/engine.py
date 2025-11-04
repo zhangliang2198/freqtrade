@@ -1,7 +1,7 @@
 """
-LLM Decision Engine
+LLM 决策引擎
 
-Core engine for managing LLM-based trading decisions.
+用于管理基于 LLM 的交易决策的核心引擎，
 """
 
 from dataclasses import dataclass
@@ -23,7 +23,7 @@ DecisionPoint = Literal["entry", "exit", "stake", "adjust_position", "leverage"]
 
 @dataclass
 class LLMRequest:
-    """LLM request data structure"""
+    """LLM 请求数据结构"""
     decision_point: DecisionPoint
     pair: str
     context: Dict[str, Any]
@@ -32,13 +32,13 @@ class LLMRequest:
 
 @dataclass
 class LLMResponse:
-    """LLM response data structure"""
+    """LLM 响应数据结构"""
     decision: str
     confidence: float
     reasoning: str
     parameters: Dict[str, Any]
 
-    # Metadata
+    # 元数据
     latency_ms: int
     tokens_used: Optional[int]
     cost_usd: Optional[float]
@@ -47,43 +47,43 @@ class LLMResponse:
 
 class LLMDecisionEngine:
     """
-    LLM Decision Engine
+    LLM 决策引擎
 
-    Orchestrates LLM calls for trading decisions, manages caching,
-    and logs results to database.
+    协调用于交易决策的 LLM 调用，管理缓存，
+    并将结果记录到数据库。
     """
 
     def __init__(self, config: Dict[str, Any], strategy_name: str):
         """
-        Initialize the LLM decision engine
+        初始化 LLM 决策引擎
 
         Args:
-            config: Full Freqtrade configuration
-            strategy_name: Name of the strategy using this engine
+            config: 完整的 Freqtrade 配置
+            strategy_name: 使用此引擎的策略名称
         """
         self.config = config.get("llm_config", {})
         self.strategy_name = strategy_name
 
         if not self.config.get("enabled", False):
-            logger.warning("LLM config is disabled")
+            logger.warning("LLM 配置已禁用")
             return
 
-        # Initialize provider
+        # 初始化提供商
         self.provider = self._init_provider()
 
-        # Initialize cache (using simple dict for now, can upgrade to TTLCache)
+        # 初始化缓存（目前使用简单字典，可以升级到 TTLCache）
         self.caches: Dict[DecisionPoint, Dict[str, tuple[LLMResponse, float]]] = {}
         for point in ["entry", "exit", "stake", "adjust_position", "leverage"]:
             self.caches[point] = {}
 
-        # Initialize prompt manager
+        # 初始化提示词管理器
         user_data_dir = config.get("user_data_dir", "user_data")
         self.prompt_manager = PromptManager(self.config, user_data_dir)
 
-        # Initialize context builder
+        # 初始化上下文构建器
         self.context_builder = ContextBuilder(self.config.get("context", {}))
 
-        # Statistics
+        # 统计信息
         self.stats = {
             "total_calls": 0,
             "cache_hits": 0,
@@ -91,28 +91,28 @@ class LLMDecisionEngine:
             "total_cost_usd": 0.0
         }
 
-        logger.info(f"LLM Decision Engine initialized for strategy: {strategy_name}")
-        logger.info(f"Provider: {self.config['provider']}, Model: {self.config['model']}")
+        logger.info(f"LLM 决策引擎已为策略 {strategy_name} 初始化")
+        logger.info(f"提供商: {self.config['provider']}, 模型: {self.config['model']}")
 
     def decide(self, request: LLMRequest) -> LLMResponse:
         """
-        Execute an LLM decision
+        执行 LLM 决策
 
         Args:
-            request: LLM request with decision point and context
+            request: 包含决策点和上下文的 LLM 请求
 
         Returns:
-            LLM response with decision and metadata
+            包含决策和元数据的 LLM 响应
 
         Raises:
-            Exception: If LLM call fails and no fallback available
+            Exception: 如果 LLM 调用失败且没有可用的回退选项
         """
-        # Check if this decision point is enabled
+        # 检查此决策点是否已启用
         point_config = self.config.get("decision_points", {}).get(request.decision_point, {})
         if not point_config or not point_config.get("enabled", True):
             return self._default_response(request.decision_point)
 
-        # Check cache
+        # 检查缓存
         cache_key = self._generate_cache_key(request)
         cache_ttl = point_config.get("cache_ttl", 60)
         cached_response = self._check_cache(request.decision_point, cache_key, cache_ttl)
@@ -120,59 +120,59 @@ class LLMDecisionEngine:
         if cached_response:
             self.stats["cache_hits"] += 1
             cached_response.cached = True
-            logger.debug(f"Cache hit for {request.decision_point} on {request.pair}")
+            logger.debug(f"{request.pair} 的 {request.decision_point} 决策命中缓存")
             return cached_response
 
-        # Build prompt
+        # 构建提示词
         try:
             prompt = self.prompt_manager.build_prompt(
                 decision_point=request.decision_point,
                 context=request.context
             )
         except Exception as e:
-            logger.error(f"Failed to build prompt: {e}")
+            logger.error(f"构建提示词失败: {e}")
             return self._default_response(request.decision_point)
 
-        # Call LLM
+        # 调用 LLM
         start_time = time.time()
         try:
             temperature = self.config.get("temperature", 0.1)
             raw_response = self.provider.complete(prompt=prompt, temperature=temperature)
             latency_ms = int((time.time() - start_time) * 1000)
 
-            # Parse response
+            # 解析响应
             response = self._parse_response(
                 raw_response=raw_response,
                 decision_point=request.decision_point,
                 latency_ms=latency_ms
             )
 
-            # Get usage info
+            # 获取使用信息
             usage_info = self.provider.get_usage_info()
             response.tokens_used = usage_info.get("tokens_used")
             response.cost_usd = usage_info.get("cost_usd", 0.0)
 
-            # Update stats
+            # 更新统计信息
             self.stats["total_calls"] += 1
             self.stats["total_cost_usd"] += response.cost_usd or 0.0
 
-            # Validate response
+            # 验证响应
             if not self._validate_response(response, point_config):
                 logger.warning(
-                    f"Response failed validation for {request.decision_point}: "
+                    f"响应验证失败 {request.decision_point}: "
                     f"confidence {response.confidence} < threshold {point_config.get('confidence_threshold', 0.5)}"
                 )
                 return self._default_response(request.decision_point)
 
-            # Cache result
+            # 缓存结果
             self._cache_response(request.decision_point, cache_key, response)
 
-            # Log to database
+            # 记录到数据库
             if self.config.get("performance", {}).get("log_to_database", True):
                 self._log_decision(request, response, prompt, raw_response, success=True)
 
             logger.info(
-                f"LLM decision for {request.pair} {request.decision_point}: "
+                f"LLM 决策 {request.pair} {request.decision_point}: "
                 f"{response.decision} (confidence: {response.confidence:.2f}, "
                 f"latency: {latency_ms}ms, cost: ${response.cost_usd:.4f})"
             )
@@ -181,28 +181,28 @@ class LLMDecisionEngine:
 
         except Exception as e:
             self.stats["errors"] += 1
-            logger.error(f"LLM decision failed for {request.decision_point}: {e}", exc_info=True)
+            logger.error(f"{request.decision_point} 的 LLM 决策失败: {e}", exc_info=True)
 
-            # Log error
+            # 记录错误
             if self.config.get("performance", {}).get("log_to_database", True):
                 self._log_decision(request, None, prompt, None, success=False, error=str(e))
 
-            # Return default response
+            # 返回默认响应
             return self._default_response(request.decision_point)
 
     def _init_provider(self):
-        """Initialize the LLM provider based on configuration"""
+        """根据配置初始化 LLM 提供商"""
         provider_type = self.config.get("provider_type", "http").lower()
 
-        # Resolve environment variables in config
+        # 解析配置中的环境变量
         resolved_config = self._resolve_env_vars(self.config)
 
         if provider_type == "http":
-            # Universal HTTP provider (recommended)
+            # 通用 HTTP 提供商（推荐）
             from freqtrade.llm.providers import HttpLLMProvider
             return HttpLLMProvider(resolved_config)
 
-        # Legacy providers (deprecated)
+        # 旧版提供商（已弃用）
         elif provider_type == "openai_legacy":
             from freqtrade.llm.providers import OpenAIProvider
             return OpenAIProvider(resolved_config)
@@ -216,13 +216,13 @@ class LLMDecisionEngine:
             return OllamaProvider(resolved_config)
 
         else:
-            raise ValueError(f"Unknown LLM provider type: {provider_type}")
+            raise ValueError(f"未知的 LLM 提供商类型: {provider_type}")
 
     def _resolve_env_vars(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Resolve environment variables in config
+        解析配置中的环境变量
 
-        Supports ${VAR_NAME} syntax
+        支持 ${VAR_NAME} 语法
         """
         resolved = config.copy()
 
@@ -231,13 +231,13 @@ class LLMDecisionEngine:
                 env_var = value[2:-1]
                 resolved[key] = os.environ.get(env_var)
                 if resolved[key] is None:
-                    logger.warning(f"Environment variable {env_var} not found")
+                    logger.warning(f"未找到环境变量 {env_var}")
 
         return resolved
 
     def _generate_cache_key(self, request: LLMRequest) -> str:
-        """Generate a cache key based on request context"""
-        # Create a deterministic string from context
+        """基于请求上下文生成缓存键"""
+        # 从上下文创建确定性字符串
         context_str = json.dumps(request.context, sort_keys=True, default=str)
         cache_key = hashlib.md5(context_str.encode()).hexdigest()
         return cache_key
@@ -248,7 +248,7 @@ class LLMDecisionEngine:
         cache_key: str,
         ttl: int
     ) -> Optional[LLMResponse]:
-        """Check if a cached response exists and is still valid"""
+        """检查缓存响应是否存在且仍然有效"""
         cache = self.caches.get(decision_point, {})
 
         if cache_key in cache:
@@ -258,13 +258,13 @@ class LLMDecisionEngine:
             if age < ttl:
                 return response
             else:
-                # Expired, remove from cache
+                # 已过期，从缓存中移除
                 del cache[cache_key]
 
         return None
 
     def _cache_response(self, decision_point: str, cache_key: str, response: LLMResponse):
-        """Cache a response with timestamp"""
+        """缓存带有时间戳的响应"""
         cache = self.caches.get(decision_point, {})
         cache[cache_key] = (response, time.time())
         self.caches[decision_point] = cache
@@ -276,18 +276,18 @@ class LLMDecisionEngine:
         latency_ms: int
     ) -> LLMResponse:
         """
-        Parse LLM raw response into structured format
+        将 LLM 原始响应解析为结构化格式
 
         Args:
-            raw_response: Raw JSON string from LLM
-            decision_point: Decision point name
-            latency_ms: Request latency in milliseconds
+            raw_response: 来自 LLM 的原始 JSON 字符串
+            decision_point: 决策点名称
+            latency_ms: 请求延迟（毫秒）
 
         Returns:
-            Parsed LLMResponse
+            解析后的 LLMResponse
 
         Raises:
-            ValueError: If response cannot be parsed
+            ValueError: 如果响应无法解析
         """
         try:
             parsed = json.loads(raw_response)
@@ -298,33 +298,33 @@ class LLMDecisionEngine:
                 reasoning=parsed.get("reasoning", ""),
                 parameters=parsed.get("parameters", {}),
                 latency_ms=latency_ms,
-                tokens_used=None,  # Will be filled later
-                cost_usd=None,  # Will be filled later
+                tokens_used=None,  # 稍后填充
+                cost_usd=None,  # 稍后填充
                 cached=False
             )
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response as JSON: {e}")
-            logger.error(f"Raw response: {raw_response[:500]}")
-            raise ValueError(f"Invalid JSON response: {e}")
+            logger.error(f"无法将 LLM 响应解析为 JSON: {e}")
+            logger.error(f"原始响应: {raw_response[:500]}")
+            raise ValueError(f"无效的 JSON 响应: {e}")
 
     def _validate_response(self, response: LLMResponse, config: Dict) -> bool:
         """
-        Validate that response meets requirements
+        验证响应是否满足要求
 
         Args:
-            response: LLM response
-            config: Decision point configuration
+            response: LLM 响应
+            config: 决策点配置
 
         Returns:
-            True if response is valid
+            如果响应有效则返回 True
         """
-        # Check confidence threshold
+        # 检查置信度阈值
         threshold = config.get("confidence_threshold", 0.5)
         if response.confidence < threshold:
             return False
 
-        # Check that decision is not empty
+        # 检查决策是否为空
         if not response.decision:
             return False
 
@@ -332,13 +332,13 @@ class LLMDecisionEngine:
 
     def _default_response(self, decision_point: DecisionPoint) -> LLMResponse:
         """
-        Return a default response when LLM is unavailable
+        当 LLM 不可用时返回默认响应
 
         Args:
-            decision_point: Decision point name
+            decision_point: 决策点名称
 
         Returns:
-            Default LLMResponse
+            默认的 LLMResponse
         """
         defaults = {
             "entry": "hold",
@@ -351,7 +351,7 @@ class LLMDecisionEngine:
         return LLMResponse(
             decision=defaults.get(decision_point, "hold"),
             confidence=0.0,
-            reasoning="LLM not available or disabled, using default",
+            reasoning="LLM 不可用或已禁用，使用默认值",
             parameters={},
             latency_ms=0,
             tokens_used=None,
@@ -369,15 +369,15 @@ class LLMDecisionEngine:
         error: Optional[str] = None
     ):
         """
-        Log decision to database
+        将决策记录到数据库
 
         Args:
-            request: LLM request
-            response: LLM response (None if failed)
-            prompt: The prompt sent to LLM
-            raw_response: Raw response from LLM
-            success: Whether the call succeeded
-            error: Error message if failed
+            request: LLM 请求
+            response: LLM 响应（失败时为 None）
+            prompt: 发送到 LLM 的提示词
+            raw_response: 来自 LLM 的原始响应
+            success: 调用是否成功
+            error: 失败时的错误消息
         """
         try:
             from freqtrade.persistence.llm_models import LLMDecision
@@ -410,10 +410,16 @@ class LLMDecisionEngine:
             Trade.commit()
 
         except Exception as e:
-            logger.error(f"Failed to log decision to database: {e}")
+            logger.error(f"记录决策到数据库失败: {e}")
+        finally:
+            try:
+                Trade.session.remove()
+            except Exception:
+                # 忽略remove时的异常，避免掩盖原始错误
+                pass
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get engine statistics"""
+        """获取引擎统计信息"""
         return {
             **self.stats,
             "cache_hit_rate": (

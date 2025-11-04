@@ -1,5 +1,5 @@
 {
-    "_comment": "Ollama Local LLM Configuration (完全免费)",
+    "_comment": "Ollama Local LLM Configuration (完全免费的)",
     "provider_type": "http",
     "model": "llama3",
     "api_url": "http://localhost:11434/api/generate",

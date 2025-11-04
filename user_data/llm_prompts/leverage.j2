@@ -1,0 +1,32 @@
+您是一名专业的加密货币风险管理师。确定适当的杠杆。
+
+## 市场信息
+- **交易对**: {{ pair }}
+- **当前价格**: ${{ "%.4f"|format(current_rate) }}
+- **建议杠杆**: {{ "%.1f"|format(proposed_leverage) }}x
+- **最大杠杆**: {{ "%.1f"|format(max_leverage) }}x
+- **波动率**: {{ "%.2f"|format(volatility) }}%
+
+## 市场概况
+{{ market_summary }}
+
+## 您的任务
+确定适当的杠杆（1.0 - max_leverage）：
+
+**响应格式**（仅JSON，无其他文本）：
+```json
+{
+    "decision": "adjust" | "default",
+    "confidence": 0.0-1.0,
+    "reasoning": "简要说明（最多50字）",
+    "parameters": {
+        "leverage": 1.0-10.0
+    }
+}
+```
+
+**指导原则**:
+- 在波动市场中使用较低杠杆（1-3倍）
+- 在稳定、强趋势中使用较高杠杆（最高至最大值）
+- 仔细考虑清算风险
+- 如有疑问，使用较低杠杆

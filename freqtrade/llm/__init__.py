@@ -1,8 +1,7 @@
 """
-LLM Integration Module for Freqtrade
+Freqtrade LLM 集成模块
 
-This module provides integration with various LLM providers to assist
-with trading decisions across multiple decision points.
+本模块提供与各种 LLM 提供商的集成，以协助在多个决策点进行交易决策。
 """
 
 __version__ = "1.0.0"

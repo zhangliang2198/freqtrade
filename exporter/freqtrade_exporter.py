@@ -30,8 +30,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 修改为你的 API 账号密码
-API_USER = "mikoozhang"
-API_PASS = "Meili163!!"
+API_USER = "admin"
+API_PASS = "admin123"
 FREQTRADE_API = "http://127.0.0.1:8080/api/v1"
 
 
