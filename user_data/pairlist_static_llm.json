@@ -1,0 +1,17 @@
+{
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "exchange": {
+    "pair_whitelist": [
+      "BTC/USDT:USDT",
+      "ETH/USDT:USDT",
+      "BNB/USDT:USDT",
+      "SOL/USDT:USDT",
+      "DOGE/USDT:USDT",
+      "XRP/USDT:USDT"
+    ]
+  }
+}

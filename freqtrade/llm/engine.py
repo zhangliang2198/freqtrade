@@ -11,7 +11,6 @@ import time
 import json
 import hashlib
 import logging
-import os
 
 from freqtrade.llm.context_builder import ContextBuilder
 from freqtrade.llm.prompts.manager import PromptManager
@@ -41,6 +40,10 @@ class LLMResponse:
     # 元数据
     latency_ms: int
     tokens_used: Optional[int]
+    prompt_tokens: Optional[int]
+    completion_tokens: Optional[int]
+    prompt_cache_hit_tokens: Optional[int]
+    prompt_cache_miss_tokens: Optional[int]
     cost_usd: Optional[float]
     cached: bool
 
@@ -137,6 +140,10 @@ class LLMDecisionEngine:
         start_time = time.time()
         try:
             temperature = self.config.get("temperature", 0.1)
+            logger.debug(f"准备调用 LLM API，提供商: {self.config.get('provider')}, 模型: {self.config.get('model')}")
+            logger.debug(f"提示词长度: {len(prompt)} 字符")
+            logger.debug(f"温度参数: {temperature}")
+            
             raw_response = self.provider.complete(prompt=prompt, temperature=temperature)
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -150,6 +157,10 @@ class LLMDecisionEngine:
             # 获取使用信息
             usage_info = self.provider.get_usage_info()
             response.tokens_used = usage_info.get("tokens_used")
+            response.prompt_tokens = usage_info.get("prompt_tokens")
+            response.completion_tokens = usage_info.get("completion_tokens")
+            response.prompt_cache_hit_tokens = usage_info.get("prompt_cache_hit_tokens")
+            response.prompt_cache_miss_tokens = usage_info.get("prompt_cache_miss_tokens")
             response.cost_usd = usage_info.get("cost_usd", 0.0)
 
             # 更新统计信息
@@ -194,46 +205,21 @@ class LLMDecisionEngine:
         """根据配置初始化 LLM 提供商"""
         provider_type = self.config.get("provider_type", "http").lower()
 
-        # 解析配置中的环境变量
-        resolved_config = self._resolve_env_vars(self.config)
-
         if provider_type == "http":
             # 通用 HTTP 提供商（推荐）
             from freqtrade.llm.providers import HttpLLMProvider
-            return HttpLLMProvider(resolved_config)
+            return HttpLLMProvider(self.config)
 
         # 旧版提供商（已弃用）
-        elif provider_type == "openai_legacy":
-            from freqtrade.llm.providers import OpenAIProvider
-            return OpenAIProvider(resolved_config)
-
-        elif provider_type == "anthropic_legacy":
-            from freqtrade.llm.providers import AnthropicProvider
-            return AnthropicProvider(resolved_config)
-
-        elif provider_type == "ollama_legacy":
-            from freqtrade.llm.providers import OllamaProvider
-            return OllamaProvider(resolved_config)
+        elif provider_type in ["openai_legacy", "anthropic_legacy", "ollama_legacy"]:
+            raise ValueError(
+                f"LLM 提供商类型 '{provider_type}' 已弃用。"
+                f"请使用 'http' 提供商并通过配置指定 API 端点。"
+                f"参考文档了解如何配置 http_provider。"
+            )
 
         else:
             raise ValueError(f"未知的 LLM 提供商类型: {provider_type}")
-
-    def _resolve_env_vars(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        解析配置中的环境变量
-
-        支持 ${VAR_NAME} 语法
-        """
-        resolved = config.copy()
-
-        for key, value in resolved.items():
-            if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-                env_var = value[2:-1]
-                resolved[key] = os.environ.get(env_var)
-                if resolved[key] is None:
-                    logger.warning(f"未找到环境变量 {env_var}")
-
-        return resolved
 
     def _generate_cache_key(self, request: LLMRequest) -> str:
         """基于请求上下文生成缓存键"""
@@ -290,15 +276,34 @@ class LLMDecisionEngine:
             ValueError: 如果响应无法解析
         """
         try:
+            # 添加详细的响应日志记录
+            logger.info(f"[DEBUG] {decision_point} 原始响应: {raw_response}")
+            
             parsed = json.loads(raw_response)
+            
+            # 记录解析后的各个字段
+            decision = parsed.get("decision", "hold")
+            confidence = float(parsed.get("confidence", 0.0))
+            reasoning = parsed.get("reasoning", "")
+            parameters = parsed.get("parameters", {})
+            
+            logger.info(f"[DEBUG] {decision_point} 解析结果:")
+            logger.info(f"[DEBUG]   - decision: {decision}")
+            logger.info(f"[DEBUG]   - confidence: {confidence}")
+            logger.info(f"[DEBUG]   - reasoning: {reasoning}")
+            logger.info(f"[DEBUG]   - parameters: {parameters}")
 
             return LLMResponse(
-                decision=parsed.get("decision", "hold"),
-                confidence=float(parsed.get("confidence", 0.0)),
-                reasoning=parsed.get("reasoning", ""),
-                parameters=parsed.get("parameters", {}),
+                decision=decision,
+                confidence=confidence,
+                reasoning=reasoning,
+                parameters=parameters,
                 latency_ms=latency_ms,
                 tokens_used=None,  # 稍后填充
+                prompt_tokens=None,  # 稍后填充
+                completion_tokens=None,  # 稍后填充
+                prompt_cache_hit_tokens=None,  # 稍后填充
+                prompt_cache_miss_tokens=None,  # 稍后填充
                 cost_usd=None,  # 稍后填充
                 cached=False
             )
@@ -321,13 +326,24 @@ class LLMDecisionEngine:
         """
         # 检查置信度阈值
         threshold = config.get("confidence_threshold", 0.5)
+        
+        # 添加详细的验证日志
+        logger.info(f"[DEBUG] 响应验证:")
+        logger.info(f"[DEBUG]   - 置信度: {response.confidence}")
+        logger.info(f"[DEBUG]   - 阈值: {threshold}")
+        logger.info(f"[DEBUG]   - 决策: {response.decision}")
+        logger.info(f"[DEBUG]   - 推理: {response.reasoning}")
+        
         if response.confidence < threshold:
+            logger.warning(f"[DEBUG] 置信度验证失败: {response.confidence} < {threshold}")
             return False
 
         # 检查决策是否为空
         if not response.decision:
+            logger.warning(f"[DEBUG] 决策为空，验证失败")
             return False
 
+        logger.info(f"[DEBUG] 响应验证通过")
         return True
 
     def _default_response(self, decision_point: DecisionPoint) -> LLMResponse:
@@ -355,6 +371,10 @@ class LLMDecisionEngine:
             parameters={},
             latency_ms=0,
             tokens_used=None,
+            prompt_tokens=None,
+            completion_tokens=None,
+            prompt_cache_hit_tokens=None,
+            prompt_cache_miss_tokens=None,
             cost_usd=None,
             cached=False
         )
@@ -400,6 +420,10 @@ class LLMDecisionEngine:
                 parameters=json.dumps(response.parameters) if response else None,
                 latency_ms=response.latency_ms if response else 0,
                 tokens_used=response.tokens_used if response else None,
+                prompt_tokens=response.prompt_tokens if response else None,
+                completion_tokens=response.completion_tokens if response else None,
+                prompt_cache_hit_tokens=response.prompt_cache_hit_tokens if response else None,
+                prompt_cache_miss_tokens=response.prompt_cache_miss_tokens if response else None,
                 cost_usd=response.cost_usd if response else None,
                 success=success,
                 error_message=error,

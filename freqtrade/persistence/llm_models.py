@@ -81,10 +81,14 @@ class LLMDecision(ModelBase):
     # 性能指标
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     tokens_used: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    prompt_cache_hit_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    prompt_cache_miss_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # 状态
-    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # 时间戳

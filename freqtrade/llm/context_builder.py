@@ -67,7 +67,7 @@ class ContextBuilder:
 
         # 添加指标
         if self.include_indicators:
-            context["indicators"] = self._extract_indicators(current_candle)
+            context["indicators"] = self._extract_indicators(current_candle, dataframe)
 
         # 添加最近的K线
         if self.include_recent_trades:
@@ -124,7 +124,7 @@ class ContextBuilder:
 
         # 添加当前指标
         if self.include_indicators and len(dataframe) > 0:
-            context["current_indicators"] = self._extract_indicators(dataframe.iloc[-1])
+            context["current_indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
 
         return context
 
@@ -159,7 +159,7 @@ class ContextBuilder:
 
         # 添加当前指标
         if self.include_indicators and len(dataframe) > 0:
-            context["indicators"] = self._extract_indicators(dataframe.iloc[-1])
+            context["indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
 
         return context
 
@@ -202,7 +202,7 @@ class ContextBuilder:
 
         # 添加指标
         if self.include_indicators and len(dataframe) > 0:
-            context["indicators"] = self._extract_indicators(dataframe.iloc[-1])
+            context["indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
 
         return context
 
@@ -240,7 +240,7 @@ class ContextBuilder:
 
         # 添加指标
         if self.include_indicators and len(dataframe) > 0:
-            context["indicators"] = self._extract_indicators(dataframe.iloc[-1])
+            context["indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
 
         return context
 
@@ -301,19 +301,59 @@ class ContextBuilder:
             logger.warning(f"市场摘要生成失败: {e}")
             return "市场数据可用但摘要不可用"
 
-    def _extract_indicators(self, row: pd.Series) -> Dict[str, Any]:
+    def _detect_all_indicators(self, dataframe: pd.DataFrame) -> list:
+        """
+        自动检测DataFrame中的所有指标列
+        
+        Args:
+            dataframe: 包含指标数据的DataFrame
+            
+        Returns:
+            检测到的指标列名列表
+        """
+        # 基本的OHLCV列和信号列，这些不应该被视为指标
+        basic_columns = {
+            'enter_long', 'exit_long', 'enter_short', 'exit_short',
+            'enter_tag', 'exit_tag', 'date'
+        }
+        
+        # 获取所有列名
+        all_columns = set(dataframe.columns)
+        
+        # 排除基本列，剩下的视为指标列
+        indicator_columns = list(all_columns - basic_columns)
+        
+        return sorted(indicator_columns)
+
+    def _extract_indicators(self, row: pd.Series, dataframe: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
         """
         从数据框行中提取技术指标
 
         Args:
             row: 包含指标列的DataFrame行
+            dataframe: 可选的完整DataFrame，用于自动检测指标
 
         Returns:
             指标名称到值的字典
         """
         indicators = {}
+        
+        # 处理include_indicators的不同类型
+        if isinstance(self.include_indicators, bool):
+            # 如果是布尔值True，自动检测所有指标
+            if self.include_indicators and dataframe is not None:
+                indicator_names = self._detect_all_indicators(dataframe)
+            else:
+                # 如果是False，不包含任何指标
+                return indicators
+        elif isinstance(self.include_indicators, list):
+            # 如果是列表，使用指定的指标
+            indicator_names = self.include_indicators
+        else:
+            # 其他类型，视为空列表
+            return indicators
 
-        for indicator_name in self.include_indicators:
+        for indicator_name in indicator_names:
             if indicator_name in row.index:
                 value = row[indicator_name]
 
@@ -321,7 +361,16 @@ class ContextBuilder:
                 if pd.isna(value):
                     indicators[indicator_name] = None
                 else:
-                    indicators[indicator_name] = float(value)
+                    # 检查值类型，跳过Timestamp和datetime类型
+                    if isinstance(value, (pd.Timestamp, datetime)):
+                        # 跳过日期时间类型，不将其作为指标
+                        continue
+                    try:
+                        indicators[indicator_name] = float(value)
+                    except (ValueError, TypeError):
+                        # 如果无法转换为float，跳过该指标
+                        logger.warning(f"无法将指标 {indicator_name} 的值 {value} 转换为float，已跳过")
+                        continue
 
         return indicators
 

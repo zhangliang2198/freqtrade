@@ -78,8 +78,8 @@ class LLMStrategy(BaseStrategyWithSnapshot):
 
             except Exception as e:
                 logger.error(f"初始化 LLM 引擎失败: {e}", exc_info=True)
-                self.llm_engine = None
-                logger.warning("策略将在没有 LLM 辅助的情况下继续运行")
+                logger.error("LLM 引擎初始化失败，程序将终止。请检查 LLM 配置。")
+                raise RuntimeError(f"LLM 引擎初始化失败: {e}")
         else:
             logger.info("配置中 LLM 已禁用")
 

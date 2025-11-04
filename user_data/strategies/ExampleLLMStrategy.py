@@ -78,7 +78,7 @@ class ExampleLLMStrategy(LLMStrategy):
         dataframe["macdhist"] = macd["macdhist"]
 
         # 布林带
-        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2, nbdevdn=2)
+        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
         dataframe["bb_lower"] = bollinger["lowerband"]
         dataframe["bb_middle"] = bollinger["middleband"]
         dataframe["bb_upper"] = bollinger["upperband"]
