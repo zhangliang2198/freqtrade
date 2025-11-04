@@ -1,0 +1,13 @@
+# LLM Integration Requirements
+# Install with: pip install -r requirements-llm.txt
+
+# Jinja2 for Prompt Templates (唯一需要额外安装的库)
+jinja2>=3.0.0
+
+# 以下库已包含在主 requirements.txt 中:
+# - requests (用于 HTTP 调用)
+# - pandas (数据处理)
+# - sqlalchemy (数据库)
+
+# 注意：不再需要 openai 和 anthropic 库，
+# 所有 LLM 都通过统一的 HTTP 接口调用

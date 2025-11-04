@@ -1,0 +1,45 @@
+{
+    "_comment": "OpenAI GPT-4o-mini Configuration (更便宜的选择)",
+    "provider_type": "http",
+    "model": "gpt-4o-mini",
+    "api_url": "https://api.openai.com/v1/chat/completions",
+    "api_key": "${OPENAI_API_KEY}",
+    "timeout": 30,
+    "max_retries": 3,
+    "temperature": 0.1,
+
+    "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer {api_key}"
+    },
+
+    "request_body": {
+        "model": "{model}",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a professional cryptocurrency trading analyst. Always respond in valid JSON format."
+            },
+            {
+                "role": "user",
+                "content": "{prompt}"
+            }
+        ],
+        "temperature": "{temperature}",
+        "response_format": {
+            "type": "json_object"
+        }
+    },
+
+    "response_path": {
+        "content_path": "choices.0.message.content",
+        "usage_path": "usage",
+        "ensure_json": true
+    },
+
+    "cost_config": {
+        "_comment": "Pricing for GPT-4o-mini: $0.15/1M input, $0.6/1M output",
+        "input_cost_per_million": 0.15,
+        "output_cost_per_million": 0.6
+    }
+}

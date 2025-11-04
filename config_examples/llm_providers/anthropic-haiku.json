@@ -1,0 +1,40 @@
+{
+    "_comment": "Anthropic Claude 3 Haiku Configuration (更便宜的选择)",
+    "provider_type": "http",
+    "model": "claude-3-haiku-20240307",
+    "api_url": "https://api.anthropic.com/v1/messages",
+    "api_key": "${ANTHROPIC_API_KEY}",
+    "timeout": 30,
+    "max_retries": 3,
+    "temperature": 0.1,
+
+    "headers": {
+        "Content-Type": "application/json",
+        "x-api-key": "{api_key}",
+        "anthropic-version": "2023-06-01"
+    },
+
+    "request_body": {
+        "model": "{model}",
+        "max_tokens": 1024,
+        "temperature": "{temperature}",
+        "messages": [
+            {
+                "role": "user",
+                "content": "{prompt}\n\nIMPORTANT: Respond ONLY with valid JSON. No other text."
+            }
+        ]
+    },
+
+    "response_path": {
+        "content_path": "content.0.text",
+        "usage_path": "usage",
+        "ensure_json": true
+    },
+
+    "cost_config": {
+        "_comment": "Pricing for Claude 3 Haiku: $0.25/1M input, $1.25/1M output",
+        "input_cost_per_million": 0.25,
+        "output_cost_per_million": 1.25
+    }
+}

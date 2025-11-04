@@ -1,0 +1,45 @@
+{
+    "_comment": "DeepSeek Configuration (非常便宜的选择)",
+    "provider_type": "http",
+    "model": "deepseek-chat",
+    "api_url": "https://api.deepseek.com/v1/chat/completions",
+    "api_key": "${DEEPSEEK_API_KEY}",
+    "timeout": 30,
+    "max_retries": 3,
+    "temperature": 0.1,
+
+    "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer {api_key}"
+    },
+
+    "request_body": {
+        "model": "{model}",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a professional cryptocurrency trading analyst. Always respond in valid JSON format."
+            },
+            {
+                "role": "user",
+                "content": "{prompt}"
+            }
+        ],
+        "temperature": "{temperature}",
+        "response_format": {
+            "type": "json_object"
+        }
+    },
+
+    "response_path": {
+        "content_path": "choices.0.message.content",
+        "usage_path": "usage",
+        "ensure_json": true
+    },
+
+    "cost_config": {
+        "_comment": "Pricing for DeepSeek: $0.27/1M input, $1.10/1M output (非常便宜!)",
+        "input_cost_per_million": 0.27,
+        "output_cost_per_million": 1.10
+    }
+}
