@@ -73,7 +73,7 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                 )
                 logger.info(
                     f"LLM 决策引擎已为 {self.__class__.__name__} 初始化，"
-                    f"使用 {llm_config['provider']}/{llm_config['model']}"
+                    f"使用 {llm_config['provider_type']}/{llm_config['model']}"
                 )
 
             except Exception as e:
@@ -95,7 +95,8 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             添加了入场信号的数据框
         """
         if not self.llm_engine:
-            return self._populate_entry_trend_fallback(dataframe, metadata)
+            # LLM 未启用或初始化失败，直接返回不做任何操作
+            return dataframe
 
         # 只在最后一根K线上做决策
         if len(dataframe) < 1:
@@ -135,6 +136,7 @@ class LLMStrategy(BaseStrategyWithSnapshot):
 
         except Exception as e:
             logger.error(f"LLM 入场决策失败: {e}", exc_info=True)
+            # 发生错误时直接略过，不执行任何操作
 
         return dataframe
 
@@ -161,7 +163,8 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             如果应该退出则返回退出原因字符串，否则返回 None
         """
         if not self.llm_engine:
-            return self._custom_exit_fallback(pair, trade, current_time, current_rate, current_profit)
+            # LLM 未启用或初始化失败，直接返回不做任何操作
+            return None
 
         try:
             # 获取当前数据框
@@ -196,6 +199,7 @@ class LLMStrategy(BaseStrategyWithSnapshot):
 
         except Exception as e:
             logger.error(f"LLM 出场决策失败: {e}", exc_info=True)
+            # 发生错误时直接略过，不执行任何操作
 
         return None
 
@@ -478,36 +482,6 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             logger.error(f"LLM 杠杆决策失败: {e}", exc_info=True)
             return proposed_leverage
 
-    # 回退方法 (当 LLM 不可用时调用)
-
-    def _populate_entry_trend_fallback(
-        self,
-        dataframe: pd.DataFrame,
-        metadata: dict
-    ) -> pd.DataFrame:
-        """
-        LLM 不可用时的回退入场逻辑
-
-        默认: 不入场。子类可以覆盖。
-        """
-        # 默认情况下，不进行任何交易
-        return dataframe
-
-    def _custom_exit_fallback(
-        self,
-        pair: str,
-        trade,
-        current_time: datetime,
-        current_rate: float,
-        current_profit: float
-    ) -> Optional[str]:
-        """
-        LLM 不可用时的回退出场逻辑
-
-        默认: 无自定义出场。子类可以覆盖。
-        """
-        return None
-
     def _get_portfolio_state(self) -> Optional[dict]:
         """
         获取当前投资组合状态作为上下文
@@ -589,3 +563,4 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             'llm_total_cost_usd': stats['total_cost_usd'],
             'llm_errors': stats['errors'],
         }
+

@@ -66,7 +66,8 @@ from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
 from freqtrade.util import FtPrecise, MeasureTime, PeriodicCache, dt_from_ts, dt_now
 from freqtrade.util.migrations.binance_mig import migrate_binance_futures_names
 from freqtrade.wallets import Wallets
-
+from freqtrade.llm.background_tasks import stop_background_tasks
+from freqtrade.llm.background_tasks import start_background_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,13 @@ class FreqtradeBot(LoggingMixin):
         :return: None
         """
         logger.info("Cleaning up modules ...")
+
+        # 停止 LLM 后台任务（如果启用）
+        try:
+            stop_background_tasks()
+        except Exception as e:
+            logger.warning(f"停止 LLM 后台任务失败: {e}")
+
         try:
             # Wrap db activities in shutdown to avoid problems if database is gone,
             # and raises further exceptions.
@@ -247,6 +255,14 @@ class FreqtradeBot(LoggingMixin):
 
         # 预加载历史数据以加快启动速度
         self.startup_preload_data()
+
+        # 启动 LLM 后台任务（如果启用）
+        llm_config = self.config.get("llm_config", {})
+        if llm_config.get("enabled", False):
+            try:
+                start_background_tasks(self.config)
+            except Exception as e:
+                logger.warning(f"启动 LLM 后台任务失败: {e}")
 
     def process(self) -> None:
         """

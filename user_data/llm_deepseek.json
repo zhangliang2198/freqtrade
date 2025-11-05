@@ -10,6 +10,8 @@
         "timeout": 180,
         "max_retries": 3,
         "temperature": 0.1,
+        "aggregation_interval_minutes": 60,
+        "enable_background_aggregation": true,
         "headers": {
             "Content-Type": "application/json",
             "Authorization": "Bearer {api_key}"
@@ -87,8 +89,9 @@
         },
         "performance": {
             "log_to_database": true,
-            "log_prompts": false,
-            "log_responses": true
+            "log_prompts": true,
+            "log_responses": true,
+            "export_metrics": true
         },
         "context": {
             "max_candles": 100,

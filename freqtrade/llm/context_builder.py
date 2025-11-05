@@ -303,31 +303,67 @@ class ContextBuilder:
 
     def _detect_all_indicators(self, dataframe: pd.DataFrame) -> list:
         """
-        自动检测DataFrame中的所有指标列
-        
+        自动检测DataFrame中的所有指标列（包含OHLCV基本数据）
+
         Args:
             dataframe: 包含指标数据的DataFrame
-            
+
         Returns:
             检测到的指标列名列表
         """
-        # 基本的OHLCV列和信号列，这些不应该被视为指标
-        basic_columns = {
+        # 只排除信号列和日期列，OHLCV也是重要的指标数据
+        excluded_columns = {
             'enter_long', 'exit_long', 'enter_short', 'exit_short',
             'enter_tag', 'exit_tag', 'date'
         }
-        
+
         # 获取所有列名
         all_columns = set(dataframe.columns)
-        
-        # 排除基本列，剩下的视为指标列
-        indicator_columns = list(all_columns - basic_columns)
-        
+
+        # 排除信号列，保留所有指标列（包括 open/high/low/close/volume）
+        indicator_columns = list(all_columns - excluded_columns)
+
         return sorted(indicator_columns)
+
+    def _match_indicator_with_suffix(self, indicator_name: str, available_columns: set) -> Optional[str]:
+        """
+        匹配指标名称，自动处理带 timeframe 后缀的情况
+
+        例如：用户配置 "rsi" 可以匹配 "rsi"、"rsi_5m"、"rsi_1h" 等
+
+        Args:
+            indicator_name: 配置中的指标名称（不带后缀）
+            available_columns: DataFrame中所有可用的列名
+
+        Returns:
+            匹配到的完整列名，如果没有匹配则返回 None
+        """
+        # 1. 精确匹配（优先）
+        if indicator_name in available_columns:
+            return indicator_name
+
+        # 2. 尝试匹配带 timeframe 后缀的列
+        # 常见的 timeframe 后缀：_1m, _5m, _15m, _30m, _1h, _4h, _1d 等
+        # 使用模糊匹配：indicator_name + "_" + 任意后缀
+        matching_columns = [
+            col for col in available_columns
+            if col.startswith(indicator_name + "_")
+        ]
+
+        if matching_columns:
+            # 如果找到多个匹配，优先返回第一个（通常是最短的）
+            # 例如：如果有 rsi_5m 和 rsi_5m_sma，优先返回 rsi_5m
+            return sorted(matching_columns, key=len)[0]
+
+        # 3. 没有找到任何匹配
+        return None
 
     def _extract_indicators(self, row: pd.Series, dataframe: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
         """
         从数据框行中提取技术指标
+
+        支持自动匹配带 timeframe 后缀的指标名称。
+        例如：配置中的 "rsi" 可以自动匹配 "rsi_5m"、"rsi_1h" 等
 
         Args:
             row: 包含指标列的DataFrame行
@@ -337,7 +373,8 @@ class ContextBuilder:
             指标名称到值的字典
         """
         indicators = {}
-        
+        available_columns = set(row.index)
+
         # 处理include_indicators的不同类型
         if isinstance(self.include_indicators, bool):
             # 如果是布尔值True，自动检测所有指标
@@ -347,8 +384,16 @@ class ContextBuilder:
                 # 如果是False，不包含任何指标
                 return indicators
         elif isinstance(self.include_indicators, list):
-            # 如果是列表，使用指定的指标
-            indicator_names = self.include_indicators
+            # 如果是列表，使用指定的指标（需要匹配后缀）
+            indicator_names = []
+            for config_name in self.include_indicators:
+                matched_name = self._match_indicator_with_suffix(config_name, available_columns)
+                if matched_name:
+                    indicator_names.append(matched_name)
+                else:
+                    logger.debug(
+                        f"配置的指标 '{config_name}' 在 DataFrame 中未找到匹配列，已跳过"
+                    )
         else:
             # 其他类型，视为空列表
             return indicators

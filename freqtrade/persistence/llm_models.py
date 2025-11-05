@@ -261,55 +261,6 @@ class LLMPerformanceMetric(ModelBase):
             f"decision_point={self.decision_point}, time_bucket={self.time_bucket}, "
             f"total_calls={self.total_calls}, avg_latency={self.avg_latency_ms}ms)"
         )
-class LLMStrategySnapshot(ModelBase):
-    """
-    LLM 策略快照表
-
-    使用 LLM 特定指标扩展策略快照。
-    链接到主 strategy_snapshots 表。
-    """
-
-    __tablename__ = "llm_strategy_snapshots"
-    __allow_unmapped__ = True
-
-    session: ClassVar[SessionType]
-
-    # 主键
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-
-    # 链接到 strategy_snapshots 表（可选，可能不存在）
-    snapshot_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-
-    # 替代方案：直接存储策略和时间戳
-    strategy: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
-
-    # LLM 使用统计
-    total_llm_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    llm_cache_hit_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-
-    # 决策分布（JSON 字符串）
-    entry_decisions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    exit_decisions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # 成本统计
-    cumulative_llm_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-
-    # 效果评估（可选，需要相关性分析）
-    llm_entry_win_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    llm_exit_timing_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-
-    # 时间戳
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
-    )
-
-    def __repr__(self):
-        return (
-            f"LLMStrategySnapshot(strategy={self.strategy}, timestamp={self.timestamp}, "
-            f"total_calls={self.total_llm_calls}, cost=${self.cumulative_llm_cost_usd:.4f})"
-        )
-
 def init_llm_tables(engine):
     """
     初始化 LLM 相关数据库表
@@ -326,7 +277,6 @@ def init_llm_tables(engine):
             tables=[
                 LLMDecision.__table__,
                 LLMPerformanceMetric.__table__,
-                LLMStrategySnapshot.__table__,
             ]
         )
         logger.info("LLM 数据库表初始化成功")
