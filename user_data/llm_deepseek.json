@@ -63,28 +63,28 @@
             },
             "exit": {
                 "enabled": true,
-                "cache_ttl": 30,
+                "cache_ttl": 60,
                 "confidence_threshold": 0.6
             },
             "stake": {
-                "enabled": false,
+                "enabled": true,
                 "cache_ttl": 60,
                 "confidence_threshold": 0.5,
                 "min_stake_multiplier": 0.5,
                 "max_stake_multiplier": 2.0
             },
             "adjust_position": {
-                "enabled": false,
+                "enabled": true,
                 "cache_ttl": 60,
                 "confidence_threshold": 0.6,
                 "max_adjustment_ratio": 0.3
             },
             "leverage": {
-                "enabled": false,
+                "enabled": true,
                 "cache_ttl": 60,
                 "confidence_threshold": 0.5,
                 "min_leverage": 1.0,
-                "max_leverage": 5.0
+                "max_leverage": 10.0
             }
         },
         "performance": {

@@ -5,6 +5,9 @@
 from datetime import datetime
 from typing import Any, Optional, Tuple
 import logging
+import re
+
+from pandas import DataFrame
 
 from freqtrade.persistence import Trade
 from freqtrade.persistence.strategy_snapshot import StrategySnapshot
@@ -22,12 +25,14 @@ class BaseStrategyWithSnapshot(IStrategy):
     1. 自动统计long/short账户的资金情况
     2. 每个bot loop记录详细日志
     3. 将资金快照保存到数据库
-    4. 子类可以通过重写 get_extra_snapshot_data() 添加自定义数据
-    5. 子类可以通过重写 log_strategy_specific_info() 添加策略特定日志
+    4. 在 advise_entry 阶段自动根据黑名单过滤入场信号（做多/做空分离）
+    5. 子类可以通过重写 get_extra_snapshot_data() 添加自定义数据
+    6. 子类可以通过重写 log_strategy_specific_info() 添加策略特定日志
 
     所有继承此类的策略都可以使用:
     - get_assets_in_usdt(): 获取详细的资产统计
     - bot_loop_start(): 每个循环自动更新资产情况并记录到数据库
+    - 黑名单过滤: 自动在 advise_entry 阶段过滤，无需子类干预
     """
 
     def __init__(self, config) -> None:
@@ -103,6 +108,19 @@ class BaseStrategyWithSnapshot(IStrategy):
         self.real_usdt = 0.0
         self.total_profit_pct = 0.0
 
+        # ========== 黑名单配置 ==========
+        blacklist_config = config.get('strategy_blacklist', {}) if hasattr(config, 'get') else {}
+
+        self.blacklist_enabled = blacklist_config.get('enabled', False)
+        self.long_blacklist = blacklist_config.get('long_blacklist', [])
+        self.short_blacklist = blacklist_config.get('short_blacklist', [])
+        self.common_blacklist = blacklist_config.get('common_blacklist', [])
+
+        # 编译正则表达式以提高性能
+        self._long_blacklist_patterns = [re.compile(pattern) for pattern in self.long_blacklist]
+        self._short_blacklist_patterns = [re.compile(pattern) for pattern in self.short_blacklist]
+        self._common_blacklist_patterns = [re.compile(pattern) for pattern in self.common_blacklist]
+
         # 只在非 hyperopt 模式下输出初始化日志
         if not self.is_hyperopt:
             logger.info("=" * 80)
@@ -122,6 +140,11 @@ class BaseStrategyWithSnapshot(IStrategy):
                 logger.info(f"  快照频率: 每 {self.snapshot_frequency} 个 loop")
             logger.info(f"  详细日志: {'✅ 启用' if self.enable_detailed_logs else '❌ 禁用'}")
             logger.info(f"  策略日志: {'✅ 启用' if self.enable_strategy_logs else '❌ 禁用'}")
+            logger.info(f"  分离黑名单: {'✅ 启用' if self.blacklist_enabled else '❌ 禁用'}")
+            if self.blacklist_enabled:
+                logger.info(f"  Long 黑名单: {len(self.long_blacklist)} 条规则")
+                logger.info(f"  Short 黑名单: {len(self.short_blacklist)} 条规则")
+                logger.info(f"  通用黑名单: {len(self.common_blacklist)} 条规则")
             logger.info("=" * 80)
 
     def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
@@ -568,6 +591,95 @@ class BaseStrategyWithSnapshot(IStrategy):
             f"(原: {proposed_stake:.2f} -> 调整: {available:.2f})"
         )
         return True, available
+
+    # ========== 黑名单辅助方法 ==========
+
+    def _is_pair_in_blacklist(self, pair: str, patterns: list) -> bool:
+        """
+        检查交易对是否匹配黑名单中的任何模式
+
+        :param pair: 交易对名称
+        :param patterns: 已编译的正则表达式模式列表
+        :return: 是否在黑名单中
+        """
+        for pattern in patterns:
+            if pattern.match(pair):
+                return True
+        return False
+
+    def is_pair_blacklisted(self, pair: str, side: str, log_reason: bool = True) -> bool:
+        """
+        检查交易对是否在黑名单中
+
+        :param pair: 交易对
+        :param side: "long" 或 "short"
+        :param log_reason: 是否输出拒绝原因日志
+        :return: True 在黑名单中（应拒绝），False 不在黑名单中（可以交易）
+        """
+        # 如果未启用黑名单，直接返回 False（不在黑名单）
+        if not self.blacklist_enabled:
+            return False
+
+        # 检查通用黑名单
+        if self._is_pair_in_blacklist(pair, self._common_blacklist_patterns):
+            if log_reason:
+                logger.info(f"🚫 {pair} 在通用黑名单中，拒绝 {side.upper()} 开仓")
+            return True
+
+        # 检查方向特定的黑名单
+        if side == "long":
+            if self._is_pair_in_blacklist(pair, self._long_blacklist_patterns):
+                if log_reason:
+                    logger.info(f"🚫 {pair} 在 LONG 黑名单中，拒绝开仓")
+                return True
+        elif side == "short":
+            if self._is_pair_in_blacklist(pair, self._short_blacklist_patterns):
+                if log_reason:
+                    logger.info(f"🚫 {pair} 在 SHORT 黑名单中，拒绝开仓")
+                return True
+
+        # 不在黑名单中
+        return False
+
+    def advise_entry(self, dataframe, metadata: dict):
+        """
+        重写 advise_entry，在信号生成后根据黑名单过滤
+
+        :param dataframe: DataFrame with populated indicators
+        :param metadata: Additional information, like the currently traded pair
+        :return: DataFrame with entry signals, filtered by blacklist
+        """
+        # 1. 调用父类方法生成入场信号
+        df = super().advise_entry(dataframe, metadata)
+
+        # 2. 如果黑名单未启用，直接返回
+        if not self.blacklist_enabled:
+            return df
+
+        # 3. 获取交易对名称
+        pair = metadata.get('pair', '')
+
+        # 4. 根据黑名单过滤信号
+        # 检查是否在通用黑名单中
+        if self._is_pair_in_blacklist(pair, self._common_blacklist_patterns):
+            logger.info(f"🚫 {pair} 在通用黑名单中，清除所有入场信号")
+            df.loc[:, 'enter_long'] = 0
+            df.loc[:, 'enter_short'] = 0
+            return df
+
+        # 检查 long 黑名单
+        if self._is_pair_in_blacklist(pair, self._long_blacklist_patterns):
+            if 'enter_long' in df.columns and df['enter_long'].sum() > 0:
+                logger.info(f"🚫 {pair} 在 LONG 黑名单中，清除做多信号")
+                df.loc[:, 'enter_long'] = 0
+
+        # 检查 short 黑名单
+        if self._is_pair_in_blacklist(pair, self._short_blacklist_patterns):
+            if 'enter_short' in df.columns and df['enter_short'].sum() > 0:
+                logger.info(f"🚫 {pair} 在 SHORT 黑名单中，清除做空信号")
+                df.loc[:, 'enter_short'] = 0
+
+        return df
 
     # ========== 子类可重写的方法 ==========
 

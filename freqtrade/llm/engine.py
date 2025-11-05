@@ -11,7 +11,8 @@ import time
 import json
 import hashlib
 import logging
-
+            # 通用 HTTP 提供商（推荐）
+from freqtrade.llm.providers import HttpLLMProvider
 from freqtrade.llm.context_builder import ContextBuilder
 from freqtrade.llm.prompts.manager import PromptManager
 
@@ -140,9 +141,9 @@ class LLMDecisionEngine:
         start_time = time.time()
         try:
             temperature = self.config.get("temperature", 0.1)
-            logger.debug(f"准备调用 LLM API，提供商: {self.config.get('provider')}, 模型: {self.config.get('model')}")
-            logger.debug(f"提示词长度: {len(prompt)} 字符")
-            logger.debug(f"温度参数: {temperature}")
+            logger.info(f"准备调用 LLM API，提供商: {self.config.get('provider')}, 模型: {self.config.get('model')}")
+            logger.info(f"提示词长度: {len(prompt)} 字符")
+            logger.info(f"温度参数: {temperature}")
             
             raw_response = self.provider.complete(prompt=prompt, temperature=temperature)
             latency_ms = int((time.time() - start_time) * 1000)
@@ -204,10 +205,7 @@ class LLMDecisionEngine:
     def _init_provider(self):
         """根据配置初始化 LLM 提供商"""
         provider_type = self.config.get("provider_type", "http").lower()
-
         if provider_type == "http":
-            # 通用 HTTP 提供商（推荐）
-            from freqtrade.llm.providers import HttpLLMProvider
             return HttpLLMProvider(self.config)
 
         # 旧版提供商（已弃用）

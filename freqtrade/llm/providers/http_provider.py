@@ -88,8 +88,8 @@ class HttpLLMProvider(LLMProvider):
         try:
             # 记录详细的请求信息用于调试
             logger.debug(f"LLM 请求 URL: {self.api_url}")
-            logger.debug(f"LLM 请求 Headers: {json.dumps(headers, indent=2)}")
-            logger.debug(f"LLM 请求 Body: {json.dumps(body, indent=2)}")
+            logger.debug(f"LLM 请求 Headers: {json.dumps(headers, indent=2, ensure_ascii=False)}")
+            logger.debug(f"LLM 请求 Body: {json.dumps(body, indent=2, ensure_ascii=False)}")
             logger.info(f"发送 LLM 请求到 {self.api_url}，超时设置: {self.timeout}秒")
             
             # 发送 HTTP 请求
@@ -102,12 +102,12 @@ class HttpLLMProvider(LLMProvider):
 
             # 记录响应状态码和内容
             logger.debug(f"LLM 响应状态码: {response.status_code}")
-            logger.debug(f"LLM 响应 Headers: {json.dumps(dict(response.headers), indent=2)}")
+            logger.debug(f"LLM 响应 Headers: {json.dumps(dict(response.headers), indent=2, ensure_ascii=False)}")
             
             # 在调用 raise_for_status() 之前记录响应内容
             try:
                 response_data = response.json()
-                logger.debug(f"LLM 响应 Body: {json.dumps(response_data, indent=2)}")
+                logger.debug(f"LLM 响应 Body: {json.dumps(response_data, indent=2, ensure_ascii=False)}")
             except json.JSONDecodeError:
                 logger.debug(f"LLM 响应 Body (非JSON): {response.text[:500]}")
             
@@ -139,10 +139,10 @@ class HttpLLMProvider(LLMProvider):
             
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"错误状态码: {e.response.status_code}")
-                logger.error(f"错误响应头: {json.dumps(dict(e.response.headers), indent=2)}")
+                logger.error(f"错误响应头: {json.dumps(dict(e.response.headers), indent=2, ensure_ascii=False)}")
                 try:
                     error_data = e.response.json()
-                    logger.error(f"错误响应体: {json.dumps(error_data, indent=2)}")
+                    logger.error(f"错误响应体: {json.dumps(error_data, indent=2, ensure_ascii=False)}")
                 except json.JSONDecodeError:
                     logger.error(f"错误响应体 (非JSON): {e.response.text[:500]}")
             raise
@@ -160,7 +160,7 @@ class HttpLLMProvider(LLMProvider):
 
         # 替换占位符
         if self.api_key and "{api_key}" in str(headers):
-            headers_str = json.dumps(headers)
+            headers_str = json.dumps(headers, ensure_ascii=False)
             headers_str = headers_str.replace("{api_key}", self.api_key)
             headers = json.loads(headers_str)
 
@@ -225,7 +225,7 @@ class HttpLLMProvider(LLMProvider):
         
         # 添加详细的响应提取日志
         logger.info(f"[DEBUG] 提取响应内容，路径: {content_path}")
-        logger.info(f"[DEBUG] 完整响应数据: {json.dumps(response_data, indent=2)}")
+        logger.info(f"[DEBUG] 完整响应数据: {json.dumps(response_data, indent=2, ensure_ascii=False)}")
 
         try:
             # 使用点号表示法导航到内容
@@ -234,7 +234,7 @@ class HttpLLMProvider(LLMProvider):
         except (KeyError, IndexError, TypeError) as e:
             raise ValueError(
                 f"无法从响应中提取内容，路径 '{content_path}' 无效: {e}\n"
-                f"响应数据: {json.dumps(response_data, indent=2)}"
+                f"响应数据: {json.dumps(response_data, indent=2, ensure_ascii=False)}"
             )
 
         # 如果需要，确保是 JSON 格式
@@ -374,7 +374,7 @@ class HttpLLMProvider(LLMProvider):
         except (KeyError, IndexError, TypeError) as e:
             raise ValueError(
                 f"无法从响应中提取使用信息，路径 '{usage_path}' 无效: {e}\n"
-                f"响应数据: {json.dumps(response_data, indent=2)}"
+                f"响应数据: {json.dumps(response_data, indent=2, ensure_ascii=False)}"
             )
 
     def _calculate_cost(

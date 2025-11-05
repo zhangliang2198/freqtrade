@@ -517,7 +517,7 @@ class LLMStrategy(BaseStrategyWithSnapshot):
         # 先调用父类方法，记录资产快照
         super().bot_loop_start(current_time=current_time, **kwargs)
 
-        # 定期记录 LLM 统计信息 (每100次调用)
+        # 定期记录 LLM 统计信息 (每10次调用)
         if self.llm_engine and self.llm_engine.stats["total_calls"] % 100 == 0:
             stats = self.llm_engine.get_stats()
             logger.info(
@@ -563,4 +563,3 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             'llm_total_cost_usd': stats['total_cost_usd'],
             'llm_errors': stats['errors'],
         }
-

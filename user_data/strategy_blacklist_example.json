@@ -1,26 +1,22 @@
 {
-  "exchange": {
-    "pair_blacklist": [
-      ".*_.*",
-      ".*DOWN.*",
-      ".*UP.*",
-      ".*BEAR.*",
-      ".*BULL.*"
-    ]
-  },
   "strategy_blacklist": {
     "enabled": true,
+
     "long_blacklist": [
       ".*DOWN.*",
       ".*BEAR.*",
       "DOGE/USDT:USDT"
     ],
+
     "short_blacklist": [
-      "BTC/USDT:USDT",
-      "ETH/USDT:USDT"
+      "XRP/USDT:USDT",
+      ".*UP.*",
+      ".*BULL.*",
+      "SHIB/USDT:USDT"
     ],
+
     "common_blacklist": [
-      "BNB/USDT:USDT"
+      ".*_.*"
     ]
   }
 }
