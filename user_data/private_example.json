@@ -1,8 +1,10 @@
 {
-    "dry_run": false,
-    "max_open_trades": 100,
-    "max_entry_position_adjustment": 12,
-    "timeframe": "1h",
+    "dry_run": true,
+    "max_open_trades": 300,
+    "max_entry_position_adjustment": 5,
+    "timeframe": "5m",
+    // 数据库自选，可以默认
+    "db_url": "postgresql+psycopg://postgres:postgres@localhost:5432/llm_strategy?client_encoding=utf8&options=-c%20timezone%3DUTC",
     "exchange": {
         "name": "binance",
         "key": "<API_KEY>",

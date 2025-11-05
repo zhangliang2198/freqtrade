@@ -5,6 +5,8 @@
 它作为创建您自己的 LLM 驱动策略的模板。
 """
 
+from datetime import datetime
+from typing import Optional
 import pandas as pd
 import talib.abstract as ta
 
@@ -111,46 +113,38 @@ class ExampleLLMStrategy(LLMStrategy):
         我们使用 custom_exit 进行基于 LLM 的出场，所以这里不需要。
         """
         return dataframe
-
-    # 可选: 覆盖回退方法以实现非 LLM 行为
-
-    def _populate_entry_trend_fallback(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        """
-        LLM 不可用时的回退入场逻辑
-
-        这是一个使用 RSI 和 MACD 的简单示例。
-        随意自定义或移除此部分。
-        """
-        dataframe.loc[
-            (
-                (dataframe["rsi"] < 30) &
-                (dataframe["macd"] > dataframe["macdsignal"]) &
-                (dataframe["volume"] > 0)
-            ),
-            "enter_long"
-        ] = 1
-
-        return dataframe
-
-    def _custom_exit_fallback(
+    
+    def custom_stake_amount(
         self,
         pair: str,
-        trade,
-        current_time,
+        current_time: datetime,
         current_rate: float,
-        current_profit: float
-    ):
+        proposed_stake: float,
+        max_stake: float,
+        leverage: float,
+        entry_tag: Optional[str],
+        side: str,
+        **kwargs,
+    ) -> float:
         """
-        LLM 不可用时的回退出场逻辑
+        控制开仓金额，并应用账户资金限制
 
-        简单的利润目标示例。
+        这是关键方法：在这里调用基类的 check_account_balance_limit 来限制各账户的资金使用
         """
-        # 在 5% 时止盈
-        if current_profit > 0.05:
-            return "profit_target_5pct"
+        desired_stake = super().custom_stake_amount(
+            pair, current_time, current_rate, proposed_stake, max_stake, leverage, entry_tag, side, **kwargs
+        )
 
-        # 在 -8% 时止损
-        if current_profit < -0.08:
-            return "stop_loss_8pct"
+        # 检查账户余额限制（如果启用了严格模式）
+        allowed, adjusted_stake = self.check_account_balance_limit(
+            side=side,
+            proposed_stake=desired_stake,
+            pair=pair
+        )
 
-        return None
+        if not allowed:
+            # 账户余额不足，不允许开仓
+            return 0.0
+
+        # 返回调整后的金额（如果没超限，就是原金额）
+        return min(adjusted_stake, max_stake)

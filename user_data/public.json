@@ -63,17 +63,5 @@
       "use_ratio": true,
       "long_ratio": 0,
       "short_ratio": 1
-    },
-    "td_desc": "// 以下是多线程配置",
-    "strategy_threading": true,
-    "strategy_thread_workers": 32,
-    "db_pool_size": 100,
-    "db_max_overflow": 100,
-    "exchange": {
-      "http_pool": {
-        "connections": 40,
-        "maxsize": 80,
-        "block": false
-      }
     }
   }

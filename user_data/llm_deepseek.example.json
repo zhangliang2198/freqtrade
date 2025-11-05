@@ -1,0 +1,103 @@
+{
+    "llm_config": {
+        "_comment": "DeepSeek Configuration (非常便宜的选择)",
+        "enabled": true,
+        "provider": "deepseek",
+        "provider_type": "http",
+        "model": "deepseek-reasoner",
+        "api_url": "https://api.deepseek.com/chat/completions",
+        "api_key": "<your deepseek key>",
+        "timeout": 180,
+        "max_retries": 3,
+        "temperature": 0.1,
+        "aggregation_interval_minutes": 60,
+        "enable_background_aggregation": true,
+        "headers": {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer {api_key}"
+        },
+
+        "request_body": {
+            "model": "{model}",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional cryptocurrency trading analyst. Always respond in valid JSON format."
+                },
+                {
+                    "role": "user",
+                    "content": "{prompt}"
+                }
+            ],
+            "temperature": "{temperature}",
+            "response_format": {
+                "type": "json_object"
+            }
+        },
+
+        "response_path": {
+            "content_path": "choices.0.message.content",
+            "ensure_json": true,
+            "usage_path": "usage",
+            "usage_fields": {
+                "input_tokens": "prompt_tokens",
+                "output_tokens": "completion_tokens",
+                "total_tokens": "total_tokens",
+                "cache_read_tokens": "prompt_cache_hit_tokens",
+                "cache_creation_tokens": "prompt_cache_miss_tokens"
+            }
+        },
+
+        "cost_config": {
+            "_comment": "Pricing for DeepSeek with Prompt Caching",
+            "input_cost_per_million": 0.27,
+            "output_cost_per_million": 1.10,
+            "cache_read_cost_per_million": 0.014,
+            "cache_creation_cost_per_million": 0.28
+        },
+        "decision_points": {
+            "entry": {
+                "enabled": true,
+                "cache_ttl": 60,
+                "confidence_threshold": 0.7
+            },
+            "exit": {
+                "enabled": true,
+                "cache_ttl": 60,
+                "confidence_threshold": 0.6
+            },
+            "stake": {
+                "enabled": true,
+                "cache_ttl": 60,
+                "confidence_threshold": 0.5,
+                "min_stake_multiplier": 0.5,
+                "max_stake_multiplier": 2.0
+            },
+            "adjust_position": {
+                "enabled": true,
+                "cache_ttl": 60,
+                "confidence_threshold": 0.6,
+                "max_adjustment_ratio": 0.3
+            },
+            "leverage": {
+                "enabled": true,
+                "cache_ttl": 60,
+                "confidence_threshold": 0.5,
+                "min_leverage": 1.0,
+                "max_leverage": 10.0
+            }
+        },
+        "performance": {
+            "log_to_database": true,
+            "log_prompts": true,
+            "log_responses": true,
+            "export_metrics": true
+        },
+        "context": {
+            "max_candles": 100,
+            "include_indicators": true,
+            "include_portfolio": true
+        }
+    }
+}
+

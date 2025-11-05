@@ -122,3 +122,4 @@ docker-compose-*.yml
 private.*
 Theshortgod.py
 Theshortgod.json
+llm_deepseek.json

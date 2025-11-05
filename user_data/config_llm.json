@@ -6,7 +6,10 @@
         "./pairlist_static_llm.json",
         "./blacklist.json",
         "./public.json",
-        "./private.llm.json",
-        "./llm_deepseek.json"
+        "./thread.json",
+        "./log.json",
+        "./accounts.json",
+        "./llm_deepseek.json",
+        "./private_example.json"
     ]
 }
