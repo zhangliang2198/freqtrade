@@ -237,11 +237,16 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             return proposed_stake
 
         try:
-            # 获取可用余额
-            if hasattr(self, 'wallets') and self.wallets:
-                available_balance = self.wallets.get_free(self.config["stake_currency"])
+            # 先获取账户的实际可用余额（考虑账户分离模式）
+            if self.strict_account_mode:
+                # 严格账户模式：获取指定方向账户的可用余额
+                available_balance = self.get_account_available_balance(side)
             else:
-                available_balance = proposed_stake
+                # 非严格模式：使用钱包总余额
+                if hasattr(self, 'wallets') and self.wallets:
+                    available_balance = self.wallets.get_free(self.config["stake_currency"])
+                else:
+                    available_balance = proposed_stake
 
             # 获取当前数据框
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
@@ -249,7 +254,7 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             if len(dataframe) == 0:
                 return proposed_stake
 
-            # 构建上下文
+            # 构建上下文（传入实际可用余额，让 LLM 知道资金限制）
             context = self.llm_engine.context_builder.build_stake_context(
                 pair=pair,
                 current_rate=current_rate,
@@ -290,13 +295,31 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                 adjusted_stake = max(adjusted_stake, min_stake)
             adjusted_stake = min(adjusted_stake, max_stake)
 
-            logger.info(
-                f"LLM 调整了 {pair} 的仓位: "
-                f"{proposed_stake:.2f} -> {adjusted_stake:.2f} "
-                f"(multiplier: {stake_multiplier:.2f})"
+            # 再次检查账户余额限制（双重保险，防止 LLM 决策超出可用余额）
+            allowed, final_stake = self.check_account_balance_limit(
+                side=side,
+                proposed_stake=adjusted_stake,
+                pair=pair
             )
 
-            return adjusted_stake
+            if not allowed:
+                # 账户余额不足，不允许开仓
+                logger.warning(
+                    f"⚠️ LLM 仓位决策被拒绝 {pair}: "
+                    f"调整后仓位 {adjusted_stake:.2f} 超过 {side.upper()} 账户可用余额 "
+                    f"(可用: {available_balance:.2f})"
+                )
+                return 0.0
+
+            # 记录调整信息
+            if final_stake != proposed_stake:
+                logger.info(
+                    f"💰 LLM 调整了 {pair} 的仓位: "
+                    f"{proposed_stake:.2f} -> {final_stake:.2f} "
+                    f"(multiplier: {stake_multiplier:.2f}, {side.upper()} 可用: {available_balance:.2f})"
+                )
+
+            return final_stake
     
         except Exception as e:
             logger.error(f"LLM 仓位调整决策失败: {e}", exc_info=True)

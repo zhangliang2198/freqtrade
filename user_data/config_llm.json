@@ -10,6 +10,6 @@
         "./log.json",
         "./accounts.json",
         "./llm_deepseek.json",
-        "./private_example.json"
+        "./private.llm.json"
     ]
 }

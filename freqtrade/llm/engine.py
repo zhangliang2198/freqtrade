@@ -5,18 +5,44 @@ LLM 决策引擎
 """
 
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, Literal
+from typing import Dict, Any, Optional, Literal, List
 from datetime import datetime
 import time
 import json
 import hashlib
 import logging
+import re
             # 通用 HTTP 提供商（推荐）
 from freqtrade.llm.providers import HttpLLMProvider
 from freqtrade.llm.context_builder import ContextBuilder
 from freqtrade.llm.prompts.manager import PromptManager
 
 logger = logging.getLogger(__name__)
+
+# 预编译正则（对齐 JSON 提取逻辑）
+JSON_FENCE_RE = re.compile(r"```json\s*(?P<json>(?:.|\s)+?)```", re.IGNORECASE)
+JSON_ARRAY_RE = re.compile(r"\[\s*\{.*?\}\s*\]", re.DOTALL | re.IGNORECASE)
+INVISIBLE_RUNE_RE = re.compile(r"[\u200B\u200C\u200D\uFEFF]")
+ARRAY_OPEN_WITH_SPACE_RE = re.compile(r"\[\s+\{", re.DOTALL)
+
+FULLWIDTH_TRANSLATION = str.maketrans({
+    "“": "\"",
+    "”": "\"",
+    "‘": "'",
+    "’": "'",
+    "［": "[",
+    "］": "]",
+    "｛": "{",
+    "｝": "}",
+    "：": ":",
+    "，": ",",
+    "【": "[",
+    "】": "]",
+    "〔": "[",
+    "〕": "]",
+    "、": ",",
+    "　": " ",
+})
 
 DecisionPoint = Literal["entry", "exit", "stake", "adjust_position", "leverage"]
 
@@ -273,43 +299,56 @@ class LLMDecisionEngine:
         Raises:
             ValueError: 如果响应无法解析
         """
+        logger.info(f"[DEBUG] {decision_point} 原始响应: {raw_response}")
+
+        cleaned_text = self._clean_response_text(raw_response)
+        payload = self._load_decision_payload(cleaned_text)
+
+        decision = str(payload.get("decision", "hold")).strip() or "hold"
+
+        # 将置信度归一化到 0-1 区间（LLM 常见返回 0-100 百分比）
+        confidence_raw = payload.get("confidence", 0.0)
         try:
-            # 添加详细的响应日志记录
-            logger.info(f"[DEBUG] {decision_point} 原始响应: {raw_response}")
-            
-            parsed = json.loads(raw_response)
-            
-            # 记录解析后的各个字段
-            decision = parsed.get("decision", "hold")
-            confidence = float(parsed.get("confidence", 0.0))
-            reasoning = parsed.get("reasoning", "")
-            parameters = parsed.get("parameters", {})
-            
-            logger.info(f"[DEBUG] {decision_point} 解析结果:")
-            logger.info(f"[DEBUG]   - decision: {decision}")
-            logger.info(f"[DEBUG]   - confidence: {confidence}")
-            logger.info(f"[DEBUG]   - reasoning: {reasoning}")
-            logger.info(f"[DEBUG]   - parameters: {parameters}")
+            confidence = float(confidence_raw)
+        except (TypeError, ValueError):
+            logger.warning(f"[DEBUG] 置信度字段无法转换: {confidence_raw!r}，使用 0.0")
+            confidence = 0.0
+        if confidence > 1.0 and confidence <= 100.0:
+            logger.info(f"[DEBUG] 将百分比置信度 {confidence} 转换为 0-1 区间")
+            confidence /= 100.0
+        confidence = max(0.0, min(confidence, 1.0))
 
-            return LLMResponse(
-                decision=decision,
-                confidence=confidence,
-                reasoning=reasoning,
-                parameters=parameters,
-                latency_ms=latency_ms,
-                tokens_used=None,  # 稍后填充
-                prompt_tokens=None,  # 稍后填充
-                completion_tokens=None,  # 稍后填充
-                prompt_cache_hit_tokens=None,  # 稍后填充
-                prompt_cache_miss_tokens=None,  # 稍后填充
-                cost_usd=None,  # 稍后填充
-                cached=False
+        reasoning = str(payload.get("reasoning", "") or "").strip()
+
+        parameters_raw = payload.get("parameters", {})
+        if isinstance(parameters_raw, dict):
+            parameters = parameters_raw
+        else:
+            logger.warning(
+                f"[DEBUG] parameters 字段类型异常 ({type(parameters_raw).__name__})，使用空字典"
             )
+            parameters = {}
 
-        except json.JSONDecodeError as e:
-            logger.error(f"无法将 LLM 响应解析为 JSON: {e}")
-            logger.error(f"原始响应: {raw_response[:500]}")
-            raise ValueError(f"无效的 JSON 响应: {e}")
+        logger.info(f"[DEBUG] {decision_point} 解析结果:")
+        logger.info(f"[DEBUG]   - decision: {decision}")
+        logger.info(f"[DEBUG]   - confidence: {confidence}")
+        logger.info(f"[DEBUG]   - reasoning: {reasoning}")
+        logger.info(f"[DEBUG]   - parameters: {parameters}")
+
+        return LLMResponse(
+            decision=decision,
+            confidence=confidence,
+            reasoning=reasoning,
+            parameters=parameters,
+            latency_ms=latency_ms,
+            tokens_used=None,
+            prompt_tokens=None,
+            completion_tokens=None,
+            prompt_cache_hit_tokens=None,
+            prompt_cache_miss_tokens=None,
+            cost_usd=None,
+            cached=False
+        )
 
     def _validate_response(self, response: LLMResponse, config: Dict) -> bool:
         """
@@ -343,6 +382,119 @@ class LLMDecisionEngine:
 
         logger.info(f"[DEBUG] 响应验证通过")
         return True
+
+    def _clean_response_text(self, text: str) -> str:
+        """去除零宽字符、全角符号并规整 JSON 格式"""
+        if not isinstance(text, str):
+            text = str(text)
+        text = INVISIBLE_RUNE_RE.sub("", text)
+        text = text.translate(FULLWIDTH_TRANSLATION)
+        text = text.replace("\r\n", "\n").strip()
+        text = ARRAY_OPEN_WITH_SPACE_RE.sub("[{", text)
+        return text
+
+    def _load_decision_payload(self, text: str) -> Dict[str, Any]:
+        """
+        尝试从原始 LLM 输出中解析出决策字典
+
+        兼容以下格式:
+        1. 直接返回 JSON 对象
+        2. 带有 ```json ``` 代码块
+        3. 先输出思维链，再附带 JSON 对象/数组
+        """
+        direct = self._safe_json_load(text)
+        if direct is not None:
+            return self._ensure_dict_payload(direct)
+
+        for segment in self._extract_json_segments(text):
+            parsed = self._safe_json_load(segment)
+            if parsed is not None:
+                return self._ensure_dict_payload(parsed)
+
+        snippet = text[:200]
+        logger.error(f"无法在响应中找到有效 JSON 段落，截取片段: {snippet!r}")
+        raise ValueError("未能解析 LLM 响应 JSON。")
+
+    def _extract_json_segments(self, text: str) -> List[str]:
+        """按优先级提取所有潜在的 JSON 段落"""
+        segments = []
+
+        fence_match = JSON_FENCE_RE.search(text)
+        if fence_match:
+            segments.append(fence_match.group("json").strip())
+
+        segments.extend(match.strip() for match in JSON_ARRAY_RE.findall(text))
+
+        balanced = self._extract_balanced_json(text)
+        if balanced:
+            segments.append(balanced.strip())
+
+        return segments
+
+    def _extract_balanced_json(self, text: str) -> Optional[str]:
+        """使用括号匹配提取首个 {} 或 [] 包裹的 JSON 片段"""
+        for opener, closer in (("{", "}"), ("[", "]")):
+            start = text.find(opener)
+            while start != -1:
+                end = self._find_matching_bracket(text, start, opener, closer)
+                if end != -1:
+                    return text[start:end + 1]
+                start = text.find(opener, start + 1)
+        return None
+
+    def _safe_json_load(self, candidate: str) -> Optional[Any]:
+        """带保护的 json.loads，失败时返回 None 并记录调试日志"""
+        candidate = candidate.strip()
+        if not candidate:
+            return None
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            logger.debug(f"[DEBUG] JSON 解析失败: {exc}; 片段: {candidate[:160]!r}")
+            return None
+
+    def _ensure_dict_payload(self, payload: Any) -> Dict[str, Any]:
+        """兼容数组形式，确保最终返回字典"""
+        if isinstance(payload, list):
+            if not payload:
+                raise ValueError("LLM 响应数组为空，无法提取决策。")
+            logger.info("[DEBUG] JSON 为数组形式，取第一个元素作为决策。")
+            payload = payload[0]
+        if not isinstance(payload, dict):
+            raise ValueError(f"LLM 响应应为对象，实际类型: {type(payload).__name__}")
+        return payload
+
+    def _find_matching_bracket(self, text: str, start: int, opener: str, closer: str) -> int:
+        """匹配 JSON 括号，忽略字符串中的括号"""
+        depth = 0
+        in_string = False
+        escape = False
+
+        for idx in range(start, len(text)):
+            ch = text[idx]
+
+            if in_string:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                elif ch == "\"":
+                    in_string = False
+                continue
+
+            if ch == "\"":
+                in_string = True
+                continue
+
+            if ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    return idx
+
+        return -1
 
     def _default_response(self, decision_point: DecisionPoint) -> LLMResponse:
         """

@@ -2,21 +2,24 @@
 
 ## 交易信息
 - **交易对**: {{ pair }}
-- **入场价格**: ${{ "%.4f"|format(entry_price) }}
-- **当前价格**: ${{ "%.4f"|format(current_price) }}
+- **入场价格**: ${{ "%.6f"|format(entry_price) }}
+- **当前价格**: ${{ "%.6f"|format(current_price) }}
 - **当前盈亏**: {{ "%.2f"|format(current_profit_pct) }}%
 - **当前盈亏（绝对值）**: ${{ "%.4f"|format(current_profit_abs) }}
 - **持仓时长**: {{ "%.1f"|format(holding_duration_minutes) }} 分钟
-- **止损价格**: ${{ "%.4f"|format(stop_loss) }}
+- **止损价格**: ${{ "%.6f"|format(stop_loss) }}
 {% if max_rate %}
-- **达到的最高价格**: ${{ "%.4f"|format(max_rate) }}
+- **达到的最高价格**: ${{ "%.6f"|format(max_rate) }}
+{% endif %}
+{% if min_rate %}
+- **达到的最低价格**: ${{ "%.6f"|format(min_rate) }}
 {% endif %}
 - **入场标签**: {{ entry_tag or "N/A" }}
 
 ## 当前市场指标
 {% if current_indicators %}
 {% for key, value in current_indicators.items() %}
-- **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
+- **{{ key }}**: {{ "%.6f"|format(value) if value is number else value }}
 {% endfor %}
 {% endif %}
 
