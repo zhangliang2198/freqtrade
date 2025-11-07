@@ -16,6 +16,7 @@ from freqtrade.commands import (
     start_convert_trades,
     start_create_userdir,
     start_download_data,
+    start_exporter_service,
     start_edge,
     start_hyperopt_list,
     start_hyperopt_show,
@@ -102,6 +103,35 @@ def test_start_trading_fail(mocker, caplog):
     assert exitmock.call_count == 0
 
 
+def test_start_trading_with_exporter(mocker):
+    args = get_args(
+        [
+            "trade",
+            "--start-exporter",
+            "-c",
+            "tests/testdata/testconfigs/main_test_config.json",
+        ]
+    )
+
+    config = {"prometheus_exporter": {"enabled": True}}
+    configuration_cls = mocker.patch("freqtrade.configuration.Configuration")
+    configuration_instance = configuration_cls.return_value
+    configuration_instance.get_config.return_value = config
+
+    worker_instance = MagicMock()
+    worker_cls = mocker.patch("freqtrade.worker.Worker", return_value=worker_instance)
+
+    exporter_mock = mocker.patch("exporter.freqtrade_exporter.run_exporter")
+
+    start_trading(args)
+
+    configuration_cls.assert_called_once_with(args)
+    exporter_mock.assert_called_once_with(config)
+    worker_cls.assert_called_once_with(args, config)
+    worker_instance.run.assert_called_once()
+    worker_instance.exit.assert_called_once()
+
+
 def test_start_webserver(mocker, caplog):
     api_server_mock = mocker.patch(
         "freqtrade.rpc.api_server.ApiServer",
@@ -110,6 +140,21 @@ def test_start_webserver(mocker, caplog):
     args = ["webserver", "-c", "tests/testdata/testconfigs/main_test_config.json"]
     start_webserver(get_args(args))
     assert api_server_mock.call_count == 1
+
+
+def test_start_exporter_service(mocker):
+    config = {"prometheus_exporter": {"listen_port": 8123}}
+    setup_mock = mocker.patch(
+        "freqtrade.configuration.setup_utils_configuration",
+        return_value=config,
+    )
+    exporter_mock = mocker.patch("exporter.freqtrade_exporter.run_exporter")
+
+    args = ["exporter", "-c", "tests/testdata/testconfigs/main_test_config.json"]
+    start_exporter_service(get_args(args))
+
+    setup_mock.assert_called_once()
+    exporter_mock.assert_called_once_with(config, threaded=False)
 
 
 def test_list_exchanges(capsys):

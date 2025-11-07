@@ -63,6 +63,20 @@ pip install "psycopg[binary]"
   - `username` / `password`: API 认证信息
   - `listen_ip_address` / `listen_port`: 自动构建 Freqtrade API 地址
 
+在运行交易命令时也可以临时附加 `--start-exporter`，Freqtrade 会在同一进程内后台拉起 Exporter：
+
+```bash
+freqtrade trade --config user_data/config.json --start-exporter
+```
+
+如需单独启动 Exporter，可在另一终端执行：
+
+```bash
+freqtrade exporter --config user_data/config.json
+```
+
+启动后进程会常驻，按 `Ctrl+C` 可停止。Exporter 读取同一份配置文件，因此可与交易进程分离部署。
+
 **工作原理：**
 1. Freqtrade 启动时会读取整个配置对象
 2. 如果 `prometheus_exporter.enabled = true`，自动在后台线程启动 FastAPI 服务

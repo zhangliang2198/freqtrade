@@ -189,16 +189,6 @@ class FreqtradeBot(LoggingMixin):
 
         self._measure_execution = MeasureTime(log_took_too_long, timeframe_secs * 0.25)
 
-        # 启动 Prometheus Exporter（如果配置启用）
-        self._exporter_thread = None
-        if self.config.get("prometheus_exporter", {}).get("enabled", False):
-            try:
-                from exporter.freqtrade_exporter import run_exporter
-                self._exporter_thread = run_exporter(self.config)
-                logger.info("Prometheus Exporter 已在后台线程启动")
-            except Exception as e:
-                logger.error(f"启动 Prometheus Exporter 失败: {e}")
-
     def notify_status(self, msg: str, msg_type=RPCMessageType.STATUS) -> None:
         """
         Public method for users of this class (worker, etc.) to send notifications

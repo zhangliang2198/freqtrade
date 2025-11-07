@@ -158,6 +158,11 @@ class Configuration:
 
         logger.info(f'Using DB: "{parse_db_uri_for_logging(config["db_url"])}"')
 
+        if self.args.get("start_exporter"):
+            prometheus_config = config.setdefault("prometheus_exporter", {})
+            prometheus_config["enabled"] = True
+            logger.info("Parameter --start-exporter detected, enabling Prometheus exporter.")
+
     def _process_common_options(self, config: Config) -> None:
         # Set strategy if not specified in config and or if it's non default
         if self.args.get("strategy") or not config.get("strategy"):

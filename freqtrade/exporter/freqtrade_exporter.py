@@ -12,8 +12,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
-from exporter.metrics import COLLECTORS
-from exporter.metrics.base import MetricSample, render_samples
+from freqtrade.exporter.metrics import COLLECTORS
+from freqtrade.exporter.metrics.base import MetricSample, render_samples
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +188,7 @@ def configure_exporter(config: Dict[str, Any]) -> None:
     )
 
 
-def run_exporter(config: Dict[str, Any], threaded: bool = True) -> threading.Thread:
+def run_exporter(config: Dict[str, Any], threaded: bool = True) -> threading.Thread | None:
     """
     启动 Prometheus Exporter FastAPI 服务。
 
@@ -211,6 +211,10 @@ def run_exporter(config: Dict[str, Any], threaded: bool = True) -> threading.Thr
             access_log=False,
         )
 
-    thread = threading.Thread(target=_run, daemon=True, name="PrometheusExporter")
-    thread.start()
-    return thread
+    if threaded:
+        thread = threading.Thread(target=_run, daemon=True, name="PrometheusExporter")
+        thread.start()
+        return thread
+
+    _run()
+    return None

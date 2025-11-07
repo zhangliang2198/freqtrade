@@ -404,6 +404,16 @@ def test_load_dry_run(default_conf, mocker, config_value, expected, arglist) -> 
     assert validated_conf["runmode"] == (RunMode.DRY_RUN if expected else RunMode.LIVE)
 
 
+def test_start_exporter_cli_flag(default_conf, mocker) -> None:
+    patched_configuration_load_config_file(mocker, default_conf)
+
+    args = Arguments(["trade", "--start-exporter"]).get_parsed_arg()
+    configuration = Configuration(args)
+    validated_conf = configuration.load_config()
+
+    assert validated_conf["prometheus_exporter"]["enabled"] is True
+
+
 def test_load_custom_strategy(default_conf, mocker, tmp_path) -> None:
     default_conf.update(
         {
