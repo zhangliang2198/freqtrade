@@ -189,6 +189,16 @@ class FreqtradeBot(LoggingMixin):
 
         self._measure_execution = MeasureTime(log_took_too_long, timeframe_secs * 0.25)
 
+        # 启动 Prometheus Exporter（如果配置启用）
+        self._exporter_thread = None
+        if self.config.get("prometheus_exporter", {}).get("enabled", False):
+            try:
+                from exporter.freqtrade_exporter import run_exporter
+                self._exporter_thread = run_exporter(self.config)
+                logger.info("Prometheus Exporter 已在后台线程启动")
+            except Exception as e:
+                logger.error(f"启动 Prometheus Exporter 失败: {e}")
+
     def notify_status(self, msg: str, msg_type=RPCMessageType.STATUS) -> None:
         """
         Public method for users of this class (worker, etc.) to send notifications
@@ -579,7 +589,18 @@ class FreqtradeBot(LoggingMixin):
         Only used balance disappeared, which would make exiting impossible.
         :return: True if the trade was deleted, False otherwise
         """
+        trade_id = getattr(trade, "id", None)
+
         try:
+            if Trade.use_db and trade_id is not None:
+                persistent_trade = Trade.get_trades([Trade.id == trade_id]).first()
+                if persistent_trade is None:
+                    logger.warning(
+                        f"Unable to reload trade {trade_id} from database session. Skipping refresh."
+                    )
+                    return False
+                trade = persistent_trade
+
             orders = self.exchange.fetch_orders(
                 trade.pair, trade.open_date_utc - timedelta(seconds=10)
             )
@@ -664,6 +685,9 @@ class FreqtradeBot(LoggingMixin):
         except Exception:
             # catching https://github.com/freqtrade/freqtrade/issues/9025
             logger.warning("Error finding onexchange order", exc_info=True)
+        finally:
+            if Trade.use_db:
+                Trade.session.remove()
         return False
 
     #

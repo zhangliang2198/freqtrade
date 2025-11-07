@@ -1,38 +1,28 @@
 from __future__ import annotations
 
 import logging
-import pathlib
-import sys
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
 import threading
 
-# Ensure the project root is importable when executed as a script (e.g. `python exporter/freqtrade_exporter.py`).
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 import requests
-from flask import Flask, Response
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 
 from exporter.metrics import COLLECTORS
 from exporter.metrics.base import MetricSample, render_samples
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-
 logger = logging.getLogger(__name__)
 
-# 修改为你的 API 账号密码
-API_USER = "admin"
-API_PASS = "admin123"
-FREQTRADE_API = "http://127.0.0.1:8080/api/v1"
+# 全局配置变量（从 config 初始化）
+API_USER: str = ""
+API_PASS: str = ""
+FREQTRADE_API: str = ""
+EXPORTER_PORT: int = 8000
+EXPORTER_HOST: str = "127.0.0.1"
 
 
 class FreqtradeAPI:
@@ -94,7 +84,7 @@ class FreqtradeAPI:
             self._sessions.clear()
 
 
-app = Flask(__name__)
+app = FastAPI(title="Freqtrade Prometheus Exporter")
 
 
 def _execute_collector(collector, api: FreqtradeAPI, now: float, collector_name: str) -> tuple[list[MetricSample], int]:
@@ -163,13 +153,64 @@ def build_metrics() -> str:
         api.close()
 
 
-@app.route("/metrics")
-def metrics() -> Response:
+@app.get("/metrics")
+def metrics() -> PlainTextResponse:
+    """Prometheus 指标输出端点"""
     payload = build_metrics()
     logger.info("输出 Prometheus 指标（%d 字节）。", len(payload))
-    return Response(payload, mimetype="text/plain; version=0.0.4")
+    return PlainTextResponse(content=payload, media_type="text/plain; version=0.0.4")
 
 
-if __name__ == "__main__":
-    # Windows 上直接跑 Flask，端口 8000
-    app.run(host="127.0.0.1", port=8000)
+def configure_exporter(config: Dict[str, Any]) -> None:
+    """从 freqtrade 配置中提取 exporter 配置并设置全局变量。"""
+    global API_USER, API_PASS, FREQTRADE_API, EXPORTER_PORT, EXPORTER_HOST
+
+    api_server_config = config.get("api_server", {})
+    exporter_config = config.get("prometheus_exporter", {})
+
+    # 从 api_server 配置中获取认证信息和 API 地址
+    API_USER = api_server_config.get("username")
+    API_PASS = api_server_config.get("password")
+    api_host = api_server_config.get("listen_ip_address", "127.0.0.1")
+    api_port = api_server_config.get("listen_port", 8080)
+    FREQTRADE_API = f"http://{api_host}:{api_port}/api/v1"
+
+    # 从 prometheus_exporter 配置中获取 exporter 监听地址和端口
+    EXPORTER_HOST = exporter_config.get("listen_ip_address", "127.0.0.1")
+    EXPORTER_PORT = exporter_config.get("listen_port", 8000)
+
+    logger.info(
+        "Prometheus Exporter 配置: host=%s, port=%d, freqtrade_api=%s, user=%s",
+        EXPORTER_HOST,
+        EXPORTER_PORT,
+        FREQTRADE_API,
+        API_USER,
+    )
+
+
+def run_exporter(config: Dict[str, Any], threaded: bool = True) -> threading.Thread:
+    """
+    启动 Prometheus Exporter FastAPI 服务。
+
+    Args:
+        config: freqtrade 配置字典（必需）
+        threaded: 是否在后台线程中运行（默认 True）
+
+    Returns:
+        运行服务的线程对象
+    """
+    configure_exporter(config)
+
+    def _run():
+        logger.info("启动 Prometheus Exporter FastAPI 服务于 http://%s:%d/metrics", EXPORTER_HOST, EXPORTER_PORT)
+        uvicorn.run(
+            app,
+            host=EXPORTER_HOST,
+            port=EXPORTER_PORT,
+            log_level="info",
+            access_log=False,
+        )
+
+    thread = threading.Thread(target=_run, daemon=True, name="PrometheusExporter")
+    thread.start()
+    return thread

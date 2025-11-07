@@ -5,7 +5,20 @@
       ".*DOWN.*",
       ".*UP.*",
       ".*BEAR.*",
-      ".*BULL.*"
+      ".*BULL.*",
+      "BNB/USDT:USDT",
+      "USDC/USDT:USDT",
+      "USDT/USDC:USDT",
+      "BUSD/USDT:USDT",
+      "BUSD/USDC:USDT",
+      "DAI/USDT:USDT",
+      "TUSD/USDT:USDT",
+      "FDUSD/USDT:USDT",
+      "USDC/BUSD:USDT",
+      ".*USDC.*USDT.*",
+      ".*USDT.*USDC.*",
+      ".*BUSD.*USDT.*",
+      ".*DAI.*USDT.*"
     ]
   },
   "strategy_blacklist": {
@@ -20,7 +33,7 @@
       "ETH/USDT:USDT"
     ],
     "common_blacklist": [
-      "BNB/USDT:USDT"
+
     ]
   }
 }

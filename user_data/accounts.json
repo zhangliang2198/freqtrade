@@ -1,6 +1,5 @@
 {
     "strategy_account": {
-      "desc": "// 多空账户分开管理",
       "enabled": true,
       "long_initial_balance": 2000,
       "short_initial_balance": 2000,

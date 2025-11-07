@@ -23,7 +23,7 @@
 ## 环境依赖
 
 ```bash
-pip install flask requests
+pip install fastapi uvicorn requests
 ```
 
 如果同时监控 PostgreSQL，请按需安装：
@@ -34,32 +34,67 @@ pip install "psycopg[binary]"
 
 ## 运行流程
 
-1. 启动 Freqtrade，并确保 REST API 服务已经开启。
-2. 运行 Exporter：
+在 Freqtrade 配置文件中添加 `prometheus_exporter` 配置，Exporter 会随机器人自动启动：
 
-   ```bash
-   python exporter/freqtrade_exporter.py
-   ```
+```json
+{
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 10800,
+    "username": "admin",
+    "password": "admin123",
+    "verbosity": "error",
+    "enable_openapi": true
+  },
+  "prometheus_exporter": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8000
+  }
+}
+```
 
-   默认监听 `127.0.0.1:8000/metrics`，日志输出已改为中文便于排查。
+**配置说明：**
+- `prometheus_exporter.enabled`: 是否启用 Prometheus Exporter（必需）
+- `prometheus_exporter.listen_ip_address`: Exporter 监听地址（默认 127.0.0.1）
+- `prometheus_exporter.listen_port`: Exporter 监听端口（默认 8000）
+- **Exporter 会自动从 `api_server` 配置中读取：**
+  - `username` / `password`: API 认证信息
+  - `listen_ip_address` / `listen_port`: 自动构建 Freqtrade API 地址
 
-3. 启动 Prometheus：
+**工作原理：**
+1. Freqtrade 启动时会读取整个配置对象
+2. 如果 `prometheus_exporter.enabled = true`，自动在后台线程启动 FastAPI 服务
+3. Exporter 从 `api_server` 配置提取认证信息和 API URL，无需重复配置
+4. 访问 `http://<exporter_host>:<exporter_port>/metrics` 查看 Prometheus 指标
 
-   ```bash
-   C:\applications\prometheus-3.7.3.windows-amd64\prometheus.exe ^
-     --config.file=C:\applications\prometheus-3.7.3.windows-amd64\prometheus.yml
-   ```
+启动 Freqtrade 后，你会在日志中看到：
+```
+Prometheus Exporter 配置: host=0.0.0.0, port=8000, freqtrade_api=http://0.0.0.0:10800/api/v1, user=admin
+启动 Prometheus Exporter FastAPI 服务于 http://0.0.0.0:8000/metrics
+Prometheus Exporter 已在后台线程启动
+```
 
-   打开 `http://127.0.0.1:9090/targets`，确认 `freqtrade_exporter` 状态为 `UP`。
+## 配置 Prometheus 和 Grafana
 
-4. 配置 Grafana：
-   - 访问 `http://127.0.0.1:3000`，默认账号密码 `admin/admin`。
-   - 添加 Prometheus 数据源，URL 填 `http://127.0.0.1:9090`。
-   - 新建或导入 Dashboard，使用以下示例指标：
-     - `freqtrade_balance_total_stake`：账户总权益
-     - `freqtrade_open_trades_total`：未平仓数量
-     - `freqtrade_profit_all_percent`：总体收益率
-     - `freqtrade_trade_stake_amount{pair="BTC/USDT"}`：指定交易对的建仓规模
+### 启动 Prometheus
+
+```bash
+C:\applications\prometheus-3.7.3.windows-amd64\prometheus.exe --config.file=C:\applications\prometheus-3.7.3.windows-amd64\prometheus.yml
+```
+
+打开 `http://127.0.0.1:9090/targets`，确认 `freqtrade_exporter` 状态为 `UP`。
+
+### 配置 Grafana
+
+- 访问 `http://127.0.0.1:3000`，默认账号密码 `admin/admin`
+- 添加 Prometheus 数据源，URL 填 `http://127.0.0.1:9090`
+- 新建或导入 Dashboard，使用以下示例指标：
+  - `freqtrade_balance_total_stake`：账户总权益
+  - `freqtrade_open_trades_total`：未平仓数量
+  - `freqtrade_profit_all_percent`：总体收益率
+  - `freqtrade_trade_stake_amount{pair="BTC/USDT"}`：指定交易对的建仓规模
 
 ## 常见指标速览
 

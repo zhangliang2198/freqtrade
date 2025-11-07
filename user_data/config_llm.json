@@ -10,6 +10,7 @@
         "./log.json",
         "./accounts.json",
         "./llm_deepseek.json",
+        "./exporter_metrics.json",
         "./private.llm.json"
     ]
 }
