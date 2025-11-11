@@ -12,15 +12,6 @@ class ExampleLLMStrategy(LLMStrategy):
     # 基本策略参数
     timeframe = "15m"
 
-    # 风险管理
-    # stoploss = -0.10
-    trailing_stop = False
-    use_custom_stoploss = False
-
-    # 启用仓位调整 (DCA/金字塔)
-    position_adjustment_enable = True
-    max_entry_position_adjustment = 10
-
     # 启动K线数量 (用于指标计算)
     startup_candle_count = 100
 

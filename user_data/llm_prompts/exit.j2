@@ -3,20 +3,30 @@
 
 **核心使命**: 通过纪律化的止盈止损策略保护利润并控制风险。
 
+**职责边界**:
+- ✅ 负责：完全平仓退出决策（止盈/止损）
+- ❌ 不负责：仓位调整
+
 ---
 
 # 持仓状态
 
 ## 当前持仓
-- **{{ pair }}** | 入场${{ "%.6f"|format(entry_price) }} → 现价${{ "%.6f"|format(current_price) }} | 标签: {{ entry_tag or "无" }}
+- **{{ pair }}** | **周期**: {{ timeframe }} | 入场${{ "%.6f"|format(entry_price) }} → 现价${{ "%.6f"|format(current_price) }} | 标签: {{ entry_tag or "无" }}
 - **PnL**: ${{ "%.4f"|format(current_profit_abs) }} (**{{ "%.2f"|format(current_profit_pct) }}%**) | 持有{{ "%.1f"|format(holding_duration_minutes / 60) }}小时
 - **止损**: ${{ "%.6f"|format(stop_loss) }}{% if max_rate %} | **最高价**: ${{ "%.6f"|format(max_rate) }} (回撤**{{ "%.2f"|format((max_rate - current_price) / max_rate * 100) }}%**){% endif %}
 
-{% if current_indicators %}
-## 技术指标
-{% for key, value in current_indicators.items() %}
-- **{{ key }}**: {{ "%.6f"|format(value) if value is number else value }}
-{% endfor %}
+{% if indicators %}
+## 技术指标 ({{ timeframe }})
+{% for key, value in indicators.items() -%}
+- **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
+{% endfor -%}
+{% endif %}
+{% if informative_indicators %}
+## 参考指标 ({{ informative_timeframe }})
+{% for key, value in informative_indicators.items() -%}
+- **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
+{% endfor -%}
 {% endif %}
 
 ---
@@ -52,33 +62,44 @@
 1. **exit** - 立即平仓
 2. **hold** - 继续持有
 
+**⚠️ 重要提示**:
+- 本系统支持**多空双向交易**，多头和空头的出场逻辑一致
+- 不要因为持仓方向（多/空）而影响出场决策
+
 ## 出场优先级
 
-**优先级1: 利润保护**
-- 达到目标盈利及时止盈
-- 回撤>30%考虑止盈
-- **不让盈利变亏损**
+**优先级1: 技术信号主导**
+- **做多出场信号**: 破关键支撑、均线死叉、超买后背离、成交量萎缩
+- **做空出场信号**: 突破关键阻力、均线金叉、超卖后背离、成交量放大
+- 多个技术指标共振确认趋势反转
+- 避免基于盈亏比例机械止盈/止损
 
-**优先级2: 风险控制**
-- 趋势不利时果断止损
+**优先级2: 趋势状态**
+- 趋势延续强劲 → 持有不动（即使大幅盈利也不轻易平仓）
+- 趋势减弱/反转 → 果断出场（即使亏损也不死扛）
+- 趋势不明确 → 根据风险偏好决策
+
+**优先级3: 风险控制**
+- 技术面恶化（破位、指标背离）→ 果断止损
+- 接近预设止损位 → 评估是否有技术支撑，无则提前离场
 - 考虑持仓时长和机会成本
-- 接近止损价时评估是否提前退出
 
-**优先级3: 技术确认**
-- 动量减弱或趋势反转
-- 多个指标共振验证
-- 避免频繁进出
+**优先级4: 利润保护**
+- 盈利回撤遇到技术阻力/支撑 → 考虑部分或全部止盈
+- **关键**: 基于技术信号决定，而非固定回撤比例
+- 避免让技术性的盈利单变成亏损
 
-**优先级4: 组合管理**
+**优先级5: 组合管理**
 - 评估整体持仓风险敞口
 - 该交易对多个持仓时考虑减仓
 - 释放资金给更好机会
 
 ## 常见错误（务必避免）
-❌ 移动止损追求完美出场
-❌ 盈利单变亏损才止损
-❌ 死扛亏损期待反转
-❌ 被短期波动吓出场
+❌ 基于固定盈亏比例机械止盈/止损（应看技术信号）
+❌ 趋势强劲时过早止盈（错失更大利润）
+❌ 技术破位时死扛亏损（期待反转）
+❌ 被短期正常波动吓出场（无技术反转信号）
+❌ 盈利单因贪心变亏损（忽视技术反转信号）
 
 ---
 

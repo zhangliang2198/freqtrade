@@ -11,7 +11,7 @@
     "force_entry_enable": true,
     "initial_state": "running",
     "cancel_open_orders_on_exit": false,
-    "max_entry_position_adjustment": 10,
+    "max_entry_position_adjustment": 999,
     "timeframe": "5m",
     "allow_custom_messages": true,
     "unfilledtimeout": {

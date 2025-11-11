@@ -41,10 +41,20 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                 dataframe['rsi'] = ta.RSI(dataframe)
                 return dataframe
     """
+    
+    # 风险管理
+    # stoploss = -0.10
+    trailing_stop = False
+    use_custom_stoploss = False
 
     # Strategy interface version
     INTERFACE_VERSION = 3
     stoploss = -99999
+    
+    # 启用仓位调整 (DCA/金字塔)
+    position_adjustment_enable = True
+    max_entry_position_adjustment = 999
+    
     # LLM engine instance (initialized in bot_start)
     llm_engine: Optional[LLMDecisionEngine] = None
 

@@ -67,16 +67,31 @@ class ContextBuilder:
         current_candle = dataframe.iloc[-1]
         pair = metadata.get("pair", "UNKNOWN")
 
+        # 获取时间周期信息
+        timeframe = strategy.timeframe if strategy and hasattr(strategy, 'timeframe') else "未知"
+        informative_timeframe = (
+            strategy.informative_timeframe
+            if strategy and hasattr(strategy, 'informative_timeframe')
+            else None
+        )
+
         context = {
             "pair": pair,
+            "timeframe": timeframe,
             "current_time": str(current_candle.get("date", datetime.utcnow())),
             "current_candle": self._format_candle(current_candle),
             "market_summary": self._summarize_market(recent_data),
         }
 
-        # 添加指标
+        # 添加指标（分离主周期和信息周期）
         if self.include_indicators:
-            context["indicators"] = self._extract_indicators(current_candle, dataframe)
+            indicators_data = self._extract_indicators_with_timeframes(
+                current_candle,
+                dataframe,
+                timeframe,
+                informative_timeframe
+            )
+            context.update(indicators_data)
 
         # 添加最近的K线
         if self.include_recent_trades:
@@ -131,8 +146,17 @@ class ContextBuilder:
             (datetime.utcnow() - trade.open_date).total_seconds() / 60
         )
 
+        # 获取时间周期信息
+        timeframe = strategy.timeframe if strategy and hasattr(strategy, 'timeframe') else "未知"
+        informative_timeframe = (
+            strategy.informative_timeframe
+            if strategy and hasattr(strategy, 'informative_timeframe')
+            else None
+        )
+
         context = {
             "pair": trade.pair,
+            "timeframe": timeframe,
             "entry_price": float(trade.open_rate),
             "current_price": float(current_rate),
             "current_profit_pct": float(current_profit_pct),
@@ -148,9 +172,15 @@ class ContextBuilder:
         if trade.min_rate:
             context["min_rate"] = float(trade.min_rate)
 
-        # 添加当前指标
+        # 添加当前指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
-            context["current_indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
+            indicators_data = self._extract_indicators_with_timeframes(
+                dataframe.iloc[-1],
+                dataframe,
+                timeframe,
+                informative_timeframe
+            )
+            context.update(indicators_data)
 
         # 添加新的细粒度信息
         if strategy:
@@ -192,17 +222,32 @@ class ContextBuilder:
         """
         recent_data = dataframe.tail(self.lookback_candles)
 
+        # 获取时间周期信息
+        timeframe = strategy.timeframe if strategy and hasattr(strategy, 'timeframe') else "未知"
+        informative_timeframe = (
+            strategy.informative_timeframe
+            if strategy and hasattr(strategy, 'informative_timeframe')
+            else None
+        )
+
         context = {
             "pair": pair,
+            "timeframe": timeframe,
             "current_price": float(current_rate),
             "available_balance": float(available_balance),
             "market_summary": self._summarize_market(recent_data),
             "volatility": self._calculate_volatility(dataframe),
         }
 
-        # 添加当前指标
+        # 添加当前指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
-            context["indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
+            indicators_data = self._extract_indicators_with_timeframes(
+                dataframe.iloc[-1],
+                dataframe,
+                timeframe,
+                informative_timeframe
+            )
+            context.update(indicators_data)
 
         # 添加新的细粒度信息
         if strategy:
@@ -250,19 +295,51 @@ class ContextBuilder:
 
         recent_data = dataframe.tail(self.lookback_candles)
 
+        # 获取时间周期信息
+        timeframe = strategy.timeframe if strategy and hasattr(strategy, 'timeframe') else "未知"
+        informative_timeframe = (
+            strategy.informative_timeframe
+            if strategy and hasattr(strategy, 'informative_timeframe')
+            else None
+        )
+
+        # 计算调整次数和平均入场价
+        nr_of_entries = trade.nr_of_successful_entries if hasattr(trade, 'nr_of_successful_entries') else 1
+        average_entry_rate = float(trade.open_rate_requested) if hasattr(trade, 'open_rate_requested') else float(trade.open_rate)
+
+        # 计算相对平均成本的盈亏
+        profit_from_average = ((current_rate - average_entry_rate) / average_entry_rate) * 100 if average_entry_rate > 0 else 0.0
+
+        # 获取最大调整次数限制
+        max_adjustments = -1  # 默认无限制
+        if strategy and hasattr(strategy, 'max_entry_position_adjustment'):
+            max_adjustments = strategy.max_entry_position_adjustment
+
         context = {
             "pair": trade.pair,
+            "timeframe": timeframe,
             "current_profit_pct": float(current_profit * 100),
             "current_rate": float(current_rate),
             "entry_rate": float(trade.open_rate),
+            "average_entry_rate": float(average_entry_rate),
+            "profit_from_average_pct": float(profit_from_average),
             "stake_amount": float(trade.stake_amount),
             "holding_duration_minutes": float(holding_duration_minutes),
             "market_summary": self._summarize_market(recent_data),
+            "nr_of_entries": int(nr_of_entries),
+            "max_adjustments": int(max_adjustments),
+            "remaining_adjustments": int(max_adjustments - nr_of_entries) if max_adjustments > 0 else -1,
         }
 
-        # 添加指标
+        # 添加指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
-            context["indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
+            indicators_data = self._extract_indicators_with_timeframes(
+                dataframe.iloc[-1],
+                dataframe,
+                timeframe,
+                informative_timeframe
+            )
+            context.update(indicators_data)
 
         # 添加新的细粒度信息
         if strategy:
@@ -306,8 +383,17 @@ class ContextBuilder:
         """
         recent_data = dataframe.tail(self.lookback_candles)
 
+        # 获取时间周期信息
+        timeframe = strategy.timeframe if strategy and hasattr(strategy, 'timeframe') else "未知"
+        informative_timeframe = (
+            strategy.informative_timeframe
+            if strategy and hasattr(strategy, 'informative_timeframe')
+            else None
+        )
+
         context = {
             "pair": pair,
+            "timeframe": timeframe,
             "current_rate": float(current_rate),
             "proposed_leverage": float(proposed_leverage),
             "max_leverage": float(max_leverage),
@@ -315,9 +401,15 @@ class ContextBuilder:
             "market_summary": self._summarize_market(recent_data),
         }
 
-        # 添加指标
+        # 添加指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
-            context["indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
+            indicators_data = self._extract_indicators_with_timeframes(
+                dataframe.iloc[-1],
+                dataframe,
+                timeframe,
+                informative_timeframe
+            )
+            context.update(indicators_data)
 
         # 添加新的细粒度信息
         if strategy:
@@ -449,6 +541,97 @@ class ContextBuilder:
 
         # 3. 没有找到任何匹配
         return None
+
+    def _extract_indicators_with_timeframes(
+        self,
+        row: pd.Series,
+        dataframe: pd.DataFrame,
+        main_timeframe: str,
+        informative_timeframe: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        从数据框行中提取技术指标，并分离主周期和信息周期
+
+        Args:
+            row: 包含指标列的DataFrame行
+            dataframe: 完整DataFrame，用于自动检测指标
+            main_timeframe: 主时间周期（如 "15m"）
+            informative_timeframe: 信息时间周期（如 "1h"），可选
+
+        Returns:
+            包含分离指标的字典，格式：
+            {
+                "indicators": {...},  # 主周期指标
+                "informative_indicators": {...},  # 信息周期指标（如果有）
+            }
+        """
+        result = {}
+        available_columns = set(row.index)
+
+        # 获取所有指标列名
+        if isinstance(self.include_indicators, bool):
+            if self.include_indicators:
+                all_indicator_names = self._detect_all_indicators(dataframe)
+            else:
+                return {}
+        elif isinstance(self.include_indicators, list):
+            all_indicator_names = []
+            for config_name in self.include_indicators:
+                matched_name = self._match_indicator_with_suffix(config_name, available_columns)
+                if matched_name:
+                    all_indicator_names.append(matched_name)
+        else:
+            return {}
+
+        # 分离主周期和信息周期的指标
+        main_indicators = {}
+        informative_indicators = {}
+
+        # 生成信息周期的后缀模式（如 "_1h", "_4h" 等）
+        inf_suffixes = []
+        if informative_timeframe:
+            # Freqtrade merge_informative_pair 会添加 _{timeframe} 后缀
+            inf_suffixes.append(f"_{informative_timeframe}")
+
+        for indicator_name in all_indicator_names:
+            if indicator_name not in row.index:
+                continue
+
+            value = row[indicator_name]
+
+            # 处理NaN值和类型转换
+            if pd.isna(value):
+                continue
+            if isinstance(value, (pd.Timestamp, datetime)):
+                continue
+            try:
+                float_value = float(value)
+            except (ValueError, TypeError):
+                logger.warning(f"无法将指标 {indicator_name} 的值 {value} 转换为float，已跳过")
+                continue
+
+            # 判断是否为信息周期指标
+            is_informative = False
+            if informative_timeframe:
+                for suffix in inf_suffixes:
+                    if indicator_name.endswith(suffix):
+                        is_informative = True
+                        # 去除后缀，使指标名称更简洁
+                        clean_name = indicator_name[:-len(suffix)]
+                        informative_indicators[clean_name] = float_value
+                        break
+
+            if not is_informative:
+                main_indicators[indicator_name] = float_value
+
+        # 构建返回结果
+        if main_indicators:
+            result["indicators"] = main_indicators
+        if informative_indicators:
+            result["informative_indicators"] = informative_indicators
+            result["informative_timeframe"] = informative_timeframe
+
+        return result
 
     def _extract_indicators(self, row: pd.Series, dataframe: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
         """
