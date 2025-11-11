@@ -195,19 +195,28 @@ class LLMDecisionEngine:
             self.stats["total_cost_usd"] += response.cost_usd or 0.0
 
             # 验证响应
-            if not self._validate_response(response, point_config):
-                logger.warning(
+            validation_passed = self._validate_response(response, point_config)
+
+            # 无论验证是否通过，都缓存结果（避免重复调用）
+            self._cache_response(request.decision_point, cache_key, response)
+
+            # 无论验证是否通过，都记录到数据库（用于分析和调试）
+            if self.config.get("performance", {}).get("log_to_database", True):
+                self._log_decision(
+                    request,
+                    response,
+                    prompt,
+                    raw_response,
+                    success=validation_passed,
+                    error=None if validation_passed else f"置信度不足: {response.confidence} < {point_config.get('confidence_threshold', 0.5)}"
+                )
+
+            if not validation_passed:
+                logger.info(
                     f"响应验证失败 {request.decision_point}: "
                     f"confidence {response.confidence} < threshold {point_config.get('confidence_threshold', 0.5)}"
                 )
                 return self._default_response(request.decision_point)
-
-            # 缓存结果
-            self._cache_response(request.decision_point, cache_key, response)
-
-            # 记录到数据库
-            if self.config.get("performance", {}).get("log_to_database", True):
-                self._log_decision(request, response, prompt, raw_response, success=True)
 
             logger.info(
                 f"LLM 决策 {request.pair} {request.decision_point}: "
@@ -372,7 +381,7 @@ class LLMDecisionEngine:
         logger.info(f"[DEBUG]   - 推理: {response.reasoning}")
         
         if response.confidence < threshold:
-            logger.warning(f"[DEBUG] 置信度验证失败: {response.confidence} < {threshold}")
+            logger.info(f"[DEBUG] 置信度验证失败: {response.confidence} < {threshold}")
             return False
 
         # 检查决策是否为空

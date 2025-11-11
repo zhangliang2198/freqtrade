@@ -44,7 +44,7 @@ class LLMStrategy(BaseStrategyWithSnapshot):
 
     # Strategy interface version
     INTERFACE_VERSION = 3
-
+    stoploss = -99999
     # LLM engine instance (initialized in bot_start)
     llm_engine: Optional[LLMDecisionEngine] = None
 
