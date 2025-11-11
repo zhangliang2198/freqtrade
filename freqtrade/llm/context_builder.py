@@ -35,11 +35,18 @@ class ContextBuilder:
         self.include_funding_rate = config.get("include_funding_rate", False)
         self.include_portfolio_state = config.get("include_portfolio_state", False)
 
+        # 新增：控制是否包含详细的账户和持仓信息
+        self.include_account_info = config.get("include_account_info", True)
+        self.include_wallet_info = config.get("include_wallet_info", True)
+        self.include_positions_info = config.get("include_positions_info", True)
+        self.include_closed_trades_info = config.get("include_closed_trades_info", True)
+
     def build_entry_context(
         self,
         dataframe: pd.DataFrame,
         metadata: Dict,
-        portfolio_state: Optional[Dict] = None
+        portfolio_state: Optional[Dict] = None,
+        strategy: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         构建入场决策的上下文
@@ -48,6 +55,7 @@ class ContextBuilder:
             dataframe: 包含指标的分析数据框
             metadata: 策略元数据（交易对等）
             portfolio_state: 可选的当前投资组合状态
+            strategy: 策略实例（用于提取账户、钱包、持仓信息）
 
         Returns:
             入场决策的上下文字典
@@ -57,9 +65,10 @@ class ContextBuilder:
 
         recent_data = dataframe.tail(self.lookback_candles)
         current_candle = dataframe.iloc[-1]
+        pair = metadata.get("pair", "UNKNOWN")
 
         context = {
-            "pair": metadata.get("pair", "UNKNOWN"),
+            "pair": pair,
             "current_time": str(current_candle.get("date", datetime.utcnow())),
             "current_candle": self._format_candle(current_candle),
             "market_summary": self._summarize_market(recent_data),
@@ -73,9 +82,24 @@ class ContextBuilder:
         if self.include_recent_trades:
             context["recent_candles"] = self._format_recent_candles(recent_data, num=10)
 
-        # 添加投资组合状态
+        # 添加投资组合状态（旧格式，保持向后兼容）
         if self.include_portfolio_state and portfolio_state:
             context["portfolio"] = portfolio_state
+
+        # 添加新的细粒度信息
+        if strategy:
+            if self.include_account_info:
+                context.update(self._extract_account_info(strategy))
+
+            if self.include_wallet_info:
+                context.update(self._extract_wallet_info(strategy))
+
+            if self.include_positions_info:
+                positions_info = self._extract_positions_info(strategy, pair=pair)
+                context.update(positions_info)
+
+            if self.include_closed_trades_info:
+                context.update(self._extract_closed_trades_info(strategy))
 
         return context
 
@@ -83,7 +107,8 @@ class ContextBuilder:
         self,
         trade: Any,
         current_rate: float,
-        dataframe: pd.DataFrame
+        dataframe: pd.DataFrame,
+        strategy: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         构建出场决策的上下文
@@ -92,6 +117,7 @@ class ContextBuilder:
             trade: 交易对象
             current_rate: 当前市场价格
             dataframe: 当前分析的数据框
+            strategy: 策略实例（用于提取账户、钱包、持仓信息）
 
         Returns:
             出场决策的上下文字典
@@ -126,6 +152,21 @@ class ContextBuilder:
         if self.include_indicators and len(dataframe) > 0:
             context["current_indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
 
+        # 添加新的细粒度信息
+        if strategy:
+            if self.include_account_info:
+                context.update(self._extract_account_info(strategy))
+
+            if self.include_wallet_info:
+                context.update(self._extract_wallet_info(strategy))
+
+            if self.include_positions_info:
+                positions_info = self._extract_positions_info(strategy, pair=trade.pair)
+                context.update(positions_info)
+
+            if self.include_closed_trades_info:
+                context.update(self._extract_closed_trades_info(strategy))
+
         return context
 
     def build_stake_context(
@@ -133,7 +174,8 @@ class ContextBuilder:
         pair: str,
         current_rate: float,
         dataframe: pd.DataFrame,
-        available_balance: float
+        available_balance: float,
+        strategy: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         构建投资金额决策的上下文
@@ -143,6 +185,7 @@ class ContextBuilder:
             current_rate: 当前市场价格
             dataframe: 分析的数据框
             available_balance: 可用于交易的余额
+            strategy: 策略实例（用于提取账户、钱包、持仓信息）
 
         Returns:
             投资决策的上下文字典
@@ -161,6 +204,21 @@ class ContextBuilder:
         if self.include_indicators and len(dataframe) > 0:
             context["indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
 
+        # 添加新的细粒度信息
+        if strategy:
+            if self.include_account_info:
+                context.update(self._extract_account_info(strategy))
+
+            if self.include_wallet_info:
+                context.update(self._extract_wallet_info(strategy))
+
+            if self.include_positions_info:
+                positions_info = self._extract_positions_info(strategy, pair=pair)
+                context.update(positions_info)
+
+            if self.include_closed_trades_info:
+                context.update(self._extract_closed_trades_info(strategy))
+
         return context
 
     def build_adjust_position_context(
@@ -169,7 +227,8 @@ class ContextBuilder:
         current_time: datetime,
         current_rate: float,
         current_profit: float,
-        dataframe: pd.DataFrame
+        dataframe: pd.DataFrame,
+        strategy: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         构建仓位调整决策的上下文
@@ -180,6 +239,7 @@ class ContextBuilder:
             current_rate: 当前市场价格
             current_profit: 当前利润率
             dataframe: 分析的数据框
+            strategy: 策略实例（用于提取账户、钱包、持仓信息）
 
         Returns:
             调整决策的上下文字典
@@ -204,6 +264,21 @@ class ContextBuilder:
         if self.include_indicators and len(dataframe) > 0:
             context["indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
 
+        # 添加新的细粒度信息
+        if strategy:
+            if self.include_account_info:
+                context.update(self._extract_account_info(strategy))
+
+            if self.include_wallet_info:
+                context.update(self._extract_wallet_info(strategy))
+
+            if self.include_positions_info:
+                positions_info = self._extract_positions_info(strategy, pair=trade.pair)
+                context.update(positions_info)
+
+            if self.include_closed_trades_info:
+                context.update(self._extract_closed_trades_info(strategy))
+
         return context
 
     def build_leverage_context(
@@ -212,7 +287,8 @@ class ContextBuilder:
         current_rate: float,
         proposed_leverage: float,
         max_leverage: float,
-        dataframe: pd.DataFrame
+        dataframe: pd.DataFrame,
+        strategy: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         构建杠杆决策的上下文
@@ -223,6 +299,7 @@ class ContextBuilder:
             proposed_leverage: 建议的杠杆值
             max_leverage: 最大允许杠杆
             dataframe: 分析的数据框
+            strategy: 策略实例（用于提取账户、钱包、持仓信息）
 
         Returns:
             杠杆决策的上下文字典
@@ -241,6 +318,21 @@ class ContextBuilder:
         # 添加指标
         if self.include_indicators and len(dataframe) > 0:
             context["indicators"] = self._extract_indicators(dataframe.iloc[-1], dataframe)
+
+        # 添加新的细粒度信息
+        if strategy:
+            if self.include_account_info:
+                context.update(self._extract_account_info(strategy))
+
+            if self.include_wallet_info:
+                context.update(self._extract_wallet_info(strategy))
+
+            if self.include_positions_info:
+                positions_info = self._extract_positions_info(strategy, pair=pair)
+                context.update(positions_info)
+
+            if self.include_closed_trades_info:
+                context.update(self._extract_closed_trades_info(strategy))
 
         return context
 
@@ -470,3 +562,303 @@ class ContextBuilder:
         except Exception as e:
             logger.warning(f"波动率计算失败: {e}")
             return 0.0
+
+    # ========== 新增：细粒度信息提取方法 ==========
+
+    def _extract_account_info(self, strategy: Any) -> Dict[str, Any]:
+        """
+        提取账户分离信息
+
+        Args:
+            strategy: 策略实例（需要有账户分离功能）
+
+        Returns:
+            账户信息字典
+        """
+        account_info = {
+            "account_mode_enabled": False,
+            "account_long_initial": 0.0,
+            "account_short_initial": 0.0,
+            "account_long_available": 0.0,
+            "account_short_available": 0.0,
+            "account_long_used": 0.0,
+            "account_short_used": 0.0,
+        }
+
+        try:
+            # 检查是否有账户分离功能
+            if not hasattr(strategy, 'account_enabled'):
+                return account_info
+
+            account_info["account_mode_enabled"] = strategy.account_enabled
+
+            if strategy.account_enabled:
+                # 获取初始余额
+                account_info["account_long_initial"] = float(strategy.long_initial_balance)
+                account_info["account_short_initial"] = float(strategy.short_initial_balance)
+
+                # 获取可用余额
+                if hasattr(strategy, 'get_account_available_balance'):
+                    account_info["account_long_available"] = float(
+                        strategy.get_account_available_balance("long")
+                    )
+                    account_info["account_short_available"] = float(
+                        strategy.get_account_available_balance("short")
+                    )
+
+                # 计算已使用资金（考虑已实现盈亏）
+                # 已使用 = 初始 + 已实现盈亏 - 当前可用
+                account_info["account_long_used"] = max(0.0,
+                    account_info["account_long_initial"] - account_info["account_long_available"]
+                )
+                account_info["account_short_used"] = max(0.0,
+                    account_info["account_short_initial"] - account_info["account_short_available"]
+                )
+
+        except Exception as e:
+            logger.warning(f"提取账户信息失败: {e}")
+
+        return account_info
+
+    def _extract_wallet_info(self, strategy: Any) -> Dict[str, Any]:
+        """
+        提取钱包信息
+
+        Args:
+            strategy: 策略实例
+
+        Returns:
+            钱包信息字典
+        """
+        wallet_info = {
+            "wallet_total_balance": 0.0,
+            "wallet_free_balance": 0.0,
+            "wallet_used_balance": 0.0,
+            "wallet_starting_balance": 0.0,
+        }
+
+        try:
+            if not hasattr(strategy, 'wallets') or not strategy.wallets:
+                return wallet_info
+
+            stake_currency = strategy.config.get("stake_currency", "USDT")
+
+            # 获取钱包余额
+            wallet_info["wallet_total_balance"] = float(
+                strategy.wallets.get_total(stake_currency)
+            )
+            wallet_info["wallet_free_balance"] = float(
+                strategy.wallets.get_free(stake_currency)
+            )
+
+            # 计算已使用资金
+            wallet_info["wallet_used_balance"] = (
+                wallet_info["wallet_total_balance"] - wallet_info["wallet_free_balance"]
+            )
+
+            # 获取初始余额
+            try:
+                wallet_info["wallet_starting_balance"] = float(
+                    strategy.wallets.get_starting_balance()
+                )
+            except Exception:
+                wallet_info["wallet_starting_balance"] = wallet_info["wallet_total_balance"]
+
+        except Exception as e:
+            logger.warning(f"提取钱包信息失败: {e}")
+
+        return wallet_info
+
+    def _extract_positions_info(self, strategy: Any, pair: Optional[str] = None) -> Dict[str, Any]:
+        """
+        提取持仓信息
+
+        Args:
+            strategy: 策略实例
+            pair: 可选的交易对过滤
+
+        Returns:
+            持仓信息字典
+        """
+        from freqtrade.persistence import Trade
+
+        positions_info = {
+            "positions_total_count": 0,
+            "positions_long_count": 0,
+            "positions_short_count": 0,
+            "positions_long_stake_total": 0.0,
+            "positions_short_stake_total": 0.0,
+            "positions_long_profit_total": 0.0,
+            "positions_short_profit_total": 0.0,
+            "positions_long_profit_pct": 0.0,
+            "positions_short_profit_pct": 0.0,
+            "current_pair_positions": [],
+            # 新增：风险评估指标
+            "positions_at_risk_count": 0,  # 亏损持仓数量
+            "positions_in_profit_count": 0,  # 盈利持仓数量
+            "max_single_position_stake": 0.0,  # 最大单笔持仓金额
+            "avg_position_stake": 0.0,  # 平均持仓金额
+        }
+
+        try:
+            # 获取所有持仓
+            open_trades = Trade.get_trades_proxy(is_open=True)
+
+            long_stake = 0.0
+            short_stake = 0.0
+            long_profit = 0.0
+            short_profit = 0.0
+            at_risk_count = 0
+            in_profit_count = 0
+            max_stake = 0.0
+            total_stake = 0.0
+
+            for trade in open_trades:
+                is_long = not trade.is_short
+                stake = float(trade.stake_amount)
+
+                # 计算浮动盈亏
+                try:
+                    current_rate = self._get_current_rate(strategy, trade.pair)
+                    if current_rate:
+                        profit_ratio = trade.calc_profit_ratio(current_rate)
+                        profit_abs = trade.calc_profit(current_rate)
+                    else:
+                        profit_ratio = 0.0
+                        profit_abs = 0.0
+                except Exception:
+                    profit_ratio = 0.0
+                    profit_abs = 0.0
+
+                # 累计统计
+                if is_long:
+                    positions_info["positions_long_count"] += 1
+                    long_stake += stake
+                    long_profit += profit_abs
+                else:
+                    positions_info["positions_short_count"] += 1
+                    short_stake += stake
+                    short_profit += profit_abs
+
+                # 风险评估统计
+                total_stake += stake
+                max_stake = max(max_stake, stake)
+                if profit_abs < 0:
+                    at_risk_count += 1
+                else:
+                    in_profit_count += 1
+
+                # 如果是当前交易对，记录详细信息
+                if pair and trade.pair == pair:
+                    holding_minutes = (
+                        (datetime.utcnow() - trade.open_date).total_seconds() / 60
+                    )
+
+                    positions_info["current_pair_positions"].append({
+                        "trade_id": trade.id,
+                        "pair": trade.pair,
+                        "side": "long" if is_long else "short",
+                        "open_rate": float(trade.open_rate),
+                        "current_rate": float(current_rate) if current_rate else 0.0,
+                        "stake_amount": stake,
+                        "open_date": str(trade.open_date),
+                        "holding_minutes": float(holding_minutes),
+                        "profit_abs": float(profit_abs),
+                        "profit_pct": float(profit_ratio * 100),
+                        "leverage": float(trade.leverage or 1.0),
+                    })
+
+            # 总计
+            positions_info["positions_total_count"] = len(open_trades)
+            positions_info["positions_long_stake_total"] = long_stake
+            positions_info["positions_short_stake_total"] = short_stake
+            positions_info["positions_long_profit_total"] = long_profit
+            positions_info["positions_short_profit_total"] = short_profit
+
+            # 计算盈亏百分比
+            if long_stake > 0:
+                positions_info["positions_long_profit_pct"] = (long_profit / long_stake) * 100
+            if short_stake > 0:
+                positions_info["positions_short_profit_pct"] = (short_profit / short_stake) * 100
+
+            # 风险评估指标
+            positions_info["positions_at_risk_count"] = at_risk_count
+            positions_info["positions_in_profit_count"] = in_profit_count
+            positions_info["max_single_position_stake"] = max_stake
+            if len(open_trades) > 0:
+                positions_info["avg_position_stake"] = total_stake / len(open_trades)
+
+        except Exception as e:
+            logger.warning(f"提取持仓信息失败: {e}")
+
+        return positions_info
+
+    def _extract_closed_trades_info(self, strategy: Any) -> Dict[str, Any]:
+        """
+        提取已平仓交易统计
+
+        Args:
+            strategy: 策略实例
+
+        Returns:
+            已平仓交易信息字典
+        """
+        from freqtrade.persistence import Trade
+
+        closed_info = {
+            "closed_trades_total": 0,
+            "closed_long_count": 0,
+            "closed_short_count": 0,
+            "closed_long_profit": 0.0,
+            "closed_short_profit": 0.0,
+            "closed_total_profit": 0.0,
+        }
+
+        try:
+            closed_trades = Trade.get_trades_proxy(is_open=False)
+            closed_info["closed_trades_total"] = len(closed_trades)
+
+            long_profit = 0.0
+            short_profit = 0.0
+
+            for trade in closed_trades:
+                profit = float(trade.realized_profit or 0.0)
+
+                if trade.is_short:
+                    closed_info["closed_short_count"] += 1
+                    short_profit += profit
+                else:
+                    closed_info["closed_long_count"] += 1
+                    long_profit += profit
+
+            closed_info["closed_long_profit"] = long_profit
+            closed_info["closed_short_profit"] = short_profit
+            closed_info["closed_total_profit"] = long_profit + short_profit
+
+        except Exception as e:
+            logger.warning(f"提取已平仓信息失败: {e}")
+
+        return closed_info
+
+    def _get_current_rate(self, strategy: Any, pair: str) -> Optional[float]:
+        """
+        获取交易对当前价格
+
+        Args:
+            strategy: 策略实例
+            pair: 交易对
+
+        Returns:
+            当前价格，如果获取失败返回 None
+        """
+        try:
+            if not hasattr(strategy, 'dp'):
+                return None
+
+            df, _ = strategy.dp.get_analyzed_dataframe(pair, strategy.timeframe)
+            if len(df) > 0:
+                return float(df["close"].iloc[-1])
+        except Exception as e:
+            logger.debug(f"获取 {pair} 当前价格失败: {e}")
+
+        return None

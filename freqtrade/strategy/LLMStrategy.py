@@ -108,7 +108,8 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             context = self.llm_engine.context_builder.build_entry_context(
                 dataframe=dataframe,
                 metadata=metadata,
-                portfolio_state=portfolio_state
+                portfolio_state=portfolio_state,
+                strategy=self
             )
 
             # 创建请求
@@ -177,7 +178,8 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             context = self.llm_engine.context_builder.build_exit_context(
                 trade=trade,
                 current_rate=current_rate,
-                dataframe=dataframe
+                dataframe=dataframe,
+                strategy=self
             )
 
             # 创建请求
@@ -259,7 +261,8 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                 pair=pair,
                 current_rate=current_rate,
                 dataframe=dataframe,
-                available_balance=available_balance
+                available_balance=available_balance,
+                strategy=self
             )
 
             # 创建请求
@@ -370,7 +373,8 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                 current_time=current_time,
                 current_rate=current_rate,
                 current_profit=current_profit,
-                dataframe=dataframe
+                dataframe=dataframe,
+                strategy=self
             )
 
             # 创建请求
@@ -463,7 +467,8 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                 current_rate=current_rate,
                 proposed_leverage=proposed_leverage,
                 max_leverage=max_leverage,
-                dataframe=dataframe
+                dataframe=dataframe,
+                strategy=self
             )
 
             # 创建请求

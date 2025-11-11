@@ -99,9 +99,16 @@
             "export_metrics": true
         },
         "context": {
-            "max_candles": 100,
+            "lookback_candles": 100,
             "include_indicators": true,
-            "include_portfolio": true
+            "include_orderbook": false,
+            "include_recent_trades": false,
+            "include_funding_rate": false,
+            "include_portfolio_state": true,
+            "include_account_info": true,
+            "include_wallet_info": true,
+            "include_positions_info": true,
+            "include_closed_trades_info": true
         }
     }
 }

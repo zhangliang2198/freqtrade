@@ -494,12 +494,12 @@ class RPC:
         """
 
         def trade_win_loss(trade):
-            if trade.close_profit > 0:
+            profit = trade.close_profit or 0.0
+            if profit > 0:
                 return "wins"
-            elif trade.close_profit < 0:
+            if profit < 0:
                 return "losses"
-            else:
-                return "draws"
+            return "draws"
 
         result = Trade.get_trades([Trade.is_open.is_(False)])
         try:

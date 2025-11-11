@@ -28,6 +28,9 @@ EXPORTER_HOST: str = "127.0.0.1"
 class FreqtradeAPI:
     """用于在单次采集过程中缓存 Freqtrade REST API 响应的轻量封装。"""
 
+    _is_connected: bool = True  # 类级别的连接状态追踪
+    _status_lock = threading.Lock()  # 用于保护状态变更的锁
+
     def __init__(self, base_url: str, username: str, password: str, timeout: float = 5.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.auth = (username, password)
@@ -61,7 +64,34 @@ class FreqtradeAPI:
         try:
             response = session.get(url, auth=self.auth, timeout=self.timeout)
             response.raise_for_status()
+
+            # 连接成功，更新状态
+            with FreqtradeAPI._status_lock:
+                if not FreqtradeAPI._is_connected:
+                    logger.info("Freqtrade trader 服务已恢复连接")
+                    FreqtradeAPI._is_connected = True
+
+        except requests.exceptions.ConnectionError:
+            # 连接失败，trader 可能未启动，只在状态变化时记录日志
+            with FreqtradeAPI._status_lock:
+                if FreqtradeAPI._is_connected:
+                    logger.info("Freqtrade trader 服务未启动或无法连接")
+                    FreqtradeAPI._is_connected = False
+            return default
+        except requests.exceptions.HTTPError as exc:
+            # HTTP 错误，检查是否是服务未就绪（502/503）
+            if exc.response is not None and exc.response.status_code in (502, 503):
+                # 502 Bad Gateway 或 503 Service Unavailable - 服务未就绪
+                with FreqtradeAPI._status_lock:
+                    if FreqtradeAPI._is_connected:
+                        logger.info("Freqtrade trader 服务未就绪（正在启动或暂时不可用）")
+                        FreqtradeAPI._is_connected = False
+                return default
+            # 其他 HTTP 错误（如 401, 404, 500 等）视为真正的错误
+            logger.warning("Freqtrade API 调用失败 %s: HTTP %s", normalized, exc.response.status_code if exc.response else "Unknown")
+            return default
         except requests.RequestException as exc:
+            # 其他请求异常（如超时等）
             logger.warning("Freqtrade API 调用失败 %s: %s", normalized, exc)
             return default
 
@@ -109,16 +139,22 @@ def build_metrics() -> str:
     try:
         max_workers = max(1, len(COLLECTORS))
         collector_results: list[tuple[str, list[MetricSample], int]] = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_name = {}
-            for collector in COLLECTORS:
-                collector_name = getattr(collector, "__name__", repr(collector))
-                future = executor.submit(_execute_collector, collector, api, now, collector_name)
-                future_to_name[future] = collector_name
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_name = {}
+                for collector in COLLECTORS:
+                    collector_name = getattr(collector, "__name__", repr(collector))
+                    future = executor.submit(_execute_collector, collector, api, now, collector_name)
+                    future_to_name[future] = collector_name
 
-            for future, collector_name in future_to_name.items():
-                collected, error_flag = future.result()
-                collector_results.append((collector_name, collected, error_flag))
+                for future, collector_name in future_to_name.items():
+                    collected, error_flag = future.result()
+                    collector_results.append((collector_name, collected, error_flag))
+        except RuntimeError as exc:
+            if "interpreter shutdown" in str(exc).lower():
+                logger.warning("Python 正在退出，跳过本次指标抓取: %s", exc)
+                return "# exporter shutting down - metrics temporarily unavailable\n"
+            raise
 
         for collector_name, collected, error_flag in collector_results:
             samples.extend(collected)
