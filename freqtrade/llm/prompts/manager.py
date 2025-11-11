@@ -36,6 +36,15 @@ class PromptManager:
 
         self.template_dir = template_dir
 
+        # 获取提示词风格配置
+        self.prompt_style = config.get("prompt_style", "default")
+        if self.prompt_style not in ["default", "conservative", "aggressive"]:
+            logger.warning(
+                f"无效的 prompt_style 配置: {self.prompt_style}，"
+                f"将使用默认风格。有效选项: default, conservative, aggressive"
+            )
+            self.prompt_style = "default"
+
         # 初始化 Jinja2 环境
         try:
             self.env = Environment(loader=FileSystemLoader(str(template_dir)))
@@ -45,7 +54,10 @@ class PromptManager:
                 "请使用以下命令安装: pip install jinja2>=3.0.0"
             )
 
-        logger.info(f"提示词管理器已初始化，模板目录: {template_dir}")
+        logger.info(
+            f"提示词管理器已初始化，模板目录: {template_dir}, "
+            f"提示词风格: {self.prompt_style}"
+        )
 
     def build_prompt(self, decision_point: str, context: Dict[str, Any]) -> str:
         """
@@ -62,18 +74,41 @@ class PromptManager:
             FileNotFoundError: 如果找不到模板文件
             Exception: 如果渲染模板失败
         """
-        # 模板名称固定为 {decision_point}.j2
-        template_name = f"{decision_point}.j2"
+        # 根据 prompt_style 确定模板名称
+        if self.prompt_style == "default":
+            template_name = f"{decision_point}.j2"
+        else:
+            # 优先使用带风格后缀的模板，如 entry_conservative.j2
+            template_name = f"{decision_point}_{self.prompt_style}.j2"
 
         try:
             template = self.env.get_template(template_name)
             prompt = template.render(**context)
+            logger.debug(f"成功渲染模板: {template_name}")
             return prompt
 
         except TemplateNotFound:
+            # 如果找不到带风格的模板，尝试回退到默认模板
+            if self.prompt_style != "default":
+                logger.warning(
+                    f"找不到提示词模板: {template_name}，"
+                    f"尝试使用默认模板: {decision_point}.j2"
+                )
+                try:
+                    fallback_template_name = f"{decision_point}.j2"
+                    template = self.env.get_template(fallback_template_name)
+                    prompt = template.render(**context)
+                    logger.info(f"成功使用默认模板: {fallback_template_name}")
+                    return prompt
+                except TemplateNotFound:
+                    pass
+
+            # 如果仍然找不到，抛出错误
             raise FileNotFoundError(
                 f"找不到提示词模板: {self.template_dir / template_name}\n"
-                f"请在 {self.template_dir} 目录中创建 {template_name} 文件"
+                f"请在 {self.template_dir} 目录中创建 {template_name} 文件\n"
+                f"当前 prompt_style: {self.prompt_style}\n"
+                f"可用选项: default, conservative, aggressive"
             )
 
         except Exception as e:

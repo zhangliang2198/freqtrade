@@ -111,7 +111,10 @@ class LLMDecisionEngine:
         self.prompt_manager = PromptManager(self.config, user_data_dir)
 
         # 初始化上下文构建器
-        self.context_builder = ContextBuilder(self.config.get("context", {}))
+        self.context_builder = ContextBuilder(
+            self.config.get("context", {}),
+            self.config.get("decision_points", {})
+        )
 
         # 统计信息
         self.stats = {

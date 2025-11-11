@@ -20,7 +20,11 @@ class ContextBuilder:
     转换为可在提示中使用的结构化上下文字典。
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        decision_config: Optional[Dict[str, Any]] = None
+    ):
         """
         初始化上下文构建器
 
@@ -28,6 +32,7 @@ class ContextBuilder:
             config: 来自llm_config.context的上下文配置
         """
         self.config = config
+        self.decision_config = decision_config or {}
         self.lookback_candles = config.get("lookback_candles", 100)
         self.include_indicators = config.get("include_indicators", [])
         self.include_orderbook = config.get("include_orderbook", False)
@@ -166,9 +171,17 @@ class ContextBuilder:
             "entry_tag": trade.enter_tag,
         }
 
-        # 添加可选字段
+        # 添加可选字段和回撤计算
         if trade.max_rate:
             context["max_rate"] = float(trade.max_rate)
+            # 计算从最高点的回撤百分比
+            drawdown_pct = ((trade.max_rate - current_rate) / trade.max_rate) * 100
+            context["drawdown_from_high_pct"] = float(drawdown_pct)
+
+            # 计算最高点利润（用于了解盈利回撤）
+            max_profit_ratio = trade.calc_profit_ratio(trade.max_rate)
+            context["max_profit_pct"] = float(max_profit_ratio * 100)
+
         if trade.min_rate:
             context["min_rate"] = float(trade.min_rate)
 
@@ -196,6 +209,10 @@ class ContextBuilder:
 
             if self.include_closed_trades_info:
                 context.update(self._extract_closed_trades_info(strategy))
+
+        adjustment_ratio_limit = self._get_adjustment_ratio_limit()
+        if adjustment_ratio_limit is not None:
+            context["adjustment_ratio_limit"] = adjustment_ratio_limit
 
         return context
 
@@ -238,6 +255,10 @@ class ContextBuilder:
             "market_summary": self._summarize_market(recent_data),
             "volatility": self._calculate_volatility(dataframe),
         }
+
+        stake_limits = self._get_stake_limits()
+        if stake_limits:
+            context["stake_multiplier_limits"] = stake_limits
 
         # 添加当前指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
@@ -356,6 +377,10 @@ class ContextBuilder:
             if self.include_closed_trades_info:
                 context.update(self._extract_closed_trades_info(strategy))
 
+        adjustment_ratio_limit = self._get_adjustment_ratio_limit()
+        if adjustment_ratio_limit is not None:
+            context["adjustment_ratio_limit"] = adjustment_ratio_limit
+
         return context
 
     def build_leverage_context(
@@ -400,6 +425,10 @@ class ContextBuilder:
             "volatility": self._calculate_volatility(dataframe),
             "market_summary": self._summarize_market(recent_data),
         }
+
+        leverage_limits = self._get_leverage_limits(max_leverage)
+        if leverage_limits:
+            context["leverage_limits"] = leverage_limits
 
         # 添加指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
@@ -745,6 +774,55 @@ class ContextBuilder:
         except Exception as e:
             logger.warning(f"波动率计算失败: {e}")
             return 0.0
+
+    def _get_stake_limits(self) -> Optional[Dict[str, float]]:
+        """
+        获取仓位倍数范围，用于提示词中引用
+        """
+        config = self.decision_config.get("stake", {})
+        min_multiplier = config.get("min_stake_multiplier")
+        max_multiplier = config.get("max_stake_multiplier")
+
+        if min_multiplier is None and max_multiplier is None:
+            return None
+
+        limits: Dict[str, float] = {}
+        if min_multiplier is not None:
+            limits["min"] = float(min_multiplier)
+        if max_multiplier is not None:
+            limits["max"] = float(max_multiplier)
+
+        return limits
+
+    def _get_leverage_limits(self, max_leverage: float) -> Optional[Dict[str, float]]:
+        """
+        获取杠杆范围，优先使用配置中的 min/max，其次 fallback 到参数
+        """
+        config = self.decision_config.get("leverage", {})
+        min_leverage = config.get("min_leverage")
+        max_leverage_config = config.get("max_leverage")
+
+        if min_leverage is None and max_leverage_config is None:
+            # 仍然返回函数参数的最大值，以便提示词可提示上限
+            return {"max": float(max_leverage)}
+
+        limits: Dict[str, float] = {}
+        if min_leverage is not None:
+            limits["min"] = float(min_leverage)
+        if max_leverage_config is not None:
+            limits["max"] = float(max_leverage_config)
+        elif max_leverage is not None:
+            limits["max"] = float(max_leverage)
+
+        return limits
+
+    def _get_adjustment_ratio_limit(self) -> Optional[float]:
+        """
+        获取最大加减仓比例限制
+        """
+        config = self.decision_config.get("adjust_position", {})
+        max_ratio = config.get("max_adjustment_ratio")
+        return float(max_ratio) if max_ratio is not None else None
 
     # ========== 新增：细粒度信息提取方法 ==========
 

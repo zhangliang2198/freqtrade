@@ -11,7 +11,32 @@
       "BNB/USDT:USDT",
       "SOL/USDT:USDT",
       "DOGE/USDT:USDT",
-      "XRP/USDT:USDT"
+      "XRP/USDT:USDT",
+      "DOT/USDT:USDT",
+      "ADA/USDT:USDT",
+      "LTC/USDT:USDT",
+      "LINK/USDT:USDT",
+      "UNI/USDT:USDT",
+      "MATIC/USDT:USDT",
+      "ATOM/USDT:USDT",
+      "ETC/USDT:USDT",
+      "XLM/USDT:USDT",
+      "BCH/USDT:USDT",
+      "VET/USDT:USDT",
+      "FIL/USDT:USDT",
+      "THETA/USDT:USDT",
+      "EOS/USDT:USDT",
+      "XTZ/USDT:USDT",
+      "AAVE/USDT:USDT",
+      "NEAR/USDT:USDT",
+      "TRX/USDT:USDT",
+      "KSM/USDT:USDT",
+      "AVAX/USDT:USDT",
+      "ALGO/USDT:USDT",
+      "DASH/USDT:USDT",
+      "MKR/USDT:USDT",
+      "COMP/USDT:USDT",
+      "RUNE/USDT:USDT"
     ]
   }
 }

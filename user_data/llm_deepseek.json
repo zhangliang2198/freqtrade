@@ -17,6 +17,8 @@
         "temperature": 0.1,
         "aggregation_interval_minutes": 60,
         "enable_background_aggregation": true,
+        "prompt_style": "aggressive",
+        "_prompt_style_comment": "Prompt style: 'conservative' (风险厌恶，小仓位，严格止损) or 'aggressive' (激进进取，大仓位，追求高收益) or 'default' (默认，使用无后缀的原始提示词)",
         "headers": {
             "Content-Type": "application/json",
             "Authorization": "Bearer {api_key}"
@@ -64,32 +66,32 @@
             "entry": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.7
+                "confidence_threshold": 0.4
             },
             "exit": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.6
+                "confidence_threshold": 0.4
             },
             "stake": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.5,
+                "confidence_threshold": 0.4,
                 "min_stake_multiplier": 0.5,
-                "max_stake_multiplier": 2.0
+                "max_stake_multiplier": 5.0
             },
             "adjust_position": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.6,
-                "max_adjustment_ratio": 0.3
+                "confidence_threshold": 0.4,
+                "max_adjustment_ratio": 5.0
             },
             "leverage": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.5,
-                "min_leverage": 1.0,
-                "max_leverage": 10.0
+                "confidence_threshold": 0.4,
+                "min_leverage": 2.0,
+                "max_leverage": 20.0
             }
         },
         "performance": {

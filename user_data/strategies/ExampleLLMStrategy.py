@@ -11,14 +11,46 @@ class ExampleLLMStrategy(LLMStrategy):
 
     # 基本策略参数
     timeframe = "15m"
-
+    
     # 启动K线数量 (用于指标计算)
     startup_candle_count = 100
 
-    # 如果您的交易所支持，启用做空
+    # 如果您的交易所支持,启用做空
     can_short = True
 
+    def informative_pairs(self):
+        """
+        定义额外的信息对和时间框架
+        添加 8 小时级别的数据作为参考
+        """
+        pairs = self.dp.current_whitelist()
+        informative_pairs = [(pair, "8h") for pair in pairs]
+        return informative_pairs
+
     def populate_indicators(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+        # 获取 8 小时级别的数据
+        if self.dp:
+            informative_8h = self.dp.get_pair_dataframe(pair=metadata['pair'], timeframe='8h')
+            
+            # 计算 8 小时级别的指标（merge_informative_pair 会自动添加 _8h 后缀）
+            informative_8h['rsi'] = ta.RSI(informative_8h, timeperiod=14)
+            informative_8h['ema_21'] = ta.EMA(informative_8h, timeperiod=21)
+            informative_8h['ema_50'] = ta.EMA(informative_8h, timeperiod=50)
+            
+            # MACD 8小时
+            macd_8h = ta.MACD(informative_8h)
+            informative_8h['macd'] = macd_8h['macd']
+            informative_8h['macdsignal'] = macd_8h['macdsignal']
+            
+            # ATR 8小时
+            informative_8h['atr'] = ta.ATR(informative_8h, timeperiod=14)
+            
+            # ADX 8小时 (趋势强度)
+            informative_8h['adx'] = ta.ADX(informative_8h, timeperiod=14)
+            
+            # 合并到主时间框架（会自动添加 _8h 后缀，如 rsi_8h, ema_21_8h 等）
+            dataframe = self.merge_informative_pair(dataframe, informative_8h, self.timeframe, '8h', ffill=True)
+        
         # RSI (相对强弱指数)
         dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
 
