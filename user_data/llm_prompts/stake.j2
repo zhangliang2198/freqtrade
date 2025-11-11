@@ -37,6 +37,20 @@
 **钱包**: 总计${{ "%.2f"|format(wallet_total_balance) }} | 可用${{ "%.2f"|format(wallet_free_balance) }} | 使用**{{ "%.1f"|format(wallet_used_balance / wallet_total_balance * 100 if wallet_total_balance > 0 else 0) }}%**
 {% endif %}
 
+{% if max_stake_per_trade %}
+## 💰 开单额度限制
+{{ max_stake_per_trade.description }}
+{% if max_stake_per_trade.mode == "percent" %}
+- **模式**: 百分比 ({{ "%.0f"|format(max_stake_per_trade.percent_value) }}%)
+- **当前可用**: ${{ "%.2f"|format(max_stake_per_trade.available_balance) }}
+- **本单最大**: ${{ "%.2f"|format(max_stake_per_trade.max_stake_amount) }}
+{% else %}
+- **模式**: 固定值
+- **本单最大**: ${{ "%.2f"|format(max_stake_per_trade.max_stake_amount) }}
+{% endif %}
+⚠️ **重要**: 无论你的仓位倍数决策如何，最终开单金额不会超过此限制
+{% endif %}
+
 ---
 
 # 持仓组合
@@ -90,6 +104,9 @@
 - 资金使用率过高 → 强制减小仓位
 - 可用余额不足 → 最小倍数或观望
 - 资金充裕 → 可根据信号强度放大
+{% if max_stake_per_trade %}
+- **⚠️ 额度限制**: 本单最大${{ "%.2f"|format(max_stake_per_trade.max_stake_amount) }}，超出部分会被自动裁剪
+{% endif %}
 
 **因子4: 持仓分散**
 - 该交易对已有持仓 → 降低倍数（集中度风险）

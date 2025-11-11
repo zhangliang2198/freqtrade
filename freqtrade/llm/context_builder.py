@@ -222,7 +222,8 @@ class ContextBuilder:
         current_rate: float,
         dataframe: pd.DataFrame,
         available_balance: float,
-        strategy: Optional[Any] = None
+        strategy: Optional[Any] = None,
+        side: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         构建投资金额决策的上下文
@@ -233,6 +234,7 @@ class ContextBuilder:
             dataframe: 分析的数据框
             available_balance: 可用于交易的余额
             strategy: 策略实例（用于提取账户、钱包、持仓信息）
+            side: 交易方向 (long/short)，用于账户分离模式
 
         Returns:
             投资决策的上下文字典
@@ -259,6 +261,15 @@ class ContextBuilder:
         stake_limits = self._get_stake_limits()
         if stake_limits:
             context["stake_multiplier_limits"] = stake_limits
+
+        # 添加每次开单的最大额度限制
+        max_stake_info = self._calculate_max_stake_per_trade(
+            available_balance=available_balance,
+            side=side,
+            strategy=strategy
+        )
+        if max_stake_info:
+            context["max_stake_per_trade"] = max_stake_info
 
         # 添加当前指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
@@ -823,6 +834,58 @@ class ContextBuilder:
         config = self.decision_config.get("adjust_position", {})
         max_ratio = config.get("max_adjustment_ratio")
         return float(max_ratio) if max_ratio is not None else None
+
+    def _calculate_max_stake_per_trade(
+        self,
+        available_balance: float,
+        side: Optional[str] = None,
+        strategy: Optional[Any] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        计算每次开单的最大额度限制
+
+        Args:
+            available_balance: 可用余额
+            side: 交易方向 (long/short)，用于账户分离模式
+            strategy: 策略实例
+
+        Returns:
+            包含最大额度信息的字典，如果未配置则返回 None
+        """
+        stake_config = self.decision_config.get("stake", {})
+        max_stake_config = stake_config.get("max_stake_per_trade")
+
+        if not max_stake_config:
+            return None
+
+        mode = max_stake_config.get("mode", "percent")
+        value = max_stake_config.get("value", 0)
+
+        if mode == "fixed":
+            # 固定金额模式
+            max_stake = float(value)
+            return {
+                "mode": "fixed",
+                "max_stake_amount": max_stake,
+                "description": f"每次最大开单额度: {max_stake:.2f} USDT (固定值)"
+            }
+
+        elif mode == "percent":
+            # 百分比模式：根据剩余可用余额计算
+            # 在账户分离模式下，已经传入的是对应账户的可用余额
+            max_stake = available_balance * (value / 100.0)
+            return {
+                "mode": "percent",
+                "percent_value": float(value),
+                "available_balance": available_balance,
+                "max_stake_amount": max_stake,
+                "description": (
+                    f"每次最大开单额度: {value}% 的可用余额 "
+                    f"(当前可用: {available_balance:.2f}, 最大: {max_stake:.2f})"
+                )
+            }
+
+        return None
 
     # ========== 新增：细粒度信息提取方法 ==========
 

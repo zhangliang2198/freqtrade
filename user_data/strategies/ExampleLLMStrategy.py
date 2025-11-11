@@ -1,8 +1,7 @@
-from datetime import datetime
-from typing import Optional
 import pandas as pd
 import talib.abstract as ta
 
+from freqtrade.strategy import merge_informative_pair
 from freqtrade.strategy.LLMStrategy import LLMStrategy
 
 class ExampleLLMStrategy(LLMStrategy):
@@ -49,7 +48,13 @@ class ExampleLLMStrategy(LLMStrategy):
             informative_8h['adx'] = ta.ADX(informative_8h, timeperiod=14)
             
             # 合并到主时间框架（会自动添加 _8h 后缀，如 rsi_8h, ema_21_8h 等）
-            dataframe = self.merge_informative_pair(dataframe, informative_8h, self.timeframe, '8h', ffill=True)
+            dataframe = merge_informative_pair(
+                dataframe,
+                informative_8h,
+                self.timeframe,
+                '8h',
+                ffill=True,
+            )
         
         # RSI (相对强弱指数)
         dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)

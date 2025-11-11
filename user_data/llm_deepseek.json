@@ -78,7 +78,12 @@
                 "cache_ttl": 60,
                 "confidence_threshold": 0.4,
                 "min_stake_multiplier": 0.5,
-                "max_stake_multiplier": 5.0
+                "max_stake_multiplier": 5.0,
+                "_comment_max_stake": "每次开单的最大额度限制fixed/percent",
+                "max_stake_per_trade": {
+                    "mode": "percent",
+                    "value": 5
+                }
             },
             "adjust_position": {
                 "enabled": true,

@@ -266,13 +266,14 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             if len(dataframe) == 0:
                 return proposed_stake
 
-            # 构建上下文（传入实际可用余额，让 LLM 知道资金限制）
+            # 构建上下文（传入实际可用余额和交易方向，让 LLM 知道资金限制）
             context = self.llm_engine.context_builder.build_stake_context(
                 pair=pair,
                 current_rate=current_rate,
                 dataframe=dataframe,
                 available_balance=available_balance,
-                strategy=self
+                strategy=self,
+                side=side
             )
 
             # 创建请求
@@ -302,6 +303,33 @@ class LLMStrategy(BaseStrategyWithSnapshot):
 
             # 计算调整后的投入
             adjusted_stake = proposed_stake * stake_multiplier
+
+            # 应用每次开单的最大额度限制（如果配置了）
+            max_stake_config = point_config.get("max_stake_per_trade")
+            if max_stake_config:
+                mode = max_stake_config.get("mode", "percent")
+                value = max_stake_config.get("value", 0)
+
+                if mode == "fixed":
+                    # 固定金额模式
+                    max_per_trade = float(value)
+                    if adjusted_stake > max_per_trade:
+                        logger.info(
+                            f"📊 {pair} 开单额度受限于配置的固定最大值: "
+                            f"{adjusted_stake:.2f} -> {max_per_trade:.2f} USDT"
+                        )
+                        adjusted_stake = max_per_trade
+
+                elif mode == "percent":
+                    # 百分比模式：基于可用余额
+                    max_per_trade = available_balance * (value / 100.0)
+                    if adjusted_stake > max_per_trade:
+                        logger.info(
+                            f"📊 {pair} 开单额度受限于可用余额的 {value}%: "
+                            f"{adjusted_stake:.2f} -> {max_per_trade:.2f} USDT "
+                            f"({side.upper()} 可用: {available_balance:.2f})"
+                        )
+                        adjusted_stake = max_per_trade
 
             # 确保在限制范围内
             if min_stake:
