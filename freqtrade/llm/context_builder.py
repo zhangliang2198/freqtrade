@@ -150,7 +150,7 @@ class ContextBuilder:
 
         # 计算持有时间
         holding_duration_minutes = (
-            (dt_now() - trade.open_date).total_seconds() / 60
+            (dt_now() - trade.open_date_utc).total_seconds() / 60
         )
 
         # 获取时间周期信息
@@ -324,7 +324,7 @@ class ContextBuilder:
             调整决策的上下文字典
         """
         holding_duration_minutes = (
-            (current_time - trade.open_date).total_seconds() / 60
+            (current_time - trade.open_date_utc).total_seconds() / 60
         )
 
         recent_data = dataframe.tail(self.lookback_candles)
@@ -1101,7 +1101,7 @@ class ContextBuilder:
                 # 如果是当前交易对，记录详细信息
                 if pair and trade.pair == pair:
                     holding_minutes = (
-                        (dt_now() - trade.open_date).total_seconds() / 60
+                        (dt_now() - trade.open_date_utc).total_seconds() / 60
                     )
 
                     positions_info["current_pair_positions"].append({
@@ -1111,7 +1111,7 @@ class ContextBuilder:
                         "open_rate": float(trade.open_rate),
                         "current_rate": float(current_rate) if current_rate else 0.0,
                         "stake_amount": stake,
-                        "open_date": str(trade.open_date),
+                        "open_date": str(trade.open_date_utc),
                         "holding_minutes": float(holding_minutes),
                         "profit_abs": float(profit_abs),
                         "profit_pct": float(profit_ratio * 100),
