@@ -226,6 +226,7 @@ llm_config:
 
 | 变量名 | 类型 | 说明 | 决策点 |
 |--------|------|------|--------|
+| `side` | string | 持仓方向 ("long" 或 "short") | exit, adjust_position |
 | `entry_price` | float | 入场价格 | exit, adjust_position |
 | `current_price` | float | 当前价格 | exit, adjust_position |
 | `current_profit_pct` | float | 当前盈亏百分比 | exit, adjust_position |

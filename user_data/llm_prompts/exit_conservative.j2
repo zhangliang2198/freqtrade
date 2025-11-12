@@ -12,7 +12,7 @@
 # 持仓状态
 
 ## 当前持仓
-- **{{ pair }}** | **周期**: {{ timeframe }} | 入场${{ "%.6f"|format(entry_price) }} → 现价${{ "%.6f"|format(current_price) }} | 标签: {{ entry_tag or "无" }}
+- **{{ pair }}** [{{ side|upper }}] | **周期**: {{ timeframe }} | 入场${{ "%.6f"|format(entry_price) }} → 现价${{ "%.6f"|format(current_price) }} | 标签: {{ entry_tag or "无" }}
 - **PnL**: ${{ "%.4f"|format(current_profit_abs) }} (**{{ "%.2f"|format(current_profit_pct) }}%**) | 持有{{ "%.1f"|format(holding_duration_minutes / 60) }}小时
 - **止损**: ${{ "%.6f"|format(stop_loss) }}{% if max_rate %} | **最高价**: ${{ "%.6f"|format(max_rate) }} (回撤**{{ "%.2f"|format((max_rate - current_price) / max_rate * 100) }}%**){% endif %}
 

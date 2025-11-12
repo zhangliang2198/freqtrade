@@ -164,6 +164,7 @@ class ContextBuilder:
         context = {
             "pair": trade.pair,
             "timeframe": timeframe,
+            "side": "short" if trade.is_short else "long",
             "entry_price": float(trade.open_rate),
             "current_price": float(current_rate),
             "current_profit_pct": float(current_profit_pct),
@@ -349,9 +350,19 @@ class ContextBuilder:
         if strategy and hasattr(strategy, 'max_entry_position_adjustment'):
             max_adjustments = strategy.max_entry_position_adjustment
 
+        # 计算已调整次数（不包含首次入场）
+        nr_of_adjustments = nr_of_entries - 1
+
+        # 计算剩余调整次数
+        if max_adjustments > 0:
+            remaining_adjustments = max(0, max_adjustments - nr_of_adjustments)
+        else:
+            remaining_adjustments = -1  # -1 表示无限制
+
         context = {
             "pair": trade.pair,
             "timeframe": timeframe,
+            "side": "short" if trade.is_short else "long",
             "current_profit_pct": float(current_profit * 100),
             "current_rate": float(current_rate),
             "entry_rate": float(trade.open_rate),
@@ -362,7 +373,7 @@ class ContextBuilder:
             "market_summary": self._summarize_market(recent_data),
             "nr_of_entries": int(nr_of_entries),
             "max_adjustments": int(max_adjustments),
-            "remaining_adjustments": int(max_adjustments - nr_of_entries) if max_adjustments > 0 else -1,
+            "remaining_adjustments": int(remaining_adjustments),
         }
 
         # 添加指标（分离主周期和信息周期）

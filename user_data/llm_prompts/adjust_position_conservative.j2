@@ -12,7 +12,7 @@
 # 持仓状态
 
 ## 当前持仓
-- **{{ pair }}** | **周期**: {{ timeframe }} | 入场${{ "%.6f"|format(entry_rate) }} → 现价${{ "%.6f"|format(current_rate) }} | PnL **{{ "%.2f"|format(current_profit_pct) }}%**
+- **{{ pair }}** [{{ side|upper }}] | **周期**: {{ timeframe }} | 入场${{ "%.6f"|format(entry_rate) }} → 现价${{ "%.6f"|format(current_rate) }} | PnL **{{ "%.2f"|format(current_profit_pct) }}%**
 - **投入**: ${{ "%.2f"|format(stake_amount) }} | **持有**: {{ "%.1f"|format(holding_duration_minutes / 60) }}小时
 - **市场概况**: {{ market_summary }}
 
