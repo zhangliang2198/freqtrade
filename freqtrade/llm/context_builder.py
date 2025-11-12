@@ -274,6 +274,15 @@ class ContextBuilder:
         if max_stake_info:
             context["max_stake_per_trade"] = max_stake_info
 
+        # 添加每次开单的最小额度限制
+        min_stake_info = self._calculate_min_stake_per_trade(
+            available_balance=available_balance,
+            side=side,
+            strategy=strategy
+        )
+        if min_stake_info:
+            context["min_stake_per_trade"] = min_stake_info
+
         # 添加当前指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
             indicators_data = self._extract_indicators_with_timeframes(
@@ -908,17 +917,98 @@ class ContextBuilder:
             }
 
         elif mode == "percent":
-            # 百分比模式：根据剩余可用余额计算
-            # 在账户分离模式下，已经传入的是对应账户的可用余额
-            max_stake = available_balance * (value / 100.0)
+            # 百分比模式：根据总资金计算（初始余额，而非剩余可用余额）
+            # 获取账户总资金
+            if strategy and hasattr(strategy, 'account_enabled') and strategy.account_enabled:
+                # 账户分离模式：使用对应账户的初始余额
+                if side == "long":
+                    total_balance = float(strategy.long_initial_balance)
+                else:
+                    total_balance = float(strategy.short_initial_balance)
+            else:
+                # 非账户分离模式：使用钱包总余额
+                if strategy and hasattr(strategy, 'wallets') and strategy.wallets:
+                    total_balance = strategy.wallets.get_total(strategy.config.get("stake_currency", "USDT"))
+                else:
+                    # 无法获取总余额，回退到可用余额
+                    total_balance = available_balance
+
+            max_stake = total_balance * (value / 100.0)
             return {
                 "mode": "percent",
                 "percent_value": float(value),
+                "total_balance": total_balance,
                 "available_balance": available_balance,
                 "max_stake_amount": max_stake,
                 "description": (
-                    f"每次最大开单额度: {value}% 的可用余额 "
-                    f"(当前可用: {available_balance:.2f}, 最大: {max_stake:.2f})"
+                    f"每次最大开单额度: {value}% 的总资金 "
+                    f"(总资金: {total_balance:.2f}, 最大: {max_stake:.2f}, 可用: {available_balance:.2f})"
+                )
+            }
+
+        return None
+
+    def _calculate_min_stake_per_trade(
+        self,
+        available_balance: float,
+        side: Optional[str] = None,
+        strategy: Optional[Any] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        计算每次开单的最小额度限制
+
+        Args:
+            available_balance: 可用余额
+            side: 交易方向 (long/short)，用于账户分离模式
+            strategy: 策略实例
+
+        Returns:
+            包含最小额度信息的字典，如果未配置则返回 None
+        """
+        stake_config = self.decision_config.get("stake", {})
+        min_stake_config = stake_config.get("min_stake_per_trade")
+
+        if not min_stake_config:
+            return None
+
+        mode = min_stake_config.get("mode", "percent")
+        value = min_stake_config.get("value", 0)
+
+        if mode == "fixed":
+            # 固定金额模式
+            min_stake = float(value)
+            return {
+                "mode": "fixed",
+                "min_stake_amount": min_stake,
+                "description": f"每次最小开单额度: {min_stake:.2f} USDT (固定值)"
+            }
+
+        elif mode == "percent":
+            # 百分比模式：根据总资金计算
+            # 获取账户总资金
+            if strategy and hasattr(strategy, 'account_enabled') and strategy.account_enabled:
+                # 账户分离模式：使用对应账户的初始余额
+                if side == "long":
+                    total_balance = float(strategy.long_initial_balance)
+                else:
+                    total_balance = float(strategy.short_initial_balance)
+            else:
+                # 非账户分离模式：使用钱包总余额
+                if strategy and hasattr(strategy, 'wallets') and strategy.wallets:
+                    total_balance = strategy.wallets.get_total(strategy.config.get("stake_currency", "USDT"))
+                else:
+                    # 无法获取总余额，回退到可用余额
+                    total_balance = available_balance
+
+            min_stake = total_balance * (value / 100.0)
+            return {
+                "mode": "percent",
+                "percent_value": float(value),
+                "total_balance": total_balance,
+                "min_stake_amount": min_stake,
+                "description": (
+                    f"每次最小开单额度: {value}% 的总资金 "
+                    f"(总资金: {total_balance:.2f}, 最小: {min_stake:.2f})"
                 )
             }
 

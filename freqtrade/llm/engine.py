@@ -96,7 +96,7 @@ class LLMDecisionEngine:
         self.strategy_name = strategy_name
 
         if not self.config.get("enabled", False):
-            logger.warning("LLM 配置已禁用")
+            logger.debug("LLM 配置已禁用")
             return
 
         # 初始化提供商
@@ -125,8 +125,12 @@ class LLMDecisionEngine:
             "total_cost_usd": 0.0
         }
 
-        logger.info(f"LLM 决策引擎已为策略 {strategy_name} 初始化")
-        logger.info(f"提供商: {self.config['provider']}, 模型: {self.config['model']}")
+        logger.debug(
+            "LLM 决策引擎初始化完成 strategy=%s provider=%s model=%s",
+            strategy_name,
+            self.config.get("provider"),
+            self.config.get("model"),
+        )
 
     def decide(self, request: LLMRequest) -> LLMResponse:
         """
@@ -171,10 +175,14 @@ class LLMDecisionEngine:
         start_time = time.time()
         try:
             temperature = self.config.get("temperature", 0.1)
-            logger.info(f"准备调用 LLM API，提供商: {self.config.get('provider')}, 模型: {self.config.get('model')}")
-            logger.info(f"提示词长度: {len(prompt)} 字符")
-            logger.info(f"温度参数: {temperature}")
-            
+            logger.debug(
+                "调用 LLM API provider=%s model=%s prompt_len=%s temperature=%.2f",
+                self.config.get("provider"),
+                self.config.get("model"),
+                len(prompt),
+                temperature,
+            )
+
             raw_response = self.provider.complete(prompt=prompt, temperature=temperature)
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -199,7 +207,7 @@ class LLMDecisionEngine:
             self.stats["total_cost_usd"] += response.cost_usd or 0.0
 
             # 验证响应
-            validation_passed = self._validate_response(response, point_config)
+            validation_passed = self._validate_response(response, point_config, request.decision_point)
 
             # 无论验证是否通过，都缓存结果（避免重复调用）
             self._cache_response(request.decision_point, cache_key, response)
@@ -216,16 +224,22 @@ class LLMDecisionEngine:
                 )
 
             if not validation_passed:
-                logger.info(
-                    f"响应验证失败 {request.decision_point}: "
-                    f"confidence {response.confidence} < threshold {point_config.get('confidence_threshold', 0.5)}"
+                logger.debug(
+                    "LLM 响应验证失败 decision_point=%s confidence=%.3f threshold=%.3f",
+                    request.decision_point,
+                    response.confidence,
+                    point_config.get("confidence_threshold", 0.5),
                 )
                 return self._default_response(request.decision_point)
 
-            logger.info(
-                f"LLM 决策 {request.pair} {request.decision_point}: "
-                f"{response.decision} (confidence: {response.confidence:.2f}, "
-                f"latency: {latency_ms}ms, cost: ${response.cost_usd:.4f})"
+            logger.debug(
+                "LLM 决策完成 pair=%s decision_point=%s decision=%s confidence=%.2f latency_ms=%s cost=%.4f",
+                request.pair,
+                request.decision_point,
+                response.decision,
+                response.confidence,
+                latency_ms,
+                response.cost_usd,
             )
 
             return response
@@ -312,7 +326,7 @@ class LLMDecisionEngine:
         Raises:
             ValueError: 如果响应无法解析
         """
-        logger.info(f"[DEBUG] {decision_point} 原始响应: {raw_response}")
+        logger.debug("原始响应 decision_point=%s payload=%s", decision_point, raw_response)
 
         cleaned_text = self._clean_response_text(raw_response)
         payload = self._load_decision_payload(cleaned_text)
@@ -324,10 +338,10 @@ class LLMDecisionEngine:
         try:
             confidence = float(confidence_raw)
         except (TypeError, ValueError):
-            logger.warning(f"[DEBUG] 置信度字段无法转换: {confidence_raw!r}，使用 0.0")
+            logger.warning(f"置信度字段无法转换: {confidence_raw!r}，使用 0.0")
             confidence = 0.0
         if confidence > 1.0 and confidence <= 100.0:
-            logger.info(f"[DEBUG] 将百分比置信度 {confidence} 转换为 0-1 区间")
+            logger.debug("将百分比置信度 %s 转换为 0-1 区间", confidence)
             confidence /= 100.0
         confidence = max(0.0, min(confidence, 1.0))
 
@@ -338,15 +352,18 @@ class LLMDecisionEngine:
             parameters = parameters_raw
         else:
             logger.warning(
-                f"[DEBUG] parameters 字段类型异常 ({type(parameters_raw).__name__})，使用空字典"
+                f"parameters 字段类型异常 ({type(parameters_raw).__name__})，使用空字典"
             )
             parameters = {}
 
-        logger.info(f"[DEBUG] {decision_point} 解析结果:")
-        logger.info(f"[DEBUG]   - decision: {decision}")
-        logger.info(f"[DEBUG]   - confidence: {confidence}")
-        logger.info(f"[DEBUG]   - reasoning: {reasoning}")
-        logger.info(f"[DEBUG]   - parameters: {parameters}")
+        logger.debug(
+            "%s 解析结果 decision=%s confidence=%s reasoning=%s parameters=%s",
+            decision_point,
+            decision,
+            confidence,
+            reasoning,
+            parameters,
+        )
 
         return LLMResponse(
             decision=decision,
@@ -363,37 +380,45 @@ class LLMDecisionEngine:
             cached=False
         )
 
-    def _validate_response(self, response: LLMResponse, config: Dict) -> bool:
+    def _validate_response(self, response: LLMResponse, config: Dict, decision_point: str = None) -> bool:
         """
         验证响应是否满足要求
 
         Args:
             response: LLM 响应
             config: 决策点配置
+            decision_point: 决策点名称（用于判断是否需要置信度检查）
 
         Returns:
             如果响应有效则返回 True
         """
-        # 检查置信度阈值
-        threshold = config.get("confidence_threshold", 0.5)
-        
-        # 添加详细的验证日志
-        logger.info(f"[DEBUG] 响应验证:")
-        logger.info(f"[DEBUG]   - 置信度: {response.confidence}")
-        logger.info(f"[DEBUG]   - 阈值: {threshold}")
-        logger.info(f"[DEBUG]   - 决策: {response.decision}")
-        logger.info(f"[DEBUG]   - 推理: {response.reasoning}")
-        
-        if response.confidence < threshold:
-            logger.info(f"[DEBUG] 置信度验证失败: {response.confidence} < {threshold}")
-            return False
-
         # 检查决策是否为空
         if not response.decision:
-            logger.warning(f"[DEBUG] 决策为空，验证失败")
+            logger.debug("决策为空，验证失败")
             return False
 
-        logger.info(f"[DEBUG] 响应验证通过")
+        # stake 和 leverage 决策点不需要置信度检查（这些是参数调整，而非二元决策）
+        if decision_point in ("stake", "leverage"):
+            logger.debug("响应验证通过 decision=%s (跳过置信度检查)", response.decision)
+            return True
+
+        # 其他决策点需要检查置信度阈值
+        threshold = config.get("confidence_threshold", 0.5)
+
+        # 添加详细的验证日志
+        logger.debug(
+            "响应验证 decision=%s confidence=%.3f threshold=%.3f reasoning=%s",
+            response.decision,
+            response.confidence,
+            threshold,
+            response.reasoning,
+        )
+
+        if response.confidence < threshold:
+            logger.debug("置信度验证失败: %.3f < %.3f", response.confidence, threshold)
+            return False
+
+        logger.debug("响应验证通过 decision=%s", response.decision)
         return True
 
     def _clean_response_text(self, text: str) -> str:
@@ -463,7 +488,7 @@ class LLMDecisionEngine:
         try:
             return json.loads(candidate)
         except json.JSONDecodeError as exc:
-            logger.debug(f"[DEBUG] JSON 解析失败: {exc}; 片段: {candidate[:160]!r}")
+            logger.debug("JSON 解析失败: %s; 片段: %r", exc, candidate[:160])
             return None
 
     def _ensure_dict_payload(self, payload: Any) -> Dict[str, Any]:
@@ -471,7 +496,7 @@ class LLMDecisionEngine:
         if isinstance(payload, list):
             if not payload:
                 raise ValueError("LLM 响应数组为空，无法提取决策。")
-            logger.info("[DEBUG] JSON 为数组形式，取第一个元素作为决策。")
+            logger.debug("JSON 为数组形式，取第一个元素作为决策。")
             payload = payload[0]
         if not isinstance(payload, dict):
             raise ValueError(f"LLM 响应应为对象，实际类型: {type(payload).__name__}")

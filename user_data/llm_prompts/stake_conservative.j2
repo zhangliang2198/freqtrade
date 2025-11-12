@@ -39,8 +39,9 @@
 **钱包**: 总计${{ "%.2f"|format(wallet_total_balance) }} | 可用${{ "%.2f"|format(wallet_free_balance) }} | 使用**{{ "%.1f"|format(wallet_used_balance / wallet_total_balance * 100 if wallet_total_balance > 0 else 0) }}%**
 {% endif %}
 
-{% if max_stake_per_trade %}
+{% if max_stake_per_trade or min_stake_per_trade %}
 ## 💰 开单额度限制
+{% if max_stake_per_trade %}
 {{ max_stake_per_trade.description }}
 {% if max_stake_per_trade.mode == "percent" %}
 - **模式**: 百分比 ({{ "%.0f"|format(max_stake_per_trade.percent_value) }}%)
@@ -51,6 +52,19 @@
 - **本单最大**: ${{ "%.2f"|format(max_stake_per_trade.max_stake_amount) }}
 {% endif %}
 ⚠️ **重要**: 无论你的仓位倍数决策如何，最终开单金额不会超过此限制
+{% endif %}
+{% if min_stake_per_trade %}
+{{ min_stake_per_trade.description }}
+{% if min_stake_per_trade.mode == "percent" %}
+- **模式**: 百分比 ({{ "%.0f"|format(min_stake_per_trade.percent_value) }}%)
+- **参考总资金**: ${{ "%.2f"|format(min_stake_per_trade.total_balance) }}
+- **本单最小**: ${{ "%.2f"|format(min_stake_per_trade.min_stake_amount) }}
+{% else %}
+- **模式**: 固定值
+- **本单最小**: ${{ "%.2f"|format(min_stake_per_trade.min_stake_amount) }}
+{% endif %}
+ℹ️ **提示**: 建议仓位低于此限额会被系统自动抬高
+{% endif %}
 {% endif %}
 
 ---
@@ -96,6 +110,12 @@
 - 若该交易对已有持仓 → 新单自动减半
 - 总持仓数偏多 → 采用最小倍数，避免集中
 - **核心**: 资金安全优先，严格控制仓位
+{% if max_stake_per_trade %}
+- **⚠️ 最大额度**: 本单最多${{ "%.2f"|format(max_stake_per_trade.max_stake_amount) }}，超出部分会被自动裁剪
+{% endif %}
+{% if min_stake_per_trade %}
+- **📌 最小额度**: 本单至少${{ "%.2f"|format(min_stake_per_trade.min_stake_amount) }}，低于部分会被自动抬高
+{% endif %}
 
 **因子2: 技术信号强度**
 - **极强信号**（多个指标共振、趋势极其明确）→ 才能接近区间中段

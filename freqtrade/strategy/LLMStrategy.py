@@ -112,6 +112,10 @@ class LLMStrategy(BaseStrategyWithSnapshot):
         if len(dataframe) < 1:
             return dataframe
 
+        # 检查是否有可用资金，如果没有资金则跳过分析（节省 LLM 成本）
+        if not self._has_available_funds_for_entry():
+            return dataframe
+
         try:
             # 构建上下文
             portfolio_state = self._get_portfolio_state() if hasattr(self, 'wallets') else None
@@ -122,10 +126,12 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                 strategy=self
             )
 
+            pair = metadata.get("pair", "UNKNOWN")
+
             # 创建请求
             request = LLMRequest(
                 decision_point="entry",
-                pair=metadata["pair"],
+                pair=pair,
                 context=context
             )
 
@@ -137,11 +143,19 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                 dataframe.loc[dataframe.index[-1], "enter_long"] = 1
                 confidence_tag = f"llm_entry_c{int(response.confidence * 100)}"
                 dataframe.loc[dataframe.index[-1], "enter_tag"] = confidence_tag
+                logger.info(
+                    f"🎯 LLM 入场 {pair}: 开多 "
+                    f"(confidence={response.confidence:.2f}, reason={self._shorten_reason(response.reasoning)})"
+                )
 
             elif response.decision == "sell" and self.can_short:
                 dataframe.loc[dataframe.index[-1], "enter_short"] = 1
                 confidence_tag = f"llm_short_c{int(response.confidence * 100)}"
                 dataframe.loc[dataframe.index[-1], "enter_tag"] = confidence_tag
+                logger.info(
+                    f"🎯 LLM 入场 {pair}: 开空 "
+                    f"(confidence={response.confidence:.2f}, reason={self._shorten_reason(response.reasoning)})"
+                )
 
             # 'hold' 决策表示不入场
 
@@ -207,6 +221,10 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             if response.decision in ["exit", "sell"]:
                 # 截断推理以适应退出原因
                 reason = response.reasoning[:30] if response.reasoning else "llm_exit"
+                logger.info(
+                    f"🛑 LLM 触发 {pair} 出场 "
+                    f"(confidence={response.confidence:.2f}, reason={self._shorten_reason(response.reasoning)})"
+                )
                 return f"llm_{reason.replace(' ', '_')}"
 
         except Exception as e:
@@ -247,6 +265,11 @@ class LLMStrategy(BaseStrategyWithSnapshot):
         """
         if not self.llm_engine:
             return proposed_stake
+
+        # 检查对应方向是否有可用资金，如果没有则跳过 LLM 分析（节省成本）
+        if not self._has_available_funds_for_side(side):
+            logger.debug(f"⏭️  跳过 {pair} {side.upper()} 的 stake 分析：{side.upper()} 账户资金不足")
+            return 0.0
 
         try:
             # 先获取账户的实际可用余额（考虑账户分离模式）
@@ -304,14 +327,22 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             # 计算调整后的投入
             adjusted_stake = proposed_stake * stake_multiplier
 
-            # 应用每次开单的最大额度限制（如果配置了）
+            # 应用每次开单的最小/最大额度限制（如果配置了）
             max_stake_config = point_config.get("max_stake_per_trade")
+            min_stake_config = point_config.get("min_stake_per_trade")
+
+            # 获取账户总资金（用于百分比计算）
+            if self.strict_account_mode:
+                total_balance = self.long_initial_balance if side == "long" else self.short_initial_balance
+            else:
+                total_balance = self.wallets.get_total(self.config["stake_currency"]) if hasattr(self, 'wallets') and self.wallets else available_balance
+
+            # 应用最大额度限制
             if max_stake_config:
                 mode = max_stake_config.get("mode", "percent")
                 value = max_stake_config.get("value", 0)
 
                 if mode == "fixed":
-                    # 固定金额模式
                     max_per_trade = float(value)
                     if adjusted_stake > max_per_trade:
                         logger.info(
@@ -321,15 +352,40 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                         adjusted_stake = max_per_trade
 
                 elif mode == "percent":
-                    # 百分比模式：基于可用余额
-                    max_per_trade = available_balance * (value / 100.0)
+                    # 百分比模式：基于总资金
+                    max_per_trade = total_balance * (value / 100.0)
                     if adjusted_stake > max_per_trade:
                         logger.info(
-                            f"📊 {pair} 开单额度受限于可用余额的 {value}%: "
+                            f"📊 {pair} 开单额度受限于总资金的 {value}%: "
                             f"{adjusted_stake:.2f} -> {max_per_trade:.2f} USDT "
-                            f"({side.upper()} 可用: {available_balance:.2f})"
+                            f"(总资金: {total_balance:.2f})"
                         )
                         adjusted_stake = max_per_trade
+
+            # 应用最小额度限制
+            if min_stake_config:
+                mode = min_stake_config.get("mode", "percent")
+                value = min_stake_config.get("value", 0)
+
+                if mode == "fixed":
+                    min_per_trade = float(value)
+                    if adjusted_stake < min_per_trade:
+                        logger.info(
+                            f"📊 {pair} 开单额度低于配置的固定最小值: "
+                            f"{adjusted_stake:.2f} -> {min_per_trade:.2f} USDT"
+                        )
+                        adjusted_stake = min_per_trade
+
+                elif mode == "percent":
+                    # 百分比模式：基于总资金
+                    min_per_trade = total_balance * (value / 100.0)
+                    if adjusted_stake < min_per_trade:
+                        logger.info(
+                            f"📊 {pair} 开单额度低于总资金的 {value}%: "
+                            f"{adjusted_stake:.2f} -> {min_per_trade:.2f} USDT "
+                            f"(总资金: {total_balance:.2f})"
+                        )
+                        adjusted_stake = min_per_trade
 
             # 确保在限制范围内
             if min_stake:
@@ -443,13 +499,78 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             # 计算调整投入
             adjustment_stake = trade.stake_amount * adjustment_ratio
 
-            # 检查调整是否足够显著
+            # 检查调整是否足够显著（使用 Freqtrade 的最小值）
             if min_stake and abs(adjustment_stake) < min_stake:
                 return None
 
             # 确保在最大投入限制内
             if adjustment_stake > 0:
                 adjustment_stake = min(adjustment_stake, max_stake)
+
+            # 应用 llm_config 中配置的最小/最大额度限制（加仓时）
+            if adjustment_stake > 0:
+                # 从 stake 决策点配置中获取限制
+                stake_point_config = self.llm_engine.config.get("decision_points", {}).get("stake", {})
+
+                # 应用最小额度限制
+                min_stake_config = stake_point_config.get("min_stake_per_trade")
+                if min_stake_config:
+                    mode = min_stake_config.get("mode", "percent")
+                    value = min_stake_config.get("value", 0)
+
+                    if mode == "fixed":
+                        min_per_trade = float(value)
+                        if adjustment_stake < min_per_trade:
+                            logger.info(
+                                f"📊 {trade.pair} 加仓额度低于配置的固定最小值: "
+                                f"{adjustment_stake:.2f} < {min_per_trade:.2f} USDT，取消加仓"
+                            )
+                            return None
+                    elif mode == "percent":
+                        # 百分比模式：基于账户总资金
+                        side = "short" if trade.is_short else "long"
+                        if self.strict_account_mode:
+                            total_balance = self.long_initial_balance if side == "long" else self.short_initial_balance
+                        else:
+                            total_balance = self.wallets.get_total(self.config["stake_currency"]) if hasattr(self, 'wallets') and self.wallets else 0
+
+                        min_per_trade = total_balance * (value / 100.0)
+                        if adjustment_stake < min_per_trade:
+                            logger.info(
+                                f"📊 {trade.pair} 加仓额度低于总资金的 {value}%: "
+                                f"{adjustment_stake:.2f} < {min_per_trade:.2f} USDT，取消加仓"
+                            )
+                            return None
+
+                # 应用最大额度限制
+                max_stake_config = stake_point_config.get("max_stake_per_trade")
+                if max_stake_config:
+                    mode = max_stake_config.get("mode", "percent")
+                    value = max_stake_config.get("value", 0)
+
+                    if mode == "fixed":
+                        max_per_trade = float(value)
+                        if adjustment_stake > max_per_trade:
+                            logger.info(
+                                f"📊 {trade.pair} 加仓额度受限于配置的固定最大值: "
+                                f"{adjustment_stake:.2f} -> {max_per_trade:.2f} USDT"
+                            )
+                            adjustment_stake = max_per_trade
+                    elif mode == "percent":
+                        # 百分比模式：基于账户总资金
+                        side = "short" if trade.is_short else "long"
+                        if self.strict_account_mode:
+                            total_balance = self.long_initial_balance if side == "long" else self.short_initial_balance
+                        else:
+                            total_balance = self.wallets.get_total(self.config["stake_currency"]) if hasattr(self, 'wallets') and self.wallets else 0
+
+                        max_per_trade = total_balance * (value / 100.0)
+                        if adjustment_stake > max_per_trade:
+                            logger.info(
+                                f"📊 {trade.pair} 加仓额度受限于总资金的 {value}%: "
+                                f"{adjustment_stake:.2f} -> {max_per_trade:.2f} USDT"
+                            )
+                            adjustment_stake = max_per_trade
 
             logger.info(
                 f"LLM 调整了 {trade.pair} 的持仓: "
@@ -490,6 +611,11 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             调整后的杠杆值
         """
         if not self.llm_engine:
+            return proposed_leverage
+
+        # 检查对应方向是否有可用资金，如果没有则跳过 LLM 分析（节省成本）
+        if not self._has_available_funds_for_side(side):
+            logger.debug(f"⏭️  跳过 {pair} {side.upper()} 的 leverage 分析：{side.upper()} 账户资金不足")
             return proposed_leverage
 
         try:
@@ -547,6 +673,144 @@ class LLMStrategy(BaseStrategyWithSnapshot):
         except Exception as e:
             logger.error(f"LLM 杠杆决策失败: {e}", exc_info=True)
             return proposed_leverage
+
+    def _shorten_reason(self, reasoning: Optional[str], limit: int = 80) -> str:
+        """
+        将 LLM 返回的推理压缩为简短文本用于日志
+        """
+        if not reasoning:
+            return "无推理"
+        reason = " ".join(str(reasoning).split())
+        return reason if len(reason) <= limit else f"{reason[:limit]}..."
+
+    def _has_available_funds_for_entry(self) -> bool:
+        """
+        检查是否有可用资金进行入场分析
+
+        考虑账户分离和做空功能，如果所有账户都没有可用资金则返回 False
+
+        Returns:
+            如果至少有一个方向有可用资金则返回 True
+        """
+        if not hasattr(self, 'wallets') or not self.wallets:
+            # 没有钱包信息，默认允许分析
+            return True
+
+        try:
+            # 从 llm_config 中获取最小可用余额百分比阈值
+            llm_config = self.config.get("llm_config", {})
+            fund_check_config = llm_config.get("fund_check", {})
+            min_balance_pct = fund_check_config.get("min_available_balance_pct", 1.0) * 100
+
+            # 如果启用了账户分离
+            if hasattr(self, 'account_enabled') and self.account_enabled:
+                long_available = self.get_account_available_balance("long") if hasattr(self, 'get_account_available_balance') else 0
+                short_available = self.get_account_available_balance("short") if hasattr(self, 'get_account_available_balance') else 0
+
+                # 计算最小阈值（基于初始余额的百分比）
+                long_initial = float(self.long_initial_balance) if hasattr(self, 'long_initial_balance') else 0
+                short_initial = float(self.short_initial_balance) if hasattr(self, 'short_initial_balance') else 0
+
+                long_threshold = long_initial * (min_balance_pct / 100.0)
+                short_threshold = short_initial * (min_balance_pct / 100.0)
+
+                # 检查做多账户
+                has_long_funds = long_available >= long_threshold
+
+                # 检查做空账户（如果支持做空）
+                has_short_funds = short_available >= short_threshold if self.can_short else False
+
+                # 至少一个方向有资金
+                if has_long_funds or has_short_funds:
+                    return True
+                else:
+                    logger.debug(
+                        f"⏭️  跳过入场分析：所有账户资金不足 "
+                        f"(多头可用: {long_available:.2f}/{long_threshold:.2f}, "
+                        f"空头可用: {short_available:.2f}/{short_threshold:.2f}, "
+                        f"阈值: {min_balance_pct}%)"
+                    )
+                    return False
+            else:
+                # 非账户分离模式：检查总可用余额
+                stake_currency = self.config.get("stake_currency", "USDT")
+                available = self.wallets.get_free(stake_currency)
+
+                # 获取初始余额
+                try:
+                    initial_balance = self.wallets.get_starting_balance()
+                except Exception:
+                    initial_balance = self.wallets.get_total(stake_currency)
+
+                min_threshold = initial_balance * (min_balance_pct / 100.0)
+
+                if available >= min_threshold:
+                    return True
+                else:
+                    logger.debug(
+                        f"⏭️  跳过入场分析：资金不足 "
+                        f"(可用: {available:.2f}/{min_threshold:.2f}, 阈值: {min_balance_pct}%)"
+                    )
+                    return False
+
+        except Exception as e:
+            logger.warning(f"检查资金可用性失败: {e}")
+            # 出错时默认允许分析
+            return True
+
+    def _has_available_funds_for_side(self, side: str) -> bool:
+        """
+        检查指定方向是否有可用资金
+
+        Args:
+            side: 交易方向 ("long" 或 "short")
+
+        Returns:
+            如果指定方向有可用资金则返回 True
+        """
+        if not hasattr(self, 'wallets') or not self.wallets:
+            # 没有钱包信息，默认允许分析
+            return True
+
+        try:
+            # 从 llm_config 中获取最小可用余额百分比阈值
+            llm_config = self.config.get("llm_config", {})
+            fund_check_config = llm_config.get("fund_check", {})
+            min_balance_pct = fund_check_config.get("min_available_balance_pct", 1.0) * 100
+
+            # 如果启用了账户分离
+            if hasattr(self, 'account_enabled') and self.account_enabled:
+                if hasattr(self, 'get_account_available_balance'):
+                    available = self.get_account_available_balance(side)
+                else:
+                    available = 0
+
+                # 获取对应账户的初始余额
+                if side == "long":
+                    initial = float(self.long_initial_balance) if hasattr(self, 'long_initial_balance') else 0
+                else:
+                    initial = float(self.short_initial_balance) if hasattr(self, 'short_initial_balance') else 0
+
+                min_threshold = initial * (min_balance_pct / 100.0)
+            else:
+                # 非账户分离模式：使用总可用余额
+                stake_currency = self.config.get("stake_currency", "USDT")
+                available = self.wallets.get_free(stake_currency)
+
+                # 获取初始余额
+                try:
+                    initial = self.wallets.get_starting_balance()
+                except Exception:
+                    initial = self.wallets.get_total(stake_currency)
+
+                min_threshold = initial * (min_balance_pct / 100.0)
+
+            return available >= min_threshold
+
+        except Exception as e:
+            logger.warning(f"检查 {side} 方向资金可用性失败: {e}")
+            # 出错时默认允许分析
+            return True
 
     def _get_portfolio_state(self) -> Optional[dict]:
         """

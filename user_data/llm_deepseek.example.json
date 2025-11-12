@@ -71,7 +71,19 @@
                 "cache_ttl": 60,
                 "confidence_threshold": 0.5,
                 "min_stake_multiplier": 0.5,
-                "max_stake_multiplier": 2.0
+                "max_stake_multiplier": 2.0,
+                "_comment_stake_limits": "限制每次开单的最小/最大额度",
+                "max_stake_per_trade": {
+                    "mode": "percent",
+                    "_comment_mode": "模式: 'fixed' (固定金额) 或 'percent' (总资金百分比)",
+                    "value": 10,
+                    "_comment_value": "百分比模式下表示总资金的百分比，固定模式下表示 USDT 金额"
+                },
+                "min_stake_per_trade": {
+                    "mode": "percent",
+                    "value": 1,
+                    "_comment": "最小开单额度: 1% 的总资金"
+                }
             },
             "adjust_position": {
                 "enabled": true,

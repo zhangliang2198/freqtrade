@@ -57,44 +57,45 @@
 
         "cost_config": {
             "_comment": "Pricing for DeepSeek with Prompt Caching",
-            "input_cost_per_million": 0.27,
-            "output_cost_per_million": 1.10,
-            "cache_read_cost_per_million": 0.014,
-            "cache_creation_cost_per_million": 0.28
+            "input_cost_per_million": 4,
+            "output_cost_per_million": 12,
+            "cache_read_cost_per_million": 1,
+            "cache_creation_cost_per_million": 1
         },
         "decision_points": {
             "entry": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.4
+                "confidence_threshold": 0.5
             },
             "exit": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.4
+                "confidence_threshold": 0.5
             },
             "stake": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.4,
                 "min_stake_multiplier": 0.5,
                 "max_stake_multiplier": 5.0,
-                "_comment_max_stake": "每次开单的最大额度限制fixed/percent",
                 "max_stake_per_trade": {
                     "mode": "percent",
-                    "value": 5
+                    "value": 10
+                },
+                "min_stake_per_trade": {
+                    "mode": "fixed",
+                    "value": 2
                 }
             },
             "adjust_position": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.4,
+                "confidence_threshold": 0.5,
                 "max_adjustment_ratio": 5.0
             },
             "leverage": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.4,
                 "min_leverage": 2.0,
                 "max_leverage": 20.0
             }
@@ -116,6 +117,9 @@
             "include_wallet_info": true,
             "include_positions_info": true,
             "include_closed_trades_info": true
+        },
+        "fund_check": {
+            "min_available_balance_pct": 0.01
         }
     }
 }

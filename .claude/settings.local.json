@@ -3,7 +3,9 @@
     "allow": [
       "Bash(python -c:*)",
       "Bash(timeout 3 python:*)",
-      "Bash(python temp_fix_prompts.py:*)"
+      "Bash(python temp_fix_prompts.py:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(timeout 10 python:*)"
     ],
     "deny": [],
     "ask": []
