@@ -6,6 +6,7 @@ Collects metrics about LLM usage for Prometheus export。
 
 from datetime import datetime, timedelta
 
+from freqtrade.util import dt_now
 from .base import MetricSample
 
 
@@ -111,7 +112,7 @@ def collect(api, now: float) -> list[MetricSample]:
         except Exception:
             pass
 
-        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        one_hour_ago = dt_now() - timedelta(hours=1)
 
         try:
             recent_cost = session.query(func.sum(LLMDecision.cost)).filter(

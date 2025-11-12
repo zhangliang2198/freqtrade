@@ -9,6 +9,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
+from freqtrade.util import dt_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,7 +61,7 @@ class LLMMetricsAggregator:
             import json
 
             session = Trade.session
-            current_time = datetime.utcnow()
+            current_time = dt_now()
 
             # 计算时间桶（向下取整到小时）
             time_bucket = current_time.replace(minute=0, second=0, microsecond=0)
@@ -216,7 +218,7 @@ class LLMMetricsAggregator:
                     total_cost_usd=total_cost,
                     avg_confidence=avg_confidence,
                     decision_distribution=json.dumps(decision_dist) if decision_dist else None,
-                    created_at=datetime.utcnow()
+                    created_at=dt_now()
                 )
                 session.add(metric)
 
@@ -243,7 +245,7 @@ class LLMMetricsAggregator:
             from freqtrade.persistence.llm_models import LLMPerformanceMetric
 
             session = Trade.session
-            cutoff_date = datetime.utcnow() - timedelta(days=days_to_keep)
+            cutoff_date = dt_now() - timedelta(days=days_to_keep)
 
             deleted_count = session.query(LLMPerformanceMetric).filter(
                 LLMPerformanceMetric.time_bucket < cutoff_date

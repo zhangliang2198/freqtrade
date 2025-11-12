@@ -19,17 +19,19 @@
 - **最高价**: ${{ "%.6f"|format(max_rate) }} | **最高PnL**: {{ "%.2f"|format(max_profit_pct) }}% | **回撤**: {{ "%.2f"|format(drawdown_from_high_pct) }}%
 {% endif %}
 
-{% if indicators %}
-## 技术指标 ({{ timeframe }})
-{% for key, value in indicators.items() -%}
+{% if main_indicators %}
+## 技术指标 ({{ main_timeframe }})
+{% for key, value in main_indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
 {% endfor -%}
 {% endif %}
-{% if informative_indicators %}
-## 参考指标 ({{ informative_timeframe }})
-{% for key, value in informative_indicators.items() -%}
+{% if informative_timeframes %}
+{% for tf_data in informative_timeframes %}
+## 参考指标 ({{ tf_data.timeframe }})
+{% for key, value in tf_data.indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
 {% endfor -%}
+{% endfor %}
 {% endif %}
 
 ---

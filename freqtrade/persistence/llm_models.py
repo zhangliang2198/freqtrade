@@ -12,6 +12,7 @@ from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Te
 from sqlalchemy.orm import Mapped, mapped_column
 
 from freqtrade.persistence.base import ModelBase, SessionType
+from freqtrade.util import dt_now
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class LLMDecision(ModelBase):
 
     # 时间戳
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow, index=True
+        DateTime, nullable=False, default=dt_now, index=True
     )
 
     def __repr__(self):
@@ -252,7 +253,7 @@ class LLMPerformanceMetric(ModelBase):
 
     # 时间戳
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime, nullable=False, default=dt_now
     )
 
     def __repr__(self):

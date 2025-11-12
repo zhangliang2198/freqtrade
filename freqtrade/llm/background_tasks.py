@@ -11,6 +11,8 @@ from freqtrade.llm.aggregator import LLMMetricsAggregator
 from datetime import datetime
 from typing import Optional
 
+from freqtrade.util import dt_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,7 +108,7 @@ class LLMBackgroundTasks:
 
         while not self._stop_event.is_set():
             try:
-                current_time = datetime.utcnow()
+                current_time = dt_now()
 
                 # 执行聚合任务
                 if self._aggregator and self._aggregator.should_aggregate(current_time):

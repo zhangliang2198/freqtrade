@@ -16,6 +16,7 @@ import re
 from freqtrade.llm.providers import HttpLLMProvider
 from freqtrade.llm.context_builder import ContextBuilder
 from freqtrade.llm.prompts.manager import PromptManager
+from freqtrade.util import dt_now
 
 logger = logging.getLogger(__name__)
 
@@ -589,7 +590,7 @@ class LLMDecisionEngine:
                 cost_usd=response.cost_usd if response else None,
                 success=success,
                 error_message=error,
-                created_at=datetime.utcnow()
+                created_at=dt_now()
             )
 
             Trade.session.add(decision_log)

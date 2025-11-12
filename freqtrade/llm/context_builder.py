@@ -9,6 +9,8 @@ from datetime import datetime
 import pandas as pd
 import logging
 
+from freqtrade.util import dt_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,7 +85,7 @@ class ContextBuilder:
         context = {
             "pair": pair,
             "timeframe": timeframe,
-            "current_time": str(current_candle.get("date", datetime.utcnow())),
+            "current_time": str(current_candle.get("date", dt_now())),
             "current_candle": self._format_candle(current_candle),
             "market_summary": self._summarize_market(recent_data),
         }
@@ -148,7 +150,7 @@ class ContextBuilder:
 
         # 计算持有时间
         holding_duration_minutes = (
-            (datetime.utcnow() - trade.open_date).total_seconds() / 60
+            (dt_now() - trade.open_date).total_seconds() / 60
         )
 
         # 获取时间周期信息
@@ -590,22 +592,28 @@ class ContextBuilder:
         informative_timeframe: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        从数据框行中提取技术指标，并分离主周期和信息周期
+        从数据框行中提取技术指标，自动分离主周期和多个信息周期
 
         Args:
             row: 包含指标列的DataFrame行
             dataframe: 完整DataFrame，用于自动检测指标
             main_timeframe: 主时间周期（如 "15m"）
-            informative_timeframe: 信息时间周期（如 "1h"），可选
+            informative_timeframe: 已废弃，现在自动检测所有信息周期
 
         Returns:
-            包含分离指标的字典，格式：
+            包含分组指标的字典，格式：
             {
-                "indicators": {...},  # 主周期指标
-                "informative_indicators": {...},  # 信息周期指标（如果有）
+                "main_timeframe": "15m",
+                "main_indicators": {...},  # 主周期指标
+                "informative_timeframes": [  # 多个信息周期
+                    {"timeframe": "8h", "indicators": {...}},
+                    {"timeframe": "1d", "indicators": {...}}
+                ]
             }
         """
-        result = {}
+        result = {
+            "main_timeframe": main_timeframe
+        }
         available_columns = set(row.index)
 
         # 获取所有指标列名
@@ -623,15 +631,21 @@ class ContextBuilder:
         else:
             return {}
 
-        # 分离主周期和信息周期的指标
-        main_indicators = {}
-        informative_indicators = {}
+        # 自动检测所有可能的时间周期后缀
+        # 常见的 timeframe 后缀：_1m, _5m, _15m, _30m, _1h, _4h, _8h, _1d 等
+        timeframe_suffixes = set()
+        for indicator_name in all_indicator_names:
+            # 提取可能的时间周期后缀
+            parts = indicator_name.split('_')
+            if len(parts) >= 2:
+                possible_tf = parts[-1]
+                # 检查是否是时间周期格式（如 1m, 5m, 1h, 4h, 1d 等）
+                if possible_tf and (possible_tf[-1] in ['m', 'h', 'd', 'w'] and possible_tf[:-1].isdigit()):
+                    timeframe_suffixes.add(f"_{possible_tf}")
 
-        # 生成信息周期的后缀模式（如 "_1h", "_4h" 等）
-        inf_suffixes = []
-        if informative_timeframe:
-            # Freqtrade merge_informative_pair 会添加 _{timeframe} 后缀
-            inf_suffixes.append(f"_{informative_timeframe}")
+        # 分离主周期和多个信息周期的指标
+        main_indicators = {}
+        informative_by_timeframe = {}  # {timeframe: {indicators}}
 
         for indicator_name in all_indicator_names:
             if indicator_name not in row.index:
@@ -652,24 +666,36 @@ class ContextBuilder:
 
             # 判断是否为信息周期指标
             is_informative = False
-            if informative_timeframe:
-                for suffix in inf_suffixes:
-                    if indicator_name.endswith(suffix):
-                        is_informative = True
-                        # 去除后缀，使指标名称更简洁
-                        clean_name = indicator_name[:-len(suffix)]
-                        informative_indicators[clean_name] = float_value
-                        break
+            for suffix in timeframe_suffixes:
+                if indicator_name.endswith(suffix):
+                    is_informative = True
+                    # 提取时间周期（去掉前缀的下划线）
+                    timeframe = suffix[1:]  # 去掉 '_'
+                    # 去除后缀，使指标名称更简洁
+                    clean_name = indicator_name[:-len(suffix)]
+
+                    if timeframe not in informative_by_timeframe:
+                        informative_by_timeframe[timeframe] = {}
+
+                    informative_by_timeframe[timeframe][clean_name] = float_value
+                    break
 
             if not is_informative:
                 main_indicators[indicator_name] = float_value
 
         # 构建返回结果
         if main_indicators:
-            result["indicators"] = main_indicators
-        if informative_indicators:
-            result["informative_indicators"] = informative_indicators
-            result["informative_timeframe"] = informative_timeframe
+            result["main_indicators"] = main_indicators
+
+        if informative_by_timeframe:
+            # 转换为列表格式，并按时间周期排序
+            informative_list = []
+            for tf in sorted(informative_by_timeframe.keys()):
+                informative_list.append({
+                    "timeframe": tf,
+                    "indicators": informative_by_timeframe[tf]
+                })
+            result["informative_timeframes"] = informative_list
 
         return result
 
@@ -1075,7 +1101,7 @@ class ContextBuilder:
                 # 如果是当前交易对，记录详细信息
                 if pair and trade.pair == pair:
                     holding_minutes = (
-                        (datetime.utcnow() - trade.open_date).total_seconds() / 60
+                        (dt_now() - trade.open_date).total_seconds() / 60
                     )
 
                     positions_info["current_pair_positions"].append({
