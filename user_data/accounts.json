@@ -4,7 +4,7 @@
       "long_initial_balance": 2000,
       "short_initial_balance": 2000,
       "use_ratio": true,
-      "long_ratio": 0,
+      "long_ratio": 1,
       "short_ratio": 1
     }
   }
