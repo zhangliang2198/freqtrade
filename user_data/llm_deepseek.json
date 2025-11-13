@@ -9,11 +9,6 @@
         "api_key": "532d1f95-039c-46b2-8ec2-3834c8070a96",
         "timeout": 180,
         "max_retries": 3,
-        "lookback_candles": 100,
-        "include_orderbook": true,
-        "include_recent_trades": true,
-        "include_funding_rate": true,
-        "include_portfolio_state": true,
         "temperature": 0.1,
         "aggregation_interval_minutes": 60,
         "enable_background_aggregation": true,
@@ -76,7 +71,7 @@
             "stake": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "min_stake_multiplier": 0.5,
+                "min_stake_multiplier": 0.1,
                 "max_stake_multiplier": 2.0,
                 "max_stake_per_trade": {
                     "mode": "percent",
@@ -107,10 +102,10 @@
             "export_metrics": true
         },
         "context": {
-            "lookback_candles": 100,
+            "lookback_candles": 32,
             "include_indicators": true,
             "include_orderbook": false,
-            "include_recent_trades": false,
+            "include_raw_candles_in_summary": true,
             "include_funding_rate": false,
             "include_portfolio_state": true,
             "include_account_info": true,

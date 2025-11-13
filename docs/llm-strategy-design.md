@@ -154,7 +154,7 @@
         "rsi", "macd", "bb_bands", "ema", "volume"
       ],
       "include_orderbook": false,
-      "include_recent_trades": true,
+      "include_raw_candles_in_summary": true,
       "include_funding_rate": true,
       "include_portfolio_state": true
     },
@@ -207,7 +207,7 @@
 | `lookback_candles` | 提供给 LLM 的历史 K 线数量 |
 | `include_indicators` | 包含的技术指标列表 |
 | `include_orderbook` | 是否包含订单簿数据 |
-| `include_recent_trades` | 是否包含最近成交 |
+| `include_raw_candles_in_summary` | 是否在市场摘要中包含原始K线数据 |
 | `include_funding_rate` | 是否包含资金费率 |
 | `include_portfolio_state` | 是否包含当前持仓状态 |
 
@@ -825,7 +825,7 @@ class ContextBuilder:
         if self.config["include_indicators"]:
             context["indicators"] = self._extract_indicators(dataframe.iloc[-1])
 
-        if self.config["include_recent_trades"]:
+        if self.config["include_raw_candles_in_summary"]:
             context["recent_candles"] = self._format_recent_candles(recent_data, num=10)
 
         return context
@@ -1502,7 +1502,7 @@ COLLECTORS: tuple[Collector, ...] = (
       "lookback_candles": 100,
       "include_indicators": ["rsi", "macd", "bb_upper", "bb_lower", "ema_9", "ema_21"],
       "include_orderbook": false,
-      "include_recent_trades": true,
+      "include_raw_candles_in_summary": true,
       "include_funding_rate": false,
       "include_portfolio_state": true
     },

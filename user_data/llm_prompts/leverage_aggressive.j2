@@ -4,7 +4,16 @@
 **核心使命**: 在风险可控前提下，通过合理杠杆最大化收益潜力。
 
 ---
+# 市场时间与当前状态
 
+- **当前时间**: {{ current_time or "未知" }}
+- **当前K线**: {{ current_candle or "无数据" }}
+
+# 交易信息
+- **交易对**: {{ pair }}
+- **时间周期**: {{ timeframe }}
+
+---
 # 市场状态
 
 ## 当前行情
@@ -17,18 +26,33 @@
 {% for key, value in main_indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
 {% endfor -%}
-{% endif %}
-{% if informative_timeframes %}
-{% for tf_data in informative_timeframes %}
+{% endif -%}
+{%- if informative_timeframes %}
+{% for tf_data in informative_timeframes -%}
 ## 参考指标 ({{ tf_data.timeframe }})
 {% for key, value in tf_data.indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
-{% endfor -%}
 {% endfor %}
-{% endif %}
+{% endfor -%}
+{% endif -%}
+
+{% if market_data and market_data.raw_candles %}
+## 原始K线数据 {{ timeframe }} (最近{{ market_data.raw_candles|length }}根)
+{% for candle in market_data.raw_candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endif -%}
+
+{%- if informative_candles %}
+{% for tf, candles in informative_candles.items() -%}
+## 信息对K线数据 {{ tf }} (最近{{ candles|length }}根)
+{% for candle in candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endfor -%}
+{% endif -%}
 
 ---
-
 # 资金状况
 
 {% if account_mode_enabled %}
@@ -41,7 +65,6 @@
 {% endif %}
 
 ---
-
 # 持仓组合
 
 - **总计**: {{ positions_total_count }}个 | 盈利{{ positions_in_profit_count }}个 | 亏损{{ positions_at_risk_count }}个
@@ -61,15 +84,14 @@
 {% endif %}
 
 ---
-
 # 杠杆决策框架（激进策略）
 
 **⚠️ 重要提示**:
 - 本系统支持**多空双向交易**，杠杆决策对多头和空头同等重要
 - **激进策略**: **信号强时积极使用杠杆放大收益**
 
-{% set leverage_min = leverage_limits.min if leverage_limits and leverage_limits.min is not none else 1.0 %}
-{% set leverage_max = leverage_limits.max if leverage_limits and leverage_limits.max is not none else max_leverage %}
+{% set leverage_min = leverage_limits["min"] if leverage_limits and leverage_limits["min"] is not none else 1.0 %}
+{% set leverage_max = leverage_limits["max"] if leverage_limits and leverage_limits["max"] is not none else max_leverage %}
 {% set leverage_mid = (leverage_min + leverage_max) / 2 %}
 
 ## 任务
@@ -88,7 +110,7 @@
 - 波动率进入高区间 → 将杠杆压至区间低端，避免剧烈波动触发清算
 - 波动率温和 → 使用区间中段，兼顾机会与风险
 - 波动率极低/有序 → 可尝试向区间上端推进，但仍需设好止损
-- **核心**: 让volatility字段决定“低/中/高”区间，而非死记阈值
+- **核心**: 让volatility字段决定"低/中/高"区间，而非死记阈值
 
 **因子3: 清算风险评估**
 - 结合清算距离评估可承受的波动空间
@@ -98,7 +120,7 @@
 **因子4: 趋势确定性**
 - 趋势强劲且技术面确认 → 可推进到区间上半段
 - 震荡或趋势模糊 → 退回区间低端，防止被洗
-- 趋势转折期 → 仅用探测性低杠杆等待确认
+- 趋势转折期 → 仅用试探性低杠杆等待确认
 
 **因子5: 资金管理**
 - 资金使用率充裕 → 可根据信号逐步放大
@@ -137,7 +159,6 @@
 ❌ 没有严格止损保护
 
 ---
-
 # 输出格式
 
 仅返回有效JSON（无其他文字）：

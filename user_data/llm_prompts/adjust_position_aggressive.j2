@@ -8,12 +8,21 @@
 - ❌ 不负责：完全平仓退出、止损决策
 
 ---
+# 市场时间与当前状态
+- **当前时间**: {{ current_time or "未知" }}
+- **当前K线**: {{ current_candle or "无数据" }}
 
+# 交易信息
+- **交易对**: {{ pair }}
+- **时间周期**: {{ timeframe }}
+
+---
 # 持仓状态
 
 ## 当前持仓
-- **{{ pair }}** [{{ side|upper }}] | **周期**: {{ timeframe }} | 入场${{ "%.6f"|format(entry_rate) }} → 现价${{ "%.6f"|format(current_rate) }} | PnL **{{ "%.2f"|format(current_profit_pct) }}%**
+- **{{ pair }}** [{{ side|upper }}] | **周期**: {{ timeframe }} | **杠杆**: {{ "%.1f"|format(current_leverage) }}x | 入场${{ "%.6f"|format(entry_rate) }} → 现价${{ "%.6f"|format(current_rate) }} | PnL **{{ "%.2f"|format(current_profit_pct) }}%**
 - **投入**: ${{ "%.2f"|format(stake_amount) }} | **持有**: {{ "%.1f"|format(holding_duration_minutes / 60) }}小时
+- **入场标签**: {{ entry_tag }}
 - **市场概况**: {{ market_summary }}
 
 ## 调整统计
@@ -22,39 +31,54 @@
 
 {% if adjustment_history %}
 ## 近期调仓记录
-{% for record in adjustment_history %}
+{% for record in adjustment_history -%}
 **{{ loop.index }}.** {{ "%.0f"|format(record.minutes_ago) }}分钟前 | **{{ record.action|upper }}** @ ${{ "%.6f"|format(record.price) }} | 投入${{ "%.2f"|format(record.stake_amount) }} | {{ record.order_type }}
-{% endfor %}
+{% endfor -%}
 **⚠️ 关键**: 根据上述调仓记录，避免重复操作！如刚做过加仓，需等待市场变化；如刚做过减仓（做T高抛），需等待低吸机会。
-{% endif %}
+{% endif -%}
 
-{% if main_indicators %}
+{%- if main_indicators %}
 ## 技术指标 ({{ main_timeframe }})
 {% for key, value in main_indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
 {% endfor -%}
-{% endif %}
-{% if informative_timeframes %}
-{% for tf_data in informative_timeframes %}
+{% endif -%}
+{%- if informative_timeframes %}
+{% for tf_data in informative_timeframes -%}
+
 ## 参考指标 ({{ tf_data.timeframe }})
 {% for key, value in tf_data.indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
-{% endfor -%}
 {% endfor %}
-{% endif %}
+{% endfor -%}
+{% endif -%}
+
+{%- if market_data and market_data.raw_candles %}
+## 原始K线数据 {{ timeframe }} (最近{{ market_data.raw_candles|length }}根)
+{% for candle in market_data.raw_candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endif -%}
+
+{%- if informative_candles %}
+{% for tf, candles in informative_candles.items() -%}
+## 信息对K线数据 {{ tf }} (最近{{ candles|length }}根)
+{% for candle in candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endfor -%}
+{% endif -%}
 
 ---
 
 # 资金状况
-
-{% if account_mode_enabled %}
+{%- if account_mode_enabled %}
 **多头账户**: 可用${{ "%.2f"|format(account_long_available) }} | **空头账户**: 可用${{ "%.2f"|format(account_short_available) }}
 {% else %}
 **钱包**: 可用${{ "%.2f"|format(wallet_free_balance) }} / ${{ "%.2f"|format(wallet_total_balance) }} | 使用率**{{ "%.1f"|format(wallet_used_balance / wallet_total_balance * 100 if wallet_total_balance > 0 else 0) }}%**
-{% endif %}
+{% endif -%}
 
 ---
-
 # 持仓组合
 
 - **总计**: {{ positions_total_count }}个 | 盈利{{ positions_in_profit_count }}个 | 亏损{{ positions_at_risk_count }}个
@@ -65,15 +89,14 @@
 ## {{ pair }} 其他持仓
 {% for pos in current_pair_positions %}
 **#{{ pos.trade_id }}** [{{ pos.side|upper }}]: ${{ "%.2f"|format(pos.stake_amount) }}投入 | PnL {{ "%.2f"|format(pos.profit_pct) }}% | {{ "%.0f"|format(pos.holding_minutes) }}分钟
-{% endfor %}
-{% endif %}
+{% endfor -%}
+{% endif -%}
 
 {% if closed_trades_total > 0 %}
 **历史参考**: {{ closed_trades_total }}笔 | 平均${{ "%.2f"|format(closed_total_profit / closed_trades_total) }}/笔
 {% endif %}
 
 ---
-
 # 调整决策框架（激进策略）
 
 **⚠️ 重要提示**:
@@ -120,6 +143,7 @@
 - 资金使用率较高 → 禁止加仓，考虑减仓
 - 调整次数不足 → 谨慎使用
 - 技术完全破位 → 禁止加仓
+- **杠杆考量**: 高杠杆时仍可积极调仓，但需更加谨慎控制风险
 
 ## 激进调整幅度
 
@@ -144,7 +168,6 @@
 ❌ 调整次数用尽仍随意操作
 
 ---
-
 # 输出格式
 
 仅返回有效JSON（无其他文字）：

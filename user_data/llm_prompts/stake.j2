@@ -4,7 +4,15 @@
 **核心使命**: 通过动态仓位管理优化风险调整后收益。
 
 ---
+# 市场时间与当前状态
+- **当前时间**: {{ current_time or "未知" }}
+- **当前K线**: {{ current_candle or "无数据" }}
 
+# 交易信息
+- **交易对**: {{ pair }}
+- **时间周期**: {{ timeframe }}
+
+---
 # 市场状态
 
 - **{{ pair }}** | **周期**: {{ timeframe }} | 价格${{ "%.4f"|format(current_price) }} | 可用余额${{ "%.2f"|format(available_balance) }}
@@ -16,18 +24,32 @@
 {% for key, value in main_indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
 {% endfor -%}
-{% endif %}
-{% if informative_timeframes %}
-{% for tf_data in informative_timeframes %}
+{% endif -%}
+{%- if informative_timeframes %}
+{% for tf_data in informative_timeframes -%}
 ## 参考指标 ({{ tf_data.timeframe }})
 {% for key, value in tf_data.indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
-{% endfor -%}
 {% endfor %}
-{% endif %}
+{% endfor -%}
+{% endif -%}
+{%- if market_data and market_data.raw_candles %}
+## 原始K线数据 {{ timeframe }} (最近{{ market_data.raw_candles|length }}根)
+{% for candle in market_data.raw_candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endif -%}
+
+{%- if informative_candles %}
+{% for tf, candles in informative_candles.items() -%}
+## 信息对K线数据 {{ tf }} (最近{{ candles|length }}根)
+{% for candle in candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endfor -%}
+{% endif -%}
 
 ---
-
 # 资金状况
 
 {% if account_mode_enabled %}
@@ -68,9 +90,13 @@
 {% endif %}
 
 ---
+# 杠杆信息
 
+- **当前杠杆**: {{ "%.1f"|format(current_leverage) }}x
+- **最大杠杆**: {{ "%.1f"|format(max_leverage) }}x
+
+---
 # 持仓组合
-
 - **总计**: {{ positions_total_count }}个 | 盈利{{ positions_in_profit_count }}个 | 亏损{{ positions_at_risk_count }}个
 - **多头**: {{ positions_long_count }}个，${{ "%.2f"|format(positions_long_stake_total) }}，PnL {{ "%.2f"|format(positions_long_profit_pct) }}%
 - **空头**: {{ positions_short_count }}个，${{ "%.2f"|format(positions_short_stake_total) }}，PnL {{ "%.2f"|format(positions_short_profit_pct) }}%
@@ -90,7 +116,6 @@
 {% endif %}
 
 ---
-
 # 仓位决策框架
 
 **⚠️ 重要提示**:
@@ -131,6 +156,7 @@
 - 该交易对已有持仓 → 降低倍数（集中度风险）
 - 总持仓过多 → 保守sizing
 - 避免单仓占比过大
+- **杠杆考量**: 高杠杆时应该减小仓位，降低风险敞口
 
 **因子5: 趋势确定性**
 - 趋势强劲明确 → 可增大仓位
@@ -145,7 +171,6 @@
 ❌ 信号弱但因贪心开大仓
 
 ---
-
 # 输出格式
 
 仅返回有效JSON（无其他文字）：

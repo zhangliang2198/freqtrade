@@ -9,6 +9,7 @@ from datetime import datetime
 import pandas as pd
 import logging
 import re
+import inspect
 
 from freqtrade.util import dt_now
 
@@ -28,32 +29,90 @@ class ContextBuilder:
 
     def __init__(
         self,
-        config: Dict[str, Any],
-        decision_config: Optional[Dict[str, Any]] = None
+        config: Dict[str, Any]
     ):
         """
         初始化上下文构建器
 
         Args:
-            config: 来自llm_config.context的上下文配置
+            config: 完整的配置字典，包含 context 和 decision_points 部分
         """
+        # 从完整配置中提取 context 和 decision_points 部分
+        context_config = config.get("context", {})
+        decision_config = config.get("decision_points", {})
+        
         self.config = config
-        self.decision_config = decision_config or {}
-        self.lookback_candles = config.get("lookback_candles", 100)
-        self.include_indicators = config.get("include_indicators", [])
-        self.include_orderbook = config.get("include_orderbook", False)
-        self.include_recent_trades = config.get("include_recent_trades", False)
-        self.include_funding_rate = config.get("include_funding_rate", False)
-        self.include_portfolio_state = config.get("include_portfolio_state", False)
+        self.decision_config = decision_config
+        self.lookback_candles = context_config.get("lookback_candles", 32)
+        self.include_indicators = context_config.get("include_indicators", [])
+        self.include_orderbook = context_config.get("include_orderbook", False)
+        self.include_raw_candles_in_summary = context_config.get("include_raw_candles_in_summary", False)
+        self.include_funding_rate = context_config.get("include_funding_rate", False)
+        self.include_portfolio_state = context_config.get("include_portfolio_state", False)
 
-        # 新增：控制是否包含详细的账户和持仓信息
-        self.include_account_info = config.get("include_account_info", True)
-        self.include_wallet_info = config.get("include_wallet_info", True)
-        self.include_positions_info = config.get("include_positions_info", True)
-        self.include_closed_trades_info = config.get("include_closed_trades_info", True)
+        # 控制是否包含详细的账户和持仓信息
+        self.include_account_info = context_config.get("include_account_info", True)
+        self.include_wallet_info = context_config.get("include_wallet_info", True)
+        self.include_positions_info = context_config.get("include_positions_info", True)
+        self.include_closed_trades_info = context_config.get("include_closed_trades_info", True)
 
-        # 新增：调仓历史记录条数限制
-        self.adjustment_history_limit = config.get("adjustment_history_limit", 5)
+        # 调仓历史记录条数限制
+        self.adjustment_history_limit = context_config.get("adjustment_history_limit", 5)
+
+    def _get_leverage_info(self, strategy: Optional[Any]) -> tuple[float, float]:
+        """
+        从策略中获取杠杆信息
+        
+        Args:
+            strategy: 策略实例
+            
+        Returns:
+            (current_leverage, max_leverage) 元组
+        """
+        current_leverage = 1.0
+        max_leverage = 1.0
+        
+        # 尝试从策略中获取杠杆信息
+        if strategy:
+            # 获取当前杠杆值
+            if hasattr(strategy, 'leverage') and strategy.leverage:
+                try:
+                    # 检查 leverage 是方法还是属性
+                    if callable(strategy.leverage):
+                        # 对于 LLMStrategy，leverage() 方法需要7个参数，我们无法提供
+                        # 所以这里应该尝试获取默认值或使用默认值 1.0
+                        # 我们可以检查是否是 LLMStrategy 的 leverage 方法
+                        sig = inspect.signature(strategy.leverage)
+                        if len(sig.parameters) > 0:
+                            # 这是一个需要参数的方法，我们无法调用，使用默认值
+                            current_leverage = 1.0
+                        else:
+                            # 这是一个无参数的方法，可以调用
+                            current_leverage = float(strategy.leverage())
+                    else:
+                        # leverage 是一个属性
+                        current_leverage = float(strategy.leverage)
+                except (TypeError, ValueError) as e:
+                    logger.warning(f"获取策略杠杆值失败: {e}，使用默认值 1.0")
+                    current_leverage = 1.0
+            
+            # 获取最大杠杆值
+            # 首先尝试从配置中获取
+            max_leverage_config = None
+            if hasattr(strategy, 'config') and isinstance(strategy.config, dict):
+                leverage_config = strategy.config.get('leverage', {})
+                if isinstance(leverage_config, dict):
+                    max_leverage_config = leverage_config.get('max_leverage')
+            
+            # 如果配置中没有，尝试从策略属性获取
+            if max_leverage_config is None and hasattr(strategy, 'max_leverage'):
+                max_leverage_config = strategy.max_leverage
+            
+            # 如果获取到了最大杠杆值，使用它；否则使用默认值1.0
+            if max_leverage_config is not None:
+                max_leverage = float(max_leverage_config)
+        
+        return current_leverage, max_leverage
 
     def build_entry_context(
         self,
@@ -89,13 +148,21 @@ class ContextBuilder:
             else None
         )
 
+        # 获取杠杆信息
+        current_leverage, max_leverage = self._get_leverage_info(strategy)
+
         context = {
             "pair": pair,
             "timeframe": timeframe,
             "current_time": str(current_candle.get("date", dt_now())),
             "current_candle": self._format_candle(current_candle),
-            "market_summary": self._summarize_market(recent_data),
+            # 添加杠杆信息
+            "current_leverage": current_leverage,
+            "max_leverage": max_leverage,
         }
+        
+        # 使用新的辅助方法添加市场摘要
+        self._add_market_summary_to_context(context, recent_data, strategy, pair)
 
         # 添加指标（分离主周期和信息周期）
         if self.include_indicators:
@@ -107,9 +174,9 @@ class ContextBuilder:
             )
             context.update(indicators_data)
 
-        # 添加最近的K线
-        if self.include_recent_trades:
-            context["recent_candles"] = self._format_recent_candles(recent_data, num=10)
+        # 注释掉：由于已经有了市场汇总，这里不再需要添加最近的K线数据
+        # if self.include_recent_trades:
+        #     context["recent_candles"] = self._format_recent_candles(recent_data, num=10)
 
         # 添加投资组合状态（旧格式，保持向后兼容）
         if self.include_portfolio_state and portfolio_state:
@@ -170,9 +237,19 @@ class ContextBuilder:
             else None
         )
 
+        # 获取当前K线数据
+        current_candle = dataframe.iloc[-1] if len(dataframe) > 0 else None
+
+        # 获取杠杆信息
+        # 优先使用 trade 对象的实际杠杆，如果没有则从策略获取
+        current_leverage = float(trade.leverage) if hasattr(trade, 'leverage') and trade.leverage else 1.0
+        _, max_leverage = self._get_leverage_info(strategy)
+
         context = {
             "pair": trade.pair,
             "timeframe": timeframe,
+            "current_time": str(current_candle.get("date", dt_now())) if current_candle is not None else str(dt_now()),
+            "current_candle": self._format_candle(current_candle) if current_candle is not None else None,
             "side": "short" if trade.is_short else "long",
             "entry_price": float(trade.open_rate),
             "current_price": float(current_rate),
@@ -180,7 +257,9 @@ class ContextBuilder:
             "current_profit_abs": float(current_profit_abs),
             "holding_duration_minutes": float(holding_duration_minutes),
             "stop_loss": float(trade.stop_loss),
-            "entry_tag": trade.enter_tag,
+            "entry_tag": trade.enter_tag or "无",
+            "current_leverage": current_leverage,
+            "max_leverage": max_leverage,
         }
 
         # 添加可选字段和回撤计算
@@ -196,6 +275,12 @@ class ContextBuilder:
 
         if trade.min_rate:
             context["min_rate"] = float(trade.min_rate)
+
+        # 获取最近数据用于市场摘要
+        recent_data = dataframe.tail(self.lookback_candles)
+        
+        # 使用新的辅助方法添加市场摘要
+        self._add_market_summary_to_context(context, recent_data, strategy, trade.pair)
 
         # 添加当前指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
@@ -269,14 +354,30 @@ class ContextBuilder:
             else None
         )
 
+        # 获取当前K线数据
+        current_candle = dataframe.iloc[-1] if len(dataframe) > 0 else None
+        
+        # 获取杠杆信息
+        current_leverage, max_leverage = self._get_leverage_info(strategy)
+
+        # 获取当前K线数据
+        current_candle = dataframe.iloc[-1] if len(dataframe) > 0 else None
+        
         context = {
             "pair": pair,
             "timeframe": timeframe,
+            "current_time": str(current_candle.get("date", dt_now())) if current_candle is not None else str(dt_now()),
+            "current_candle": self._format_candle(current_candle) if current_candle is not None else None,
             "current_price": float(current_rate),
             "available_balance": float(available_balance),
-            "market_summary": self._summarize_market(recent_data),
             "volatility": self._calculate_volatility(dataframe),
+            # 添加杠杆信息
+            "current_leverage": current_leverage,
+            "max_leverage": max_leverage,
         }
+        
+        # 使用新的辅助方法添加市场摘要
+        self._add_market_summary_to_context(context, recent_data, strategy, pair)
 
         stake_limits = self._get_stake_limits()
         if stake_limits:
@@ -387,9 +488,19 @@ class ContextBuilder:
         else:
             remaining_adjustments = -1  # -1 表示无限制
 
+        # 获取当前K线数据
+        current_candle = dataframe.iloc[-1] if len(dataframe) > 0 else None
+
+        # 获取杠杆信息
+        # 优先使用 trade 对象的实际杠杆，如果没有则从策略获取
+        current_leverage = float(trade.leverage) if hasattr(trade, 'leverage') and trade.leverage else 1.0
+        _, max_leverage = self._get_leverage_info(strategy)
+
         context = {
             "pair": trade.pair,
             "timeframe": timeframe,
+            "current_time": str(current_candle.get("date", current_time)) if current_candle is not None else str(current_time),
+            "current_candle": self._format_candle(current_candle) if current_candle is not None else None,
             "side": "short" if trade.is_short else "long",
             "current_profit_pct": float(current_profit * 100),
             "current_rate": float(current_rate),
@@ -398,11 +509,17 @@ class ContextBuilder:
             "profit_from_average_pct": float(profit_from_average),
             "stake_amount": float(trade.stake_amount),
             "holding_duration_minutes": float(holding_duration_minutes),
-            "market_summary": self._summarize_market(recent_data),
             "nr_of_entries": int(nr_of_entries),
             "max_adjustments": int(max_adjustments),
             "remaining_adjustments": int(remaining_adjustments),
+            "entry_tag": trade.enter_tag or "无",
+            # 添加杠杆信息
+            "current_leverage": current_leverage,
+            "max_leverage": max_leverage,
         }
+        
+        # 使用新的辅助方法添加市场摘要
+        self._add_market_summary_to_context(context, recent_data, strategy, trade.pair)
 
         # 添加指标（分离主周期和信息周期）
         if self.include_indicators and len(dataframe) > 0:
@@ -477,15 +594,30 @@ class ContextBuilder:
             else None
         )
 
+        # 获取当前K线数据
+        current_candle = dataframe.iloc[-1] if len(dataframe) > 0 else None
+        
+        # 获取当前杠杆信息（max_leverage 已作为参数传入）
+        current_leverage, _ = self._get_leverage_info(strategy)
+
+        # 获取当前K线数据
+        current_candle = dataframe.iloc[-1] if len(dataframe) > 0 else None
+        
         context = {
             "pair": pair,
             "timeframe": timeframe,
+            "current_time": str(current_candle.get("date", dt_now())) if current_candle is not None else str(dt_now()),
+            "current_candle": self._format_candle(current_candle) if current_candle is not None else None,
             "current_rate": float(current_rate),
             "proposed_leverage": float(proposed_leverage),
             "max_leverage": float(max_leverage),
             "volatility": self._calculate_volatility(dataframe),
-            "market_summary": self._summarize_market(recent_data),
+            # 添加当前杠杆信息
+            "current_leverage": current_leverage,
         }
+        
+        # 使用新的辅助方法添加市场摘要
+        self._add_market_summary_to_context(context, recent_data, strategy, pair)
 
         leverage_limits = self._get_leverage_limits(max_leverage)
         if leverage_limits:
@@ -538,18 +670,31 @@ class ContextBuilder:
             "volume": float(row.get("volume", 0))
         }
 
-    def _summarize_market(self, df: pd.DataFrame) -> str:
+    def _summarize_market(self, df: pd.DataFrame) -> Dict[str, Any]:
         """
-        创建市场状况的文本摘要
+        创建市场状况的摘要
 
         Args:
             df: 包含K线数据的DataFrame
 
         Returns:
-            人类可读的市场摘要
+            包含市场摘要信息的字典，包括：
+            - summary: 原有的市场摘要文本（保持向后兼容）
+            - trend: 趋势判断（bullish/bearish/neutral）
+            - change_pct: 价格变化百分比
+            - candle_count: K线数量
+            - raw_candles: 可选的原始K线数据（如果启用配置）
         """
+        result = {
+            "summary": "无可用市场数据",
+            "trend": "neutral",
+            "change_pct": 0.0,
+            "candle_count": 0,
+            "raw_candles": None
+        }
+
         if len(df) == 0:
-            return "无可用市场数据"
+            return result
 
         try:
             first_close = float(df.iloc[0]["close"])
@@ -567,15 +712,165 @@ class ContextBuilder:
             # 计算波动率
             volatility = self._calculate_volatility(df)
 
-            return (
+            # 构建摘要文本（保持向后兼容）
+            summary_text = (
                 f"最近 {len(df)} 根K线: {trend} 趋势, "
                 f"{recent_returns:+.2f}% 变化, "
                 f"{volatility:.2f}% 波动率"
             )
 
+            # 更新结果字典
+            result.update({
+                "summary": summary_text,
+                "trend": trend,
+                "change_pct": recent_returns,
+                "candle_count": len(df)
+            })
+
+            # 如果启用了包含原始K线数据，则添加格式化的原始K线数据
+            if self.include_raw_candles_in_summary:
+                result["raw_candles"] = self._format_raw_candles(df, self.lookback_candles)
+
+            return result
+
         except Exception as e:
             logger.warning(f"市场摘要生成失败: {e}")
-            return "市场数据可用但摘要不可用"
+            result["summary"] = "市场数据可用但摘要不可用"
+            return result
+
+    def _add_market_summary_to_context(
+        self,
+        context: Dict[str, Any],
+        recent_data: pd.DataFrame,
+        strategy: Optional[Any] = None,
+        pair: Optional[str] = None
+    ) -> None:
+        """
+        添加市场摘要到上下文字典
+
+        该方法调用 _summarize_market 获取市场数据，并将结果添加到上下文中：
+        - 将市场摘要字符串添加到 "market_summary" 键（保持向后兼容）
+        - 将完整的市场数据字典添加到 "market_data" 键（提供新功能）
+        - 添加信息对的 K 线数据到 "informative_candles" 键（新功能）
+
+        Args:
+            context: 要更新的上下文字典
+            recent_data: 包含市场数据的DataFrame
+            strategy: 策略实例，用于获取信息对数据
+            pair: 交易对，用于获取信息对数据
+        """
+        try:
+            # 获取市场数据
+            market_data = self._summarize_market(recent_data)
+            
+            # 添加市场摘要字符串（保持向后兼容）
+            if "summary" in market_data:
+                context["market_summary"] = market_data["summary"]
+            
+            # 添加完整的市场数据字典（提供新功能）
+            context["market_data"] = market_data
+            
+            # 添加信息对的 K 线数据（新功能）
+            if strategy and pair and hasattr(strategy, 'informative_pairs'):
+                informative_candles = {}
+                
+                # 获取策略定义的信息对
+                informative_pairs = strategy.informative_pairs()
+                
+                for inf_pair, inf_timeframe in informative_pairs:
+                    # 只处理当前交易对的信息对
+                    if inf_pair == pair:
+                        candles = self._get_informative_candles(
+                            strategy, inf_pair, inf_timeframe, self.lookback_candles
+                        )
+                        if candles:
+                            informative_candles[inf_timeframe] = candles
+                
+                # 添加信息对 K 线数据到上下文
+                if informative_candles:
+                    context["informative_candles"] = informative_candles
+            
+        except Exception as e:
+            logger.warning(f"添加市场摘要到上下文失败: {e}")
+            # 提供合理的默认值
+            context["market_summary"] = "市场数据不可用"
+            context["market_data"] = {
+                "summary": "市场数据不可用",
+                "trend": "neutral",
+                "change_pct": 0.0,
+                "candle_count": 0,
+                "raw_candles": None
+            }
+
+    def _format_raw_candles(self, df: pd.DataFrame, limit: int) -> list:
+        """
+        格式化原始K线数据为OHLCV字典列表
+
+        Args:
+            df: 包含K线数据的DataFrame
+            limit: 要包含的K线数量限制
+
+        Returns:
+            格式化后的OHLCV字典列表
+        """
+        candles = []
+        
+        if len(df) == 0:
+            return candles
+            
+        # 获取最近的limit根K线
+        start_idx = max(0, len(df) - limit)
+        
+        try:
+            for i in range(start_idx, len(df)):
+                row = df.iloc[i]
+                candle_data = {
+                    "date": str(row.get("date", "")),
+                    "open": float(row.get("open", 0)),
+                    "high": float(row.get("high", 0)),
+                    "low": float(row.get("low", 0)),
+                    "close": float(row.get("close", 0)),
+                    "volume": float(row.get("volume", 0))
+                }
+                candles.append(candle_data)
+        except Exception as e:
+            logger.warning(f"格式化原始K线数据失败: {e}")
+            # 返回空列表而不是部分数据，以保持一致性
+            return []
+            
+        return candles
+
+    def _get_informative_candles(self, strategy: Any, pair: str, timeframe: str, limit: int) -> list:
+        """
+        获取信息对的原始K线数据
+
+        Args:
+            strategy: 策略实例，用于访问DataProvider
+            pair: 交易对
+            timeframe: 信息对的时间周期
+            limit: 要包含的K线数量限制
+
+        Returns:
+            格式化后的OHLCV字典列表，如果获取失败返回空列表
+        """
+        if not strategy or not hasattr(strategy, 'dp'):
+            logger.warning("策略实例无效或没有DataProvider，无法获取信息对K线数据")
+            return []
+            
+        try:
+            # 获取信息对的DataFrame
+            informative_df = strategy.dp.get_pair_dataframe(pair=pair, timeframe=timeframe)
+            
+            if len(informative_df) == 0:
+                logger.warning(f"信息对 {pair} {timeframe} 没有数据")
+                return []
+                
+            # 使用现有的_format_raw_candles方法格式化数据
+            return self._format_raw_candles(informative_df, limit)
+            
+        except Exception as e:
+            logger.warning(f"获取信息对 {pair} {timeframe} K线数据失败: {e}")
+            return []
 
     def _detect_all_indicators(self, dataframe: pd.DataFrame) -> list:
         """

@@ -111,7 +111,7 @@
             "include_portfolio": true,
             "lookback_candles": 100,
             "include_orderbook": false,
-            "include_recent_trades": false,
+            "include_raw_candles_in_summary": false,
             "include_funding_rate": false,
             "include_portfolio_state": true,
             "include_account_info": true,

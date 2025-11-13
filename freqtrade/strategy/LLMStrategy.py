@@ -112,6 +112,11 @@ class LLMStrategy(BaseStrategyWithSnapshot):
         if len(dataframe) < 1:
             return dataframe
 
+        # 检查该交易对是否已有持仓，如果有则跳过入场分析（节省 LLM 成本）
+        pair = metadata.get("pair", "")
+        if pair and self._has_open_position(pair):
+            return dataframe
+
         # 检查是否有可用资金，如果没有资金则跳过分析（节省 LLM 成本）
         if not self._has_available_funds_for_entry():
             return dataframe
@@ -814,6 +819,33 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             logger.warning(f"检查 {side} 方向资金可用性失败: {e}")
             # 出错时默认允许分析
             return True
+
+    def _has_open_position(self, pair: str) -> bool:
+        """
+        检查指定交易对是否已有持仓
+
+        Args:
+            pair: 交易对
+
+        Returns:
+            如果有持仓则返回 True
+        """
+        try:
+            from freqtrade.persistence import Trade
+
+            # 检查是否有该交易对的开仓交易
+            open_trades = Trade.get_open_trades()
+            has_position = any(t.pair == pair for t in open_trades)
+
+            if has_position:
+                logger.debug(f"⏭️  跳过 {pair} 入场分析：已有持仓")
+
+            return has_position
+
+        except Exception as e:
+            logger.warning(f"检查 {pair} 持仓状态失败: {e}")
+            # 出错时默认不跳过（保守策略）
+            return False
 
     def _get_portfolio_state(self) -> Optional[dict]:
         """

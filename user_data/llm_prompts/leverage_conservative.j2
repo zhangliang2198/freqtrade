@@ -4,7 +4,16 @@
 **核心使命**: 严格控制杠杆风险，**保护本金优先于收益放大**。
 
 ---
+# 市场时间与当前状态
 
+- **当前时间**: {{ current_time or "未知" }}
+- **当前K线**: {{ current_candle or "无数据" }}
+
+# 交易信息
+- **交易对**: {{ pair }}
+- **时间周期**: {{ timeframe }}
+
+---
 # 市场状态
 
 ## 当前行情
@@ -17,18 +26,33 @@
 {% for key, value in main_indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
 {% endfor -%}
-{% endif %}
-{% if informative_timeframes %}
-{% for tf_data in informative_timeframes %}
+{% endif -%}
+{%- if informative_timeframes %}
+{% for tf_data in informative_timeframes -%}
 ## 参考指标 ({{ tf_data.timeframe }})
 {% for key, value in tf_data.indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
-{% endfor -%}
 {% endfor %}
-{% endif %}
+{% endfor -%}
+{% endif -%}
+
+{% if market_data and market_data.raw_candles %}
+## 原始K线数据 {{ timeframe }} (最近{{ market_data.raw_candles|length }}根)
+{% for candle in market_data.raw_candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endif -%}
+
+{%- if informative_candles %}
+{% for tf, candles in informative_candles.items() -%}
+## 信息对K线数据 {{ tf }} (最近{{ candles|length }}根)
+{% for candle in candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endfor -%}
+{% endif -%}
 
 ---
-
 # 资金状况
 
 {% if account_mode_enabled %}
@@ -41,7 +65,6 @@
 {% endif %}
 
 ---
-
 # 持仓组合
 
 - **总计**: {{ positions_total_count }}个 | 盈利{{ positions_in_profit_count }}个 | 亏损{{ positions_at_risk_count }}个
@@ -61,15 +84,14 @@
 {% endif %}
 
 ---
-
 # 杠杆决策框架（保守策略）
 
 **⚠️ 重要提示**:
 - 本系统支持**多空双向交易**，杠杆决策对多头和空头同等重要
 - **保守策略**: **低杠杆或不用杠杆**，保护本金
 
-{% set leverage_min = leverage_limits.min if leverage_limits and leverage_limits.min is not none else 1.0 %}
-{% set leverage_max = leverage_limits.max if leverage_limits and leverage_limits.max is not none else max_leverage %}
+{% set leverage_min = leverage_limits["min"] if leverage_limits and leverage_limits["min"] is not none else 1.0 %}
+{% set leverage_max = leverage_limits["max"] if leverage_limits and leverage_limits["max"] is not none else max_leverage %}
 
 ## 任务
 根据技术信号、市场环境和风险控制确定杠杆倍数（{{ "%.1f"|format(leverage_min) }}x - {{ "%.1f"|format(leverage_max) }}x，保守策略通常停留在区间低端）
@@ -118,18 +140,20 @@
 ✅ 资金使用率充足
 ✅ 清算距离充足
 
-### 仅用最小档（满足任一条件即回落）
+### 仅用最小档（满足任一条件）
 ⚠️ 技术信号中等或偏弱
 ⚠️ 波动率上升
 ⚠️ 资金状况一般
+⚠️ 该交易对已有2个以上持仓
+⚠️ 清算距离不足
 
 ### 禁止杠杆，强制1.0x（满足任一条件）
 🚨 技术信号弱
 🚨 波动率持续飙升
 🚨 资金使用率较高
 🚨 趋势不明或转折
-🚨 该交易对已有2个以上持仓
-🚨 清算距离不足
+🚨 该交易对已有多个持仓
+🚨 清算距离严重不足
 
 ## 常见错误（务必避免）
 ❌ 高波动环境用杠杆（极易清算）
@@ -137,10 +161,9 @@
 ❌ 资金紧张时用杠杆（放大风险）
 ❌ 忽视清算风险
 ❌ 基于历史盈亏调整杠杆（应基于当前信号和风险）
-❌ 震荡市或趋势不明时用杠杆
+❌ 震荡市或趋势不明时用杠杆（易被双边打止损）
 
 ---
-
 # 输出格式
 
 仅返回有效JSON（无其他文字）：

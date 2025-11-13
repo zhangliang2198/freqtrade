@@ -8,13 +8,23 @@
 - ❌ 不负责：仓位调整
 
 ---
+# 市场时间与当前状态
 
+- **当前时间**: {{ current_time or "未知" }}
+- **当前K线**: {{ current_candle or "无数据" }}
+
+# 交易信息
+- **交易对**: {{ pair }}
+- **时间周期**: {{ timeframe }}
+
+---
 # 持仓状态
 
 ## 当前持仓
-- **{{ pair }}** [{{ side|upper }}] | **周期**: {{ timeframe }} | 入场${{ "%.6f"|format(entry_price) }} → 现价${{ "%.6f"|format(current_price) }} | 标签: {{ entry_tag or "无" }}
+- **{{ pair }}** [{{ side|upper }}] | **周期**: {{ timeframe }} | **杠杆**: {{ "%.1f"|format(current_leverage) }}x | 入场${{ "%.6f"|format(entry_price) }} → 现价${{ "%.6f"|format(current_price) }}
+- **入场标签**: {{ entry_tag }}
 - **PnL**: ${{ "%.4f"|format(current_profit_abs) }} (**{{ "%.2f"|format(current_profit_pct) }}%**) | 持有{{ "%.1f"|format(holding_duration_minutes / 60) }}小时
-- **止损**: ${{ "%.6f"|format(stop_loss) }}
+- **止损**: {% if stop_loss is not none %}${{ "%.6f"|format(stop_loss) }}{% else %}未设置{% endif %}
 {% if max_rate -%}
 - **最高价**: ${{ "%.6f"|format(max_rate) }} | **最高PnL**: {{ "%.2f"|format(max_profit_pct) }}% | **回撤**: {{ "%.2f"|format(drawdown_from_high_pct) }}%
 {% endif %}
@@ -32,23 +42,60 @@
 {% for key, value in main_indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
 {% endfor -%}
-{% endif %}
-{% if informative_timeframes %}
-{% for tf_data in informative_timeframes %}
+{% endif -%}
+{%- if informative_timeframes %}
+{% for tf_data in informative_timeframes -%}
 ## 参考指标 ({{ tf_data.timeframe }})
 {% for key, value in tf_data.indicators.items() -%}
 - **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
-{% endfor -%}
 {% endfor %}
+{% endfor -%}
+{% endif -%}
+
+{% if market_data and market_data.raw_candles %}
+## 原始K线数据 {{ timeframe }} (最近{{ market_data.raw_candles|length }}根)
+{% for candle in market_data.raw_candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endif -%}
+
+{%- if informative_candles %}
+{% for tf, candles in informative_candles.items() -%}
+## 信息对K线数据 {{ tf }} (最近{{ candles|length }}根)
+{% for candle in candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endfor -%}
+{% endif -%}
+
+---
+# 账户与钱包信息
+
+{% if account_mode_enabled %}
+## 账户分离模式
+- **多头账户**: 可用${{ "%.2f"|format(account_long_available) }} | 总计${{ "%.2f"|format(account_long_total or 0) }}
+- **空头账户**: 可用${{ "%.2f"|format(account_short_available) }} | 总计${{ "%.2f"|format(account_short_total or 0) }}
+- **账户总价值**: ${{ "%.2f"|format((account_long_total or 0) + (account_short_total or 0)) }}
+{% else %}
+## 统一钱包模式
+- **可用余额**: ${{ "%.2f"|format(wallet_free_balance) }}
+- **总余额**: ${{ "%.2f"|format(wallet_total_balance) }}
+- **已用余额**: ${{ "%.2f"|format(wallet_used_balance or 0) }}
+{% if wallet_starting_balance %}
+- **起始余额**: ${{ "%.2f"|format(wallet_starting_balance) }}
+- **总收益率**: {{ "%.2f"|format((wallet_total_balance - wallet_starting_balance) / wallet_starting_balance * 100 if wallet_starting_balance > 0 else 0) }}%
+{% endif %}
 {% endif %}
 
 ---
-
 # 组合状况
 
 ## 整体持仓
 - **总计**: {{ positions_total_count }}个 | 盈利{{ positions_in_profit_count }}个 | 亏损{{ positions_at_risk_count }}个
 - **多头PnL**: {{ "%.2f"|format(positions_long_profit_pct) }}% | **空头PnL**: {{ "%.2f"|format(positions_short_profit_pct) }}%
+- **多头持仓**: {{ positions_long_count }}个 | 价值${{ "%.2f"|format(positions_long_stake_total) }}
+- **空头持仓**: {{ positions_short_count }}个 | 价值${{ "%.2f"|format(positions_short_stake_total) }}
+- **整体盈亏**: ${{ "%.2f"|format(positions_long_stake_total * positions_long_profit_pct / 100 + positions_short_stake_total * positions_short_profit_pct / 100) }}
 
 {% if current_pair_positions|length > 1 %}
 ## {{ pair }} 其他持仓
@@ -57,18 +104,11 @@
 {% endfor %}
 {% endif %}
 
-{% if account_mode_enabled %}
-**可用资金**: 多头${{ "%.2f"|format(account_long_available) }} | 空头${{ "%.2f"|format(account_short_available) }}
-{% else %}
-**钱包可用**: ${{ "%.2f"|format(wallet_free_balance) }}
-{% endif %}
-
 {% if closed_trades_total > 0 %}
 **历史参考**: {{ closed_trades_total }}笔 | 平均${{ "%.2f"|format(closed_total_profit / closed_trades_total) }}/笔
 {% endif %}
 
 ---
-
 # 决策框架（激进策略）
 
 ## 可选动作
@@ -98,6 +138,8 @@
 - 接近预设止损位 → **快速止损**
 - 亏损较大 → **评估技术面，无支撑立即止损**（根据亏损幅度自主判断）
 - **核心**: 亏损时不犹豫，技术破位立即出场
+- **杠杆考量**: 高杠杆时需要更早止损，避免放大亏损
+- **杠杆考量**: 高杠杆时需要更早止损，避免放大亏损
 
 **优先级4: 动态止盈**
 - 盈利达到较高水平 + 遇到强技术阻力/支撑 → 考虑部分或全部止盈（根据盈利幅度自主判断）
@@ -136,7 +178,6 @@
 ❌ 被单一指标误导（需2个以上确认）
 
 ---
-
 # 输出格式
 
 仅返回有效JSON（无其他文字）：

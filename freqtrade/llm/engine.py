@@ -119,10 +119,7 @@ class LLMDecisionEngine:
         user_data_dir = config.get("user_data_dir", "user_data")
         self.prompt_manager = PromptManager(self.config, user_data_dir)
 
-        self.context_builder = ContextBuilder(
-            self.config.get("context", {}),
-            self.config.get("decision_points", {})
-        )
+        self.context_builder = ContextBuilder(self.config)
 
         self.stats = {
             "total_calls": 0,

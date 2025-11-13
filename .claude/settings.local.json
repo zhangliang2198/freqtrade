@@ -5,7 +5,10 @@
       "Bash(timeout 3 python:*)",
       "Bash(python temp_fix_prompts.py:*)",
       "Bash(python -m py_compile:*)",
-      "Bash(timeout 10 python:*)"
+      "Bash(timeout 10 python:*)",
+      "Bash(find:*)",
+      "Bash(for file in \"C:\\Users\\zhang\\GitHub\\freqtrade\\user_data\\llm_prompts\"/*.j2)",
+      "Bash(done)"
     ],
     "deny": [],
     "ask": []
