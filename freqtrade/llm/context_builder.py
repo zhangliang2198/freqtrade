@@ -8,10 +8,14 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 import pandas as pd
 import logging
+import re
 
 from freqtrade.util import dt_now
 
 logger = logging.getLogger(__name__)
+
+# 预编译时间周期正则表达式
+TIMEFRAME_PATTERN = re.compile(r'^(.+)_(\d+[mhdw])$')
 
 
 class ContextBuilder:
@@ -47,6 +51,9 @@ class ContextBuilder:
         self.include_wallet_info = config.get("include_wallet_info", True)
         self.include_positions_info = config.get("include_positions_info", True)
         self.include_closed_trades_info = config.get("include_closed_trades_info", True)
+
+        # 新增：调仓历史记录条数限制
+        self.adjustment_history_limit = config.get("adjustment_history_limit", 5)
 
     def build_entry_context(
         self,
@@ -123,6 +130,8 @@ class ContextBuilder:
             if self.include_closed_trades_info:
                 context.update(self._extract_closed_trades_info(strategy))
 
+        # 清除缓存，下次调用重新获取
+        self._clear_trades_cache()
         return context
 
     def build_exit_context(
@@ -217,6 +226,14 @@ class ContextBuilder:
         if adjustment_ratio_limit is not None:
             context["adjustment_ratio_limit"] = adjustment_ratio_limit
 
+        # 添加调仓历史
+        adjustment_history = self._extract_adjustment_history(
+            trade,
+            limit=self.adjustment_history_limit
+        )
+        if adjustment_history:
+            context["adjustment_history"] = adjustment_history
+
         return context
 
     def build_stake_context(
@@ -308,6 +325,8 @@ class ContextBuilder:
             if self.include_closed_trades_info:
                 context.update(self._extract_closed_trades_info(strategy))
 
+        # 清除缓存，下次调用重新获取
+        self._clear_trades_cache()
         return context
 
     def build_adjust_position_context(
@@ -414,6 +433,15 @@ class ContextBuilder:
         if adjustment_ratio_limit is not None:
             context["adjustment_ratio_limit"] = adjustment_ratio_limit
 
+        # 添加调仓历史
+        adjustment_history = self._extract_adjustment_history(
+            trade,
+            limit=self.adjustment_history_limit
+        )
+        if adjustment_history:
+            context["adjustment_history"] = adjustment_history
+
+        self._clear_trades_cache()
         return context
 
     def build_leverage_context(
@@ -488,6 +516,8 @@ class ContextBuilder:
             if self.include_closed_trades_info:
                 context.update(self._extract_closed_trades_info(strategy))
 
+        # 清除缓存，下次调用重新获取
+        self._clear_trades_cache()
         return context
 
     def _format_candle(self, row: pd.Series) -> Dict[str, float]:
@@ -651,17 +681,15 @@ class ContextBuilder:
         else:
             return {}
 
-        # 自动检测所有可能的时间周期后缀
+        # 自动检测所有可能的时间周期后缀（使用预编译正则，O(n)复杂度）
         # 常见的 timeframe 后缀：_1m, _5m, _15m, _30m, _1h, _4h, _8h, _1d 等
         timeframe_suffixes = set()
         for indicator_name in all_indicator_names:
-            # 提取可能的时间周期后缀
-            parts = indicator_name.split('_')
-            if len(parts) >= 2:
-                possible_tf = parts[-1]
-                # 检查是否是时间周期格式（如 1m, 5m, 1h, 4h, 1d 等）
-                if possible_tf and (possible_tf[-1] in ['m', 'h', 'd', 'w'] and possible_tf[:-1].isdigit()):
-                    timeframe_suffixes.add(f"_{possible_tf}")
+            # 使用预编译正则表达式快速匹配
+            match = TIMEFRAME_PATTERN.match(indicator_name)
+            if match:
+                timeframe = match.group(2)  # 提取时间周期部分 (如 "5m", "1h")
+                timeframe_suffixes.add(f"_{timeframe}")
 
         # 分离主周期和多个信息周期的指标
         main_indicators = {}
@@ -1016,6 +1044,32 @@ class ContextBuilder:
 
     # ========== 新增：细粒度信息提取方法 ==========
 
+    def _get_cached_trades(self, strategy: Any) -> tuple:
+        """
+        获取并缓存交易数据，避免重复查询数据库
+
+        Args:
+            strategy: 策略实例
+
+        Returns:
+            (open_trades, closed_trades) 元组
+        """
+        from freqtrade.persistence import Trade
+
+        # 使用策略对象作为缓存键（每次 context build 调用都是新的）
+        cache_key = '_trades_cache'
+        if not hasattr(self, cache_key):
+            open_trades = Trade.get_trades_proxy(is_open=True)
+            closed_trades = Trade.get_trades_proxy(is_open=False)
+            setattr(self, cache_key, (open_trades, closed_trades))
+            logger.debug(f"缓存交易数据: {len(open_trades)} 个持仓, {len(closed_trades)} 个已平仓")
+        return getattr(self, cache_key)
+
+    def _clear_trades_cache(self):
+        """清除交易缓存"""
+        if hasattr(self, '_trades_cache'):
+            delattr(self, '_trades_cache')
+
     def _extract_account_info(self, strategy: Any) -> Dict[str, Any]:
         """
         提取账户分离信息
@@ -1131,8 +1185,6 @@ class ContextBuilder:
         Returns:
             持仓信息字典
         """
-        from freqtrade.persistence import Trade
-
         positions_info = {
             "positions_total_count": 0,
             "positions_long_count": 0,
@@ -1152,8 +1204,8 @@ class ContextBuilder:
         }
 
         try:
-            # 获取所有持仓
-            open_trades = Trade.get_trades_proxy(is_open=True)
+            # 获取所有持仓（使用缓存）
+            open_trades, _ = self._get_cached_trades(strategy)
 
             long_stake = 0.0
             short_stake = 0.0
@@ -1166,7 +1218,8 @@ class ContextBuilder:
 
             for trade in open_trades:
                 is_long = not trade.is_short
-                stake = float(trade.stake_amount)
+                # 使用 max_stake_amount 包含所有加仓金额
+                stake = float(trade.max_stake_amount) if hasattr(trade, 'max_stake_amount') else float(trade.stake_amount)
 
                 # 计算浮动盈亏
                 try:
@@ -1175,9 +1228,11 @@ class ContextBuilder:
                         profit_ratio = trade.calc_profit_ratio(current_rate)
                         profit_abs = trade.calc_profit(current_rate)
                     else:
+                        logger.debug(f"无法获取 {trade.pair} 的当前价格，使用 0 作为盈亏")
                         profit_ratio = 0.0
                         profit_abs = 0.0
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"计算 {trade.pair} 盈亏失败: {e}")
                     profit_ratio = 0.0
                     profit_abs = 0.0
 
@@ -1254,8 +1309,6 @@ class ContextBuilder:
         Returns:
             已平仓交易信息字典
         """
-        from freqtrade.persistence import Trade
-
         closed_info = {
             "closed_trades_total": 0,
             "closed_long_count": 0,
@@ -1266,7 +1319,8 @@ class ContextBuilder:
         }
 
         try:
-            closed_trades = Trade.get_trades_proxy(is_open=False)
+            # 获取已平仓交易（使用缓存）
+            _, closed_trades = self._get_cached_trades(strategy)
             closed_info["closed_trades_total"] = len(closed_trades)
 
             long_profit = 0.0
@@ -1313,3 +1367,97 @@ class ContextBuilder:
             logger.debug(f"获取 {pair} 当前价格失败: {e}")
 
         return None
+
+    def _extract_adjustment_history(self, trade: Any, limit: int = 5) -> list[Dict[str, Any]]:
+        """
+        提取持仓的调仓历史记录
+
+        Args:
+            trade: 交易对象
+            limit: 返回最近的N条记录（默认5条）
+
+        Returns:
+            调仓历史列表，每条记录包含：时间、方向、金额、价格等
+        """
+        history = []
+
+        try:
+            if not hasattr(trade, 'orders') or not trade.orders:
+                return history
+
+            # 过滤出已成交的订单，并按时间排序
+            filled_orders = [
+                order for order in trade.orders
+                if order.status in ['closed', 'filled'] and order.filled and order.filled > 0
+            ]
+
+            # 按订单时间排序（最新的在前）
+            filled_orders.sort(
+                key=lambda x: x.order_filled_utc or x.order_date_utc,
+                reverse=True
+            )
+
+            # 获取最近的N条订单
+            recent_orders = filled_orders[:limit]
+
+            for order in recent_orders:
+                # 更精确地判断订单类型
+                order_side = order.ft_order_side if hasattr(order, 'ft_order_side') and order.ft_order_side else order.side
+                if not order_side:
+                    order_side = "unknown"
+
+                # 区分入场、加仓、减仓、平仓、止损
+                # ft_order_side 可能的值: buy, sell, stoploss
+                # 对于多头: buy=入场/加仓, sell=平仓/减仓
+                # 对于空头: sell=入场/加仓, buy=平仓/减仓
+                is_long_trade = not trade.is_short
+
+                if order_side == "stoploss":
+                    action_type = "stoploss"
+                    is_entry = False
+                elif is_long_trade:
+                    # 多头持仓
+                    if order_side == "buy":
+                        action_type = "buy_long"  # 入场或加仓
+                        is_entry = True
+                    else:  # sell
+                        action_type = "sell_long"  # 平仓或减仓
+                        is_entry = False
+                else:
+                    # 空头持仓
+                    if order_side == "sell":
+                        action_type = "sell_short"  # 入场或加仓
+                        is_entry = True
+                    else:  # buy
+                        action_type = "buy_short"  # 平仓或减仓
+                        is_entry = False
+
+                # 计算订单的投入金额（stake amount）
+                stake_amount = order.stake_amount_filled if hasattr(order, 'stake_amount_filled') else 0.0
+
+                # 构建调仓记录 - 使用带时区的时间戳
+                adjustment_time = order.order_filled_utc or order.order_date_utc
+                if adjustment_time:
+                    minutes_ago = (dt_now() - adjustment_time).total_seconds() / 60
+                else:
+                    minutes_ago = 0
+
+                record = {
+                    "time": str(adjustment_time) if adjustment_time else "未知",
+                    "minutes_ago": float(minutes_ago),
+                    "action": action_type,  # buy_long/sell_long/sell_short/buy_short/stoploss
+                    "is_entry": is_entry,  # True=入场/加仓, False=平仓/减仓/止损
+                    "price": float(order.safe_price),
+                    "amount": float(order.safe_filled),
+                    "stake_amount": float(stake_amount),
+                    "order_type": order.order_type or "unknown",
+                    "order_id": order.order_id,
+                    "status": order.status,
+                }
+
+                history.append(record)
+
+        except Exception as e:
+            logger.warning(f"提取调仓历史失败: {e}")
+
+        return history

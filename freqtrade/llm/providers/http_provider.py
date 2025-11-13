@@ -224,8 +224,8 @@ class HttpLLMProvider(LLMProvider):
         content_path = self.response_path["content_path"]
         
         # 添加详细的响应提取日志
-        logger.info(f"[DEBUG] 提取响应内容，路径: {content_path}")
-        logger.info(f"[DEBUG] 完整响应数据: {json.dumps(response_data, indent=2, ensure_ascii=False)}")
+        # logger.info(f"[DEBUG] 提取响应内容，路径: {content_path}")
+        # logger.info(f"[DEBUG] 完整响应数据: {json.dumps(response_data, indent=2, ensure_ascii=False)}")
 
         try:
             # 使用点号表示法导航到内容

@@ -108,7 +108,18 @@
         "context": {
             "max_candles": 100,
             "include_indicators": true,
-            "include_portfolio": true
+            "include_portfolio": true,
+            "lookback_candles": 100,
+            "include_orderbook": false,
+            "include_recent_trades": false,
+            "include_funding_rate": false,
+            "include_portfolio_state": true,
+            "include_account_info": true,
+            "include_wallet_info": true,
+            "include_positions_info": true,
+            "include_closed_trades_info": true,
+            "_comment_adjustment_history": "调仓历史记录条数，显示最近N次的加仓/减仓操作",
+            "adjustment_history_limit": 5
         }
     }
 }

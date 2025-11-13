@@ -526,27 +526,48 @@ class BaseStrategyWithSnapshot(IStrategy):
             used_balance = 0.0
             for trade in open_trades:
                 trade_is_long = not trade.is_short
+                # 使用 max_stake_amount 以包含所有加仓金额
+                stake = float(trade.max_stake_amount) if hasattr(trade, 'max_stake_amount') else float(trade.stake_amount)
                 if side == "long" and trade_is_long:
-                    used_balance += float(trade.stake_amount)
+                    used_balance += stake
                 elif side == "short" and trade.is_short:
-                    used_balance += float(trade.stake_amount)
+                    used_balance += stake
 
-            # 计算已平仓的盈亏
+            # 计算已平仓的盈亏（分离盈利和亏损以便记录）
             closed_trades = Trade.get_trades_proxy(is_open=False)
-            closed_profit = 0.0
+            closed_profit = 0.0  # 总盈亏（可能为负）
+            closed_wins = 0.0    # 纯盈利部分
+            closed_losses = 0.0  # 纯亏损部分
             for trade in closed_trades:
                 trade_is_long = not trade.is_short
                 profit = float(trade.realized_profit or 0.0)
                 if side == "long" and trade_is_long:
                     closed_profit += profit
+                    if profit > 0:
+                        closed_wins += profit
+                    else:
+                        closed_losses += profit  # 负数
                 elif side == "short" and trade.is_short:
                     closed_profit += profit
+                    if profit > 0:
+                        closed_wins += profit
+                    else:
+                        closed_losses += profit  # 负数
 
             # 该账户的初始资金
             initial_balance = self.long_initial_balance if side == "long" else self.short_initial_balance
 
             # 可用余额 = 初始资金 + 已平仓盈亏 - 当前使用资金
             available = initial_balance + closed_profit - used_balance
+
+            # 如果可用余额为负数，记录警告（但不阻止，让框架自己处理）
+            if available < 0:
+                logger.warning(
+                    f"⚠️ {side.upper()} 账户可用余额为负: {available:.2f} USDT "
+                    f"(初始: {initial_balance:.2f}, 已平仓盈亏: {closed_profit:.2f} "
+                    f"[盈利: {closed_wins:.2f}, 亏损: {closed_losses:.2f}], "
+                    f"持仓占用: {used_balance:.2f})"
+                )
 
             return max(0.0, available)
 

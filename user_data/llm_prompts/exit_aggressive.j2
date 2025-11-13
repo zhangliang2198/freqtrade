@@ -19,6 +19,14 @@
 - **最高价**: ${{ "%.6f"|format(max_rate) }} | **最高PnL**: {{ "%.2f"|format(max_profit_pct) }}% | **回撤**: {{ "%.2f"|format(drawdown_from_high_pct) }}%
 {% endif %}
 
+{% if adjustment_history %}
+## 近期调仓记录
+{% for record in adjustment_history %}
+**{{ loop.index }}.** {{ "%.0f"|format(record.minutes_ago) }}分钟前 | **{{ record.action|upper }}** @ ${{ "%.6f"|format(record.price) }} | 投入${{ "%.2f"|format(record.stake_amount) }} | {{ record.order_type }}
+{% endfor %}
+**分析提示**: 该持仓经过{{ adjustment_history|length }}次调整。评估调仓策略是否有效，以及当前是否需要止盈/止损。
+{% endif %}
+
 {% if main_indicators %}
 ## 技术指标 ({{ main_timeframe }})
 {% for key, value in main_indicators.items() -%}

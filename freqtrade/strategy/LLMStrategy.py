@@ -268,8 +268,10 @@ class LLMStrategy(BaseStrategyWithSnapshot):
 
         # 检查对应方向是否有可用资金，如果没有则跳过 LLM 分析（节省成本）
         if not self._has_available_funds_for_side(side):
-            logger.debug(f"⏭️  跳过 {pair} {side.upper()} 的 stake 分析：{side.upper()} 账户资金不足")
-            return 0.0
+            logger.info(f"⏭️  跳过 {pair} {side.upper()} 的 stake 分析：{side.upper()} 账户资金不足")
+            # 返回 proposed_stake 让 Freqtrade 框架自己处理资金不足的情况
+            # 如果确实没钱，Freqtrade 会拒绝开仓；如果有钱但低于阈值，仍然可以开仓
+            return proposed_stake
 
         try:
             # 先获取账户的实际可用余额（考虑账户分离模式）
@@ -615,7 +617,8 @@ class LLMStrategy(BaseStrategyWithSnapshot):
 
         # 检查对应方向是否有可用资金，如果没有则跳过 LLM 分析（节省成本）
         if not self._has_available_funds_for_side(side):
-            logger.debug(f"⏭️  跳过 {pair} {side.upper()} 的 leverage 分析：{side.upper()} 账户资金不足")
+            logger.info(f"⏭️  跳过 {pair} {side.upper()} 的 leverage 分析：{side.upper()} 账户资金不足")
+            # 返回默认杠杆，让 Freqtrade 框架处理
             return proposed_leverage
 
         try:

@@ -6,7 +6,6 @@
       ".*UP.*",
       ".*BEAR.*",
       ".*BULL.*",
-      "BNB/USDT:USDT",
       "USDC/USDT:USDT",
       "USDT/USDC:USDT",
       "BUSD/USDT:USDT",
@@ -25,12 +24,11 @@
     "enabled": true,
     "long_blacklist": [
       ".*DOWN.*",
-      ".*BEAR.*",
-      "DOGE/USDT:USDT"
+      ".*BEAR.*"
     ],
     "short_blacklist": [
-      "BTC/USDT:USDT",
-      "ETH/USDT:USDT"
+      ".*UP.*",
+      ".*BULL.*"
     ],
     "common_blacklist": [
 

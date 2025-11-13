@@ -1,9 +1,3 @@
-"""
-LLM 决策引擎
-
-用于管理基于 LLM 的交易决策的核心引擎，
-"""
-
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Literal, List
 from datetime import datetime
@@ -12,7 +6,7 @@ import json
 import hashlib
 import logging
 import re
-            # 通用 HTTP 提供商（推荐）
+from collections import OrderedDict
 from freqtrade.llm.providers import HttpLLMProvider
 from freqtrade.llm.context_builder import ContextBuilder
 from freqtrade.llm.prompts.manager import PromptManager
@@ -20,7 +14,6 @@ from freqtrade.util import dt_now
 
 logger = logging.getLogger(__name__)
 
-# 预编译正则（对齐 JSON 提取逻辑）
 JSON_FENCE_RE = re.compile(r"```json\s*(?P<json>(?:.|\s)+?)```", re.IGNORECASE)
 JSON_ARRAY_RE = re.compile(r"\[\s*\{.*?\}\s*\]", re.DOTALL | re.IGNORECASE)
 INVISIBLE_RUNE_RE = re.compile(r"[\u200B\u200C\u200D\uFEFF]")
@@ -48,9 +41,42 @@ FULLWIDTH_TRANSLATION = str.maketrans({
 DecisionPoint = Literal["entry", "exit", "stake", "adjust_position", "leverage"]
 
 
+class TTLCache:
+    """带 TTL 和 LRU 功能的缓存"""
+
+    def __init__(self, max_size: int = 1000):
+        self.max_size = max_size
+        self.cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+
+    def get(self, key: str, ttl: float) -> Optional[Any]:
+        if key not in self.cache:
+            return None
+
+        value, timestamp = self.cache[key]
+        age = time.time() - timestamp
+
+        if age >= ttl:
+            del self.cache[key]
+            return None
+
+        self.cache.move_to_end(key)
+        return value
+
+    def set(self, key: str, value: Any):
+        if key in self.cache:
+            del self.cache[key]
+
+        self.cache[key] = (value, time.time())
+
+        while len(self.cache) > self.max_size:
+            self.cache.popitem(last=False)
+
+    def clear(self):
+        self.cache.clear()
+
+
 @dataclass
 class LLMRequest:
-    """LLM 请求数据结构"""
     decision_point: DecisionPoint
     pair: str
     context: Dict[str, Any]
@@ -59,13 +85,11 @@ class LLMRequest:
 
 @dataclass
 class LLMResponse:
-    """LLM 响应数据结构"""
     decision: str
     confidence: float
     reasoning: str
     parameters: Dict[str, Any]
 
-    # 元数据
     latency_ms: int
     tokens_used: Optional[int]
     prompt_tokens: Optional[int]
@@ -77,21 +101,7 @@ class LLMResponse:
 
 
 class LLMDecisionEngine:
-    """
-    LLM 决策引擎
-
-    协调用于交易决策的 LLM 调用，管理缓存，
-    并将结果记录到数据库。
-    """
-
     def __init__(self, config: Dict[str, Any], strategy_name: str):
-        """
-        初始化 LLM 决策引擎
-
-        Args:
-            config: 完整的 Freqtrade 配置
-            strategy_name: 使用此引擎的策略名称
-        """
         self.config = config.get("llm_config", {})
         self.strategy_name = strategy_name
 
@@ -99,25 +109,21 @@ class LLMDecisionEngine:
             logger.debug("LLM 配置已禁用")
             return
 
-        # 初始化提供商
         self.provider = self._init_provider()
 
-        # 初始化缓存（目前使用简单字典，可以升级到 TTLCache）
-        self.caches: Dict[DecisionPoint, Dict[str, tuple[LLMResponse, float]]] = {}
+        cache_max_size = self.config.get("performance", {}).get("cache_max_size", 1000)
+        self.caches: Dict[DecisionPoint, TTLCache] = {}
         for point in ["entry", "exit", "stake", "adjust_position", "leverage"]:
-            self.caches[point] = {}
+            self.caches[point] = TTLCache(max_size=cache_max_size)
 
-        # 初始化提示词管理器
         user_data_dir = config.get("user_data_dir", "user_data")
         self.prompt_manager = PromptManager(self.config, user_data_dir)
 
-        # 初始化上下文构建器
         self.context_builder = ContextBuilder(
             self.config.get("context", {}),
             self.config.get("decision_points", {})
         )
 
-        # 统计信息
         self.stats = {
             "total_calls": 0,
             "cache_hits": 0,
@@ -133,18 +139,6 @@ class LLMDecisionEngine:
         )
 
     def decide(self, request: LLMRequest) -> LLMResponse:
-        """
-        执行 LLM 决策
-
-        Args:
-            request: 包含决策点和上下文的 LLM 请求
-
-        Returns:
-            包含决策和元数据的 LLM 响应
-
-        Raises:
-            Exception: 如果 LLM 调用失败且没有可用的回退选项
-        """
         # 检查此决策点是否已启用
         point_config = self.config.get("decision_points", {}).get(request.decision_point, {})
         if not point_config or not point_config.get("enabled", True):
@@ -285,26 +279,18 @@ class LLMDecisionEngine:
         cache_key: str,
         ttl: int
     ) -> Optional[LLMResponse]:
-        """检查缓存响应是否存在且仍然有效"""
-        cache = self.caches.get(decision_point, {})
+        """检查缓存响应是否存在且仍然有效（使用 TTLCache）"""
+        cache = self.caches.get(decision_point)
+        if not cache:
+            return None
 
-        if cache_key in cache:
-            response, timestamp = cache[cache_key]
-            age = time.time() - timestamp
-
-            if age < ttl:
-                return response
-            else:
-                # 已过期，从缓存中移除
-                del cache[cache_key]
-
-        return None
+        return cache.get(cache_key, ttl)
 
     def _cache_response(self, decision_point: str, cache_key: str, response: LLMResponse):
-        """缓存带有时间戳的响应"""
-        cache = self.caches.get(decision_point, {})
-        cache[cache_key] = (response, time.time())
-        self.caches[decision_point] = cache
+        """缓存响应（使用 TTLCache）"""
+        cache = self.caches.get(decision_point)
+        if cache:
+            cache.set(cache_key, response)
 
     def _parse_response(
         self,
@@ -312,20 +298,6 @@ class LLMDecisionEngine:
         decision_point: str,
         latency_ms: int
     ) -> LLMResponse:
-        """
-        将 LLM 原始响应解析为结构化格式
-
-        Args:
-            raw_response: 来自 LLM 的原始 JSON 字符串
-            decision_point: 决策点名称
-            latency_ms: 请求延迟（毫秒）
-
-        Returns:
-            解析后的 LLMResponse
-
-        Raises:
-            ValueError: 如果响应无法解析
-        """
         logger.debug("原始响应 decision_point=%s payload=%s", decision_point, raw_response)
 
         cleaned_text = self._clean_response_text(raw_response)
@@ -381,17 +353,6 @@ class LLMDecisionEngine:
         )
 
     def _validate_response(self, response: LLMResponse, config: Dict, decision_point: str = None) -> bool:
-        """
-        验证响应是否满足要求
-
-        Args:
-            response: LLM 响应
-            config: 决策点配置
-            decision_point: 决策点名称（用于判断是否需要置信度检查）
-
-        Returns:
-            如果响应有效则返回 True
-        """
         # 检查决策是否为空
         if not response.decision:
             logger.debug("决策为空，验证失败")
@@ -432,14 +393,6 @@ class LLMDecisionEngine:
         return text
 
     def _load_decision_payload(self, text: str) -> Dict[str, Any]:
-        """
-        尝试从原始 LLM 输出中解析出决策字典
-
-        兼容以下格式:
-        1. 直接返回 JSON 对象
-        2. 带有 ```json ``` 代码块
-        3. 先输出思维链，再附带 JSON 对象/数组
-        """
         direct = self._safe_json_load(text)
         if direct is not None:
             return self._ensure_dict_payload(direct)
@@ -535,15 +488,6 @@ class LLMDecisionEngine:
         return -1
 
     def _default_response(self, decision_point: DecisionPoint) -> LLMResponse:
-        """
-        当 LLM 不可用时返回默认响应
-
-        Args:
-            decision_point: 决策点名称
-
-        Returns:
-            默认的 LLMResponse
-        """
         defaults = {
             "entry": "hold",
             "exit": "hold",
@@ -576,59 +520,46 @@ class LLMDecisionEngine:
         success: bool,
         error: Optional[str] = None
     ):
-        """
-        将决策记录到数据库
+        from freqtrade.persistence.llm_models import LLMDecision
+        from freqtrade.persistence import Trade
 
-        Args:
-            request: LLM 请求
-            response: LLM 响应（失败时为 None）
-            prompt: 发送到 LLM 的提示词
-            raw_response: 来自 LLM 的原始响应
-            success: 调用是否成功
-            error: 失败时的错误消息
-        """
+        perf_config = self.config.get("performance", {})
+
+        decision_log = LLMDecision(
+            trade_id=request.trade_id,
+            pair=request.pair,
+            strategy=self.strategy_name,
+            decision_point=request.decision_point,
+            provider=self.config["provider"],
+            model=self.config["model"],
+            prompt=prompt if perf_config.get("log_prompts", False) else None,
+            response=raw_response if perf_config.get("log_responses", True) else None,
+            decision=response.decision if response else "error",
+            confidence=response.confidence if response else None,
+            reasoning=response.reasoning if response else None,
+            parameters=json.dumps(response.parameters) if response else None,
+            latency_ms=response.latency_ms if response else 0,
+            tokens_used=response.tokens_used if response else None,
+            prompt_tokens=response.prompt_tokens if response else None,
+            completion_tokens=response.completion_tokens if response else None,
+            prompt_cache_hit_tokens=response.prompt_cache_hit_tokens if response else None,
+            prompt_cache_miss_tokens=response.prompt_cache_miss_tokens if response else None,
+            cost_usd=response.cost_usd if response else None,
+            success=success,
+            error_message=error,
+            created_at=dt_now()
+        )
+
         try:
-            from freqtrade.persistence.llm_models import LLMDecision
-            from freqtrade.persistence import Trade
-
-            perf_config = self.config.get("performance", {})
-
-            decision_log = LLMDecision(
-                trade_id=request.trade_id,
-                pair=request.pair,
-                strategy=self.strategy_name,
-                decision_point=request.decision_point,
-                provider=self.config["provider"],
-                model=self.config["model"],
-                prompt=prompt if perf_config.get("log_prompts", False) else None,
-                response=raw_response if perf_config.get("log_responses", True) else None,
-                decision=response.decision if response else "error",
-                confidence=response.confidence if response else None,
-                reasoning=response.reasoning if response else None,
-                parameters=json.dumps(response.parameters) if response else None,
-                latency_ms=response.latency_ms if response else 0,
-                tokens_used=response.tokens_used if response else None,
-                prompt_tokens=response.prompt_tokens if response else None,
-                completion_tokens=response.completion_tokens if response else None,
-                prompt_cache_hit_tokens=response.prompt_cache_hit_tokens if response else None,
-                prompt_cache_miss_tokens=response.prompt_cache_miss_tokens if response else None,
-                cost_usd=response.cost_usd if response else None,
-                success=success,
-                error_message=error,
-                created_at=dt_now()
-            )
-
             Trade.session.add(decision_log)
             Trade.commit()
-
         except Exception as e:
             logger.error(f"记录决策到数据库失败: {e}")
-        finally:
             try:
-                Trade.session.remove()
+                Trade.session.rollback()
             except Exception:
-                # 忽略remove时的异常，避免掩盖原始错误
-                pass
+                pass  # 忽略回滚异常
+
 
     def get_stats(self) -> Dict[str, Any]:
         """获取引擎统计信息"""
