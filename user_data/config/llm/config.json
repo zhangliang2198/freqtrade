@@ -9,8 +9,8 @@
         "./thread.json",
         "./log.json",
         "./accounts.json",
-        "./llm_deepseek.json",
-        "./exporter_metrics.json",
+        "./private.deepseek.json",
+        "./exporter_metrics_llm.json",
         "./private.llm.json"
     ]
 }

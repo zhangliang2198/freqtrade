@@ -1,5 +1,5 @@
 # Freqtrade rules
-config*.json
+private*.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
@@ -11,6 +11,7 @@ user_data/*
 !user_data/models
 !user_data/freqaimodels
 !user_data/*.json
+!user_data/config/
 user_data/freqaimodels/*
 user_data/models/*
 user_data/notebooks/*
@@ -122,4 +123,3 @@ docker-compose-*.yml
 private.*
 Theshortgod.py
 Theshortgod.json
-llm_deepseek.json

@@ -496,6 +496,9 @@ class ContextBuilder:
         current_leverage = float(trade.leverage) if hasattr(trade, 'leverage') and trade.leverage else 1.0
         _, max_leverage = self._get_leverage_info(strategy)
 
+        # 计算仓位大小相关信息
+        position_size_info = self._calculate_position_size_info(trade, strategy)
+
         context = {
             "pair": trade.pair,
             "timeframe": timeframe,
@@ -516,6 +519,8 @@ class ContextBuilder:
             # 添加杠杆信息
             "current_leverage": current_leverage,
             "max_leverage": max_leverage,
+            # 添加仓位大小信息
+            **position_size_info,
         }
         
         # 使用新的辅助方法添加市场摘要
@@ -1662,6 +1667,79 @@ class ContextBuilder:
             logger.debug(f"获取 {pair} 当前价格失败: {e}")
 
         return None
+
+    def _calculate_position_size_info(self, trade: Any, strategy: Optional[Any]) -> Dict[str, Any]:
+        """
+        计算仓位大小相关信息，用于调仓决策
+
+        只提供客观数据，不做主观判断（如大/小），让AI自己分析
+
+        Args:
+            trade: 交易对象
+            strategy: 策略实例
+
+        Returns:
+            仓位大小信息字典（纯客观数据）
+        """
+        position_info = {
+            "total_stake_amount": 0.0,
+            "position_percent_of_account": 0.0,
+            "account_total_balance": 0.0,
+            "min_stake_per_trade": 0.0,
+        }
+
+        try:
+            # 使用 max_stake_amount（包含所有加仓）而不是 stake_amount（只是首次入场）
+            total_stake = float(trade.max_stake_amount) if hasattr(trade, 'max_stake_amount') else float(trade.stake_amount)
+            position_info["total_stake_amount"] = total_stake
+
+            # 获取账户总资金
+            if strategy:
+                is_long = not trade.is_short
+                side = "long" if is_long else "short"
+
+                # 获取总资金
+                if hasattr(strategy, 'account_enabled') and strategy.account_enabled:
+                    # 账户分离模式
+                    if is_long:
+                        total_balance = float(strategy.long_initial_balance)
+                    else:
+                        total_balance = float(strategy.short_initial_balance)
+                else:
+                    # 非账户分离模式
+                    if hasattr(strategy, 'wallets') and strategy.wallets:
+                        total_balance = strategy.wallets.get_total(strategy.config.get("stake_currency", "USDT"))
+                    else:
+                        total_balance = 0.0
+
+                position_info["account_total_balance"] = total_balance
+
+                # 计算仓位占比（客观数据，不做判断）
+                if total_balance > 0:
+                    position_percent = (total_stake / total_balance) * 100
+                    position_info["position_percent_of_account"] = position_percent
+
+                # 获取最小下单量配置
+                stake_config = self.decision_config.get("stake", {})
+                min_stake_config = stake_config.get("min_stake_per_trade")
+
+                if min_stake_config:
+                    mode = min_stake_config.get("mode", "percent")
+                    value = min_stake_config.get("value", 0)
+
+                    if mode == "fixed":
+                        min_per_trade = float(value)
+                    elif mode == "percent" and total_balance > 0:
+                        min_per_trade = total_balance * (value / 100.0)
+                    else:
+                        min_per_trade = 0.0
+
+                    position_info["min_stake_per_trade"] = min_per_trade
+
+        except Exception as e:
+            logger.warning(f"计算仓位大小信息失败: {e}")
+
+        return position_info
 
     def _extract_adjustment_history(self, trade: Any, limit: int = 5) -> list[Dict[str, Any]]:
         """

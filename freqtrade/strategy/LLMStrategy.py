@@ -506,6 +506,26 @@ class LLMStrategy(BaseStrategyWithSnapshot):
             # 计算调整投入
             adjustment_stake = trade.stake_amount * adjustment_ratio
 
+            # ========== 硬性安全检查: 剩余仓位不能低于最小值 ==========
+            # 只做客观的最小值检查，不做大小仓位的主观判断
+            if adjustment_stake < 0:  # 只有减仓才需要检查
+                total_stake_amount = context.get("total_stake_amount", trade.stake_amount)
+                min_stake_per_trade = context.get("min_stake_per_trade", 0.0)
+
+                if min_stake_per_trade > 0:
+                    # 计算减仓后的剩余金额
+                    remaining_stake = total_stake_amount + adjustment_stake  # adjustment_stake 是负数
+
+                    # 如果剩余金额低于最小值，拒绝减仓
+                    if remaining_stake < min_stake_per_trade:
+                        logger.warning(
+                            f"⛔ {trade.pair} 减仓被拒绝: "
+                            f"减仓 ${abs(adjustment_stake):.2f} 后剩余 ${remaining_stake:.2f}，"
+                            f"低于系统配置的最小开单量 ${min_stake_per_trade:.2f}。"
+                        )
+                        return None
+            # ========== 硬性安全检查结束 ==========
+
             # 检查调整是否足够显著（使用 Freqtrade 的最小值）
             if min_stake and abs(adjustment_stake) < min_stake:
                 return None
