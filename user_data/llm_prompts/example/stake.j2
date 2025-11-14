@@ -23,6 +23,7 @@
 {% if account_mode_enabled %}
 **多头账户可用**: ${{ "%.2f"|format(account_long_available) }}
 **空头账户可用**: ${{ "%.2f"|format(account_short_available) }}
+⚠️ 账户额度 = 当前账户可用余额，Long/Short 互不挪用。任意新仓/加仓都必须 ≤ 各自可用额度，否则会被系统拒绝。
 {% else %}
 **可用余额**: ${{ "%.2f"|format(wallet_free_balance) }}
 {% endif %}

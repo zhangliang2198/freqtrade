@@ -4,19 +4,20 @@
         "enabled": true,
         "provider": "deepseek",
         "provider_type": "http",
-        "model": "deepseek-reasoner",
-        "api_url": "https://api.deepseek.com/chat/completions",
-        "api_key": "<your deepseek key>",
+        "model": "<model name>",
+        "api_url": "<model url>",
+        "api_key": "<your api key>",
         "timeout": 180,
         "max_retries": 3,
         "temperature": 0.1,
         "aggregation_interval_minutes": 60,
         "enable_background_aggregation": true,
+        "prompt_style": "aggressive",
+        "_prompt_style_comment": "Prompt style: 'conservative' (风险厌恶，小仓位，严格止损) or 'aggressive' (激进进取，大仓位，追求高收益) or 'default' (默认，使用无后缀的原始提示词)",
         "headers": {
             "Content-Type": "application/json",
             "Authorization": "Bearer {api_key}"
         },
-
         "request_body": {
             "model": "{model}",
             "messages": [
@@ -34,7 +35,6 @@
                 "type": "json_object"
             }
         },
-
         "response_path": {
             "content_path": "choices.0.message.content",
             "ensure_json": true,
@@ -47,56 +47,49 @@
                 "cache_creation_tokens": "prompt_cache_miss_tokens"
             }
         },
-
         "cost_config": {
             "_comment": "Pricing for DeepSeek with Prompt Caching",
-            "input_cost_per_million": 0.27,
-            "output_cost_per_million": 1.10,
-            "cache_read_cost_per_million": 0.014,
-            "cache_creation_cost_per_million": 0.28
+            "input_cost_per_million": 4,
+            "output_cost_per_million": 12,
+            "cache_read_cost_per_million": 1,
+            "cache_creation_cost_per_million": 1
         },
         "decision_points": {
             "entry": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.7
+                "confidence_threshold": 0.5
             },
             "exit": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.6
+                "confidence_threshold": 0.5
             },
             "stake": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.5,
-                "min_stake_multiplier": 0.5,
+                "min_stake_multiplier": 0.1,
                 "max_stake_multiplier": 2.0,
-                "_comment_stake_limits": "限制每次开单的最小/最大额度",
                 "max_stake_per_trade": {
                     "mode": "percent",
-                    "_comment_mode": "模式: 'fixed' (固定金额) 或 'percent' (总资金百分比)",
-                    "value": 10,
-                    "_comment_value": "百分比模式下表示总资金的百分比，固定模式下表示 USDT 金额"
+                    "value": 10
                 },
                 "min_stake_per_trade": {
-                    "mode": "percent",
-                    "value": 1,
-                    "_comment": "最小开单额度: 1% 的总资金"
+                    "mode": "fixed",
+                    "value": 2
                 }
             },
             "adjust_position": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.6,
-                "max_adjustment_ratio": 0.3
+                "confidence_threshold": 0.5,
+                "max_adjustment_ratio": 1.0
             },
             "leverage": {
                 "enabled": true,
                 "cache_ttl": 60,
-                "confidence_threshold": 0.5,
-                "min_leverage": 1.0,
-                "max_leverage": 10.0
+                "min_leverage": 2.0,
+                "max_leverage": 20.0
             }
         },
         "performance": {
@@ -106,21 +99,22 @@
             "export_metrics": true
         },
         "context": {
-            "max_candles": 100,
+            "lookback_candles": 32,
             "include_indicators": true,
-            "include_portfolio": true,
-            "lookback_candles": 100,
             "include_orderbook": false,
-            "include_raw_candles_in_summary": false,
+            "include_raw_candles_in_summary": true,
             "include_funding_rate": false,
             "include_portfolio_state": true,
             "include_account_info": true,
             "include_wallet_info": true,
             "include_positions_info": true,
             "include_closed_trades_info": true,
-            "_comment_adjustment_history": "调仓历史记录条数，显示最近N次的加仓/减仓操作",
-            "adjustment_history_limit": 5
+            "include_risk_metrics": true,
+            "_include_risk_metrics_comment": "是否包含风险指标（止损距离、清算距离等）。默认启用，建议保持开启以提高决策安全性",
+            "adjustment_history_limit": 999
+        },
+        "fund_check": {
+            "min_available_balance_pct": 0.01
         }
     }
 }
-

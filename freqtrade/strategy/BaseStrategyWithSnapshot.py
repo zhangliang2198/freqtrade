@@ -3,7 +3,7 @@
 提供通用的资产统计、日志记录和数据库存储功能
 """
 from datetime import datetime
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 import logging
 import re
 
@@ -68,6 +68,18 @@ class BaseStrategyWithSnapshot(IStrategy):
         self.long_initial_balance = 0.0
         self.short_initial_balance = 0.0
         self._initial_balance_initialized = False
+        self._account_usage_stats: Dict[str, Dict[str, float]] = {
+            "long": {
+                "initial_balance": 0.0,
+                "used_balance": 0.0,
+                "available_balance": 0.0,
+            },
+            "short": {
+                "initial_balance": 0.0,
+                "used_balance": 0.0,
+                "available_balance": 0.0,
+            },
+        }
 
         # ========== 快照和日志配置 ==========
         snapshot_config = config.get('strategy_snapshot', {}) if hasattr(config, 'get') else {}
@@ -191,14 +203,31 @@ class BaseStrategyWithSnapshot(IStrategy):
                     self.short_initial_balance = initial_usdt * short_ratio
                 else:
                     # 使用具体金额
-                    self.long_initial_balance = self._account_config.get(
+                    configured_long = float(self._account_config.get(
                         'long_initial_balance',
                         initial_usdt * 0.5  # 默认 50/50
-                    )
-                    self.short_initial_balance = self._account_config.get(
+                    ))
+                    configured_short = float(self._account_config.get(
                         'short_initial_balance',
                         initial_usdt * 0.5  # 默认 50/50
-                    )
+                    ))
+
+                    total_configured = configured_long + configured_short
+                    self.long_initial_balance = configured_long
+                    self.short_initial_balance = configured_short
+
+                    # 如果钱包资金不足以覆盖固定金额，则按比例缩放
+                    if initial_usdt > 0 and total_configured > initial_usdt and total_configured > 0:
+                        scale = initial_usdt / total_configured
+                        self.long_initial_balance = configured_long * scale
+                        self.short_initial_balance = configured_short * scale
+
+                        if not self.is_optimize_mode:
+                            logger.warning(
+                                "⚠️ 固定账户余额配置超过实际钱包资金，总资金不足。"
+                                f" 已按比例缩放至 Long {self.long_initial_balance:.2f} / "
+                                f"Short {self.short_initial_balance:.2f}（总资金 {initial_usdt:.2f}）。"
+                            )
 
                 self._initial_balance_initialized = True
 
@@ -533,47 +562,47 @@ class BaseStrategyWithSnapshot(IStrategy):
                 elif side == "short" and trade.is_short:
                     used_balance += stake
 
-            # 计算已平仓的盈亏（分离盈利和亏损以便记录）
-            closed_trades = Trade.get_trades_proxy(is_open=False)
-            closed_profit = 0.0  # 总盈亏（可能为负）
-            closed_wins = 0.0    # 纯盈利部分
-            closed_losses = 0.0  # 纯亏损部分
-            for trade in closed_trades:
-                trade_is_long = not trade.is_short
-                profit = float(trade.realized_profit or 0.0)
-                if side == "long" and trade_is_long:
-                    closed_profit += profit
-                    if profit > 0:
-                        closed_wins += profit
-                    else:
-                        closed_losses += profit  # 负数
-                elif side == "short" and trade.is_short:
-                    closed_profit += profit
-                    if profit > 0:
-                        closed_wins += profit
-                    else:
-                        closed_losses += profit  # 负数
-
             # 该账户的初始资金
             initial_balance = self.long_initial_balance if side == "long" else self.short_initial_balance
 
-            # 可用余额 = 初始资金 + 已平仓盈亏 - 当前使用资金
-            available = initial_balance + closed_profit - used_balance
+            # 可用余额 = 初始资金 - 当前使用资金
+            available = initial_balance - used_balance
 
             # 如果可用余额为负数，记录警告（但不阻止，让框架自己处理）
             if available < 0:
                 logger.warning(
                     f"⚠️ {side.upper()} 账户可用余额为负: {available:.2f} USDT "
-                    f"(初始: {initial_balance:.2f}, 已平仓盈亏: {closed_profit:.2f} "
-                    f"[盈利: {closed_wins:.2f}, 亏损: {closed_losses:.2f}], "
-                    f"持仓占用: {used_balance:.2f})"
+                    f"(初始: {initial_balance:.2f}, 持仓占用: {used_balance:.2f})"
                 )
 
-            return max(0.0, available)
+            available_balance = max(0.0, available)
+            self._account_usage_stats[side] = {
+                "initial_balance": float(initial_balance),
+                "used_balance": float(used_balance),
+                "available_balance": float(available_balance),
+            }
+
+            return available_balance
 
         except Exception as e:
             logger.error(f"计算{side}账户可用余额失败: {e}", exc_info=True)
             return 0.0
+
+    def get_account_usage_stats(self, side: str) -> Dict[str, float]:
+        """
+        返回指定账户的最新资金使用详情
+
+        :param side: "long" 或 "short"
+        :return: 包含初始资金、可用资金、已用资金以及已实现盈亏的字典
+        """
+        side = side.lower()
+        if side not in self._account_usage_stats:
+            return {
+                "initial_balance": 0.0,
+                "used_balance": 0.0,
+                "available_balance": 0.0,
+            }
+        return self._account_usage_stats[side].copy()
 
     def check_account_balance_limit(
         self,

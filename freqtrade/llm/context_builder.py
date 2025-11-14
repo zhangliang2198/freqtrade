@@ -11,6 +11,8 @@ import logging
 import re
 import inspect
 
+from sqlalchemy import select
+
 from freqtrade.util import dt_now
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,9 @@ class ContextBuilder:
         self.include_wallet_info = context_config.get("include_wallet_info", True)
         self.include_positions_info = context_config.get("include_positions_info", True)
         self.include_closed_trades_info = context_config.get("include_closed_trades_info", True)
+
+        # 控制是否包含风险指标（止损、清算价格等）
+        self.include_risk_metrics = context_config.get("include_risk_metrics", True)
 
         # 调仓历史记录条数限制
         self.adjustment_history_limit = context_config.get("adjustment_history_limit", 5)
@@ -261,6 +266,11 @@ class ContextBuilder:
             "current_leverage": current_leverage,
             "max_leverage": max_leverage,
         }
+
+        # 添加风险指标（如果配置启用）
+        if self.include_risk_metrics:
+            risk_metrics = self._extract_risk_metrics(trade, current_rate)
+            context.update(risk_metrics)
 
         # 添加可选字段和回撤计算
         if trade.max_rate:
@@ -522,6 +532,11 @@ class ContextBuilder:
             # 添加仓位大小信息
             **position_size_info,
         }
+
+        # 添加风险指标（如果配置启用）
+        if self.include_risk_metrics:
+            risk_metrics = self._extract_risk_metrics(trade, current_rate)
+            context.update(risk_metrics)
         
         # 使用新的辅助方法添加市场摘要
         self._add_market_summary_to_context(context, recent_data, strategy, trade.pair)
@@ -1402,7 +1417,10 @@ class ContextBuilder:
                 account_info["account_long_initial"] = float(strategy.long_initial_balance)
                 account_info["account_short_initial"] = float(strategy.short_initial_balance)
 
-                # 获取可用余额
+                long_stats = {}
+                short_stats = {}
+
+                # 获取可用余额（同时刷新账户统计数据）
                 if hasattr(strategy, 'get_account_available_balance'):
                     account_info["account_long_available"] = float(
                         strategy.get_account_available_balance("long")
@@ -1411,12 +1429,17 @@ class ContextBuilder:
                         strategy.get_account_available_balance("short")
                     )
 
-                # 计算已使用资金（考虑已实现盈亏）
-                # 已使用 = 初始 + 已实现盈亏 - 当前可用
-                account_info["account_long_used"] = max(0.0,
+                if hasattr(strategy, 'get_account_usage_stats'):
+                    long_stats = strategy.get_account_usage_stats("long")
+                    short_stats = strategy.get_account_usage_stats("short")
+
+                # 使用账户统计数据（若可用），否则退回到旧的简单计算
+                account_info["account_long_used"] = float(long_stats.get("used_balance", 0.0)) if long_stats else max(
+                    0.0,
                     account_info["account_long_initial"] - account_info["account_long_available"]
                 )
-                account_info["account_short_used"] = max(0.0,
+                account_info["account_short_used"] = float(short_stats.get("used_balance", 0.0)) if short_stats else max(
+                    0.0,
                     account_info["account_short_initial"] - account_info["account_short_available"]
                 )
 
@@ -1518,8 +1541,6 @@ class ContextBuilder:
 
             for trade in open_trades:
                 is_long = not trade.is_short
-                # 使用 max_stake_amount 包含所有加仓金额
-                stake = float(trade.max_stake_amount) if hasattr(trade, 'max_stake_amount') else float(trade.stake_amount)
 
                 # 计算浮动盈亏
                 try:
@@ -1535,6 +1556,13 @@ class ContextBuilder:
                     logger.warning(f"计算 {trade.pair} 盈亏失败: {e}")
                     profit_ratio = 0.0
                     profit_abs = 0.0
+
+                # 使用实时仓位价值而非历史 max_stake
+                stake = self._estimate_trade_stake_value(
+                    trade,
+                    current_rate=current_rate,
+                    strategy=strategy,
+                )
 
                 # 累计统计
                 if is_long:
@@ -1566,7 +1594,7 @@ class ContextBuilder:
                         "side": "long" if is_long else "short",
                         "open_rate": float(trade.open_rate),
                         "current_rate": float(current_rate) if current_rate else 0.0,
-                        "stake_amount": stake,
+                        "stake_amount": float(stake),
                         "open_date": str(trade.open_date_utc),
                         "holding_minutes": float(holding_minutes),
                         "profit_abs": float(profit_abs),
@@ -1619,7 +1647,32 @@ class ContextBuilder:
         }
 
         try:
-            # 获取已平仓交易（使用缓存）
+            from freqtrade.persistence import Trade
+
+            if getattr(Trade, "use_db", False):
+                stmt = select(Trade.is_short, Trade.realized_profit).where(Trade.is_open.is_(False))
+                try:
+                    results = Trade.session.execute(stmt).all()
+                    for is_short, profit in results:
+                        profit = float(profit or 0.0)
+                        if is_short:
+                            closed_info["closed_short_count"] += 1
+                            closed_info["closed_short_profit"] += profit
+                        else:
+                            closed_info["closed_long_count"] += 1
+                            closed_info["closed_long_profit"] += profit
+
+                    closed_info["closed_trades_total"] = len(results)
+                    closed_info["closed_total_profit"] = (
+                        closed_info["closed_long_profit"] + closed_info["closed_short_profit"]
+                    )
+                finally:
+                    # 释放会话，防止对象在后续访问时触发 lazy load
+                    Trade.session.remove()
+
+                return closed_info
+
+            # 非数据库模式（如 Dry-run/回测）仍旧使用缓存中的 LocalTrade 对象
             _, closed_trades = self._get_cached_trades(strategy)
             closed_info["closed_trades_total"] = len(closed_trades)
 
@@ -1668,6 +1721,75 @@ class ContextBuilder:
 
         return None
 
+    def _extract_risk_metrics(self, trade: Any, current_rate: float) -> Dict[str, Any]:
+        """
+        提取风险相关指标（止损、清算价格等）
+
+        Args:
+            trade: 交易对象
+            current_rate: 当前市场价格
+
+        Returns:
+            风险指标字典
+        """
+        risk_metrics = {}
+
+        # 止损信息
+        # 注意：在全仓模式下，止损价格可能是负数（允许极大亏损）
+        if hasattr(trade, 'stop_loss') and trade.stop_loss is not None:
+            stop_loss = float(trade.stop_loss)
+
+            # 计算距离止损的距离百分比
+            # 对于多头：(当前价 - 止损价) / 当前价 * 100
+            # 对于空头：(止损价 - 当前价) / 当前价 * 100
+            if trade.is_short:
+                # 空头：止损价在上方
+                stop_loss_distance_pct = ((stop_loss - current_rate) / current_rate) * 100
+            else:
+                # 多头：止损价在下方
+                stop_loss_distance_pct = ((current_rate - stop_loss) / current_rate) * 100
+
+            risk_metrics.update({
+                "stop_loss": stop_loss,
+                "stop_loss_distance_pct": float(stop_loss_distance_pct),
+            })
+
+            # 初始止损信息
+            if hasattr(trade, 'initial_stop_loss') and trade.initial_stop_loss is not None:
+                risk_metrics["initial_stop_loss"] = float(trade.initial_stop_loss)
+
+            if hasattr(trade, 'initial_stop_loss_pct') and trade.initial_stop_loss_pct is not None:
+                risk_metrics["initial_stop_loss_pct"] = float(trade.initial_stop_loss_pct * 100)
+
+            # 跟踪止损标志
+            if hasattr(trade, 'is_stop_loss_trailing'):
+                risk_metrics["is_stop_loss_trailing"] = trade.is_stop_loss_trailing
+
+        # 清算价格信息（杠杆交易）
+        if hasattr(trade, 'liquidation_price') and trade.liquidation_price:
+            liquidation_price = float(trade.liquidation_price)
+
+            # 计算距离清算价的距离百分比
+            # 对于多头：(当前价 - 清算价) / 当前价 * 100
+            # 对于空头：(清算价 - 当前价) / 当前价 * 100
+            if trade.is_short:
+                # 空头：清算价在上方
+                liquidation_distance_pct = ((liquidation_price - current_rate) / current_rate) * 100
+            else:
+                # 多头：清算价在下方
+                liquidation_distance_pct = ((current_rate - liquidation_price) / current_rate) * 100
+
+            risk_metrics.update({
+                "liquidation_price": liquidation_price,
+                "liquidation_distance_pct": float(liquidation_distance_pct),
+            })
+
+            # 有效止损价格（考虑清算价）
+            if hasattr(trade, 'stoploss_or_liquidation'):
+                risk_metrics["stoploss_or_liquidation"] = float(trade.stoploss_or_liquidation)
+
+        return risk_metrics
+
     def _calculate_position_size_info(self, trade: Any, strategy: Optional[Any]) -> Dict[str, Any]:
         """
         计算仓位大小相关信息，用于调仓决策
@@ -1689,8 +1811,12 @@ class ContextBuilder:
         }
 
         try:
-            # 使用 max_stake_amount（包含所有加仓）而不是 stake_amount（只是首次入场）
-            total_stake = float(trade.max_stake_amount) if hasattr(trade, 'max_stake_amount') else float(trade.stake_amount)
+            current_rate = self._get_current_rate(strategy, trade.pair) if strategy else None
+            total_stake = self._estimate_trade_stake_value(
+                trade,
+                current_rate=current_rate,
+                strategy=strategy,
+            )
             position_info["total_stake_amount"] = total_stake
 
             # 获取账户总资金
@@ -1834,3 +1960,39 @@ class ContextBuilder:
             logger.warning(f"提取调仓历史失败: {e}")
 
         return history
+
+    def _estimate_trade_stake_value(
+        self,
+        trade: Any,
+        current_rate: Optional[float] = None,
+        strategy: Optional[Any] = None,
+    ) -> float:
+        """
+        根据当前价格估算持仓在 stake 货币中的价值
+        """
+        rate = current_rate
+        if rate is None and strategy is not None:
+            try:
+                rate = self._get_current_rate(strategy, trade.pair)
+            except Exception:
+                rate = None
+
+        leverage = float(getattr(trade, "leverage", 1.0) or 1.0)
+        if leverage <= 0:
+            leverage = 1.0
+
+        if rate:
+            try:
+                value = trade.calc_close_trade_value(rate)
+                value = abs(float(value))
+                if leverage > 1.0:
+                    value = value / leverage
+                return value
+            except Exception as e:
+                logger.debug(f"估算 {trade.pair} 仓位价值失败，回退到历史投入: {e}")
+
+        if hasattr(trade, 'max_stake_amount') and trade.max_stake_amount:
+            return float(trade.max_stake_amount)
+
+        stake_amount = getattr(trade, 'stake_amount', 0.0) or 0.0
+        return float(stake_amount)

@@ -599,6 +599,28 @@ class LLMStrategy(BaseStrategyWithSnapshot):
                             )
                             adjustment_stake = max_per_trade
 
+                # 严格账户模式下，再次确认加仓金额不会突破该方向的账户额度
+                if self.strict_account_mode:
+                    side = "short" if trade.is_short else "long"
+                    allowed, capped_stake = self.check_account_balance_limit(
+                        side=side,
+                        proposed_stake=adjustment_stake,
+                        pair=trade.pair,
+                    )
+                    if not allowed or capped_stake <= 0:
+                        logger.warning(
+                            f"⛔ {trade.pair} 加仓被拒绝：{side.upper()} 账户可用余额不足，"
+                            f"需要 {adjustment_stake:.2f} USDT。"
+                        )
+                        return None
+
+                    if capped_stake < adjustment_stake:
+                        logger.info(
+                            f"📊 {trade.pair} 加仓额度被账户上限裁剪: "
+                            f"{adjustment_stake:.2f} -> {capped_stake:.2f} USDT"
+                        )
+                        adjustment_stake = capped_stake
+
             logger.info(
                 f"LLM 调整了 {trade.pair} 的持仓: "
                 f"{'add' if adjustment_stake > 0 else 'reduce'} "

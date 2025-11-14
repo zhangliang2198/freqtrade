@@ -8,6 +8,18 @@ fork自源仓库，每月同步一次源框架稳定代码。不断优化和添�
 
 也可关注币安：`theshortgod` 的带单账户。
 
+
+## v1.0.6 新增 Prometheus 指标抛出
+
+**注意**：目前在测试，指标不断完善中
+
+- 启动参数 --start-exporter
+- Prometheus 收集指标，grafana 可视化展示数据
+
+```bash
+freqtrade trade  -c .\user_data\config\llm\config.json --start-exporter
+```
+
 ## v1.0.5 新增 Telegram 代理支持
 
 功能：不用再设置 `http_proxy` 环境变量了，也无需考虑 `vpn` 的 `tun` 模式，直接在配置文件中添加代理配置即可。
