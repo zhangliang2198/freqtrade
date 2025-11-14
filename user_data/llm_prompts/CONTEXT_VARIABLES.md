@@ -224,20 +224,352 @@ llm_config:
 
 这些变量仅在 `exit` 和 `adjust_position` 决策点可用：
 
+### 通用交易信息
+
 | 变量名 | 类型 | 说明 | 决策点 |
 |--------|------|------|--------|
 | `side` | string | 持仓方向 ("long" 或 "short") | exit, adjust_position |
 | `entry_price` | float | 入场价格 | exit, adjust_position |
 | `current_price` | float | 当前价格 | exit, adjust_position |
+| `current_rate` | float | 当前价格（同 current_price） | exit, adjust_position |
 | `current_profit_pct` | float | 当前盈亏百分比 | exit, adjust_position |
 | `current_profit_abs` | float | 当前盈亏绝对值 | exit, adjust_position |
 | `holding_duration_minutes` | float | 持仓时长（分钟） | exit, adjust_position |
-| `stop_loss` | float | 止损价格 | exit |
-| `entry_tag` | string | 入场标签 | exit |
-| `max_rate` | float | 最高价格 | exit |
-| `min_rate` | float | 最低价格 | exit |
-| `stake_amount` | float | 投入金额 | adjust_position |
-| `entry_rate` | float | 入场价格 | adjust_position |
+| `entry_tag` | string | 入场标签 | exit, adjust_position |
+| `current_leverage` | float | 当前杠杆倍数 | exit, adjust_position |
+| `max_leverage` | float | 最大允许杠杆 | exit, adjust_position |
+
+### Exit 专用变量
+
+| 变量名 | 类型 | 说明 |
+|--------|------|------|
+| `stop_loss` | float | 止损价格 |
+| `max_rate` | float | 最高价格 |
+| `min_rate` | float | 最低价格 |
+| `max_profit_pct` | float | 最高盈利百分比 |
+| `drawdown_from_high_pct` | float | 从最高点的回撤百分比 |
+
+### Adjust Position 专用变量
+
+| 变量名 | 类型 | 说明 |
+|--------|------|------|
+| `stake_amount` | float | 首次入场投入金额 |
+| `entry_rate` | float | 首次入场价格 |
+| `average_entry_rate` | float | 平均入场成本 |
+| `profit_from_average_pct` | float | 相对平均成本的盈亏百分比 |
+| `nr_of_entries` | int | 入场次数（包括首次和所有加仓） |
+| `max_adjustments` | int | 最大允许调整次数（0=无限制） |
+| `remaining_adjustments` | int | 剩余可调整次数 |
+| `total_stake_amount` | float | 总投入金额（包括所有加仓） |
+| `position_percent_of_account` | float | 该持仓占账户总资金的百分比 |
+| `account_total_balance` | float | 账户总资金 |
+| `min_stake_per_trade` | float | 最小开单额度（系统配置） |
+
+### 调仓历史记录
+
+`adjustment_history` 是一个列表，包含近期的所有调仓记录：
+
+```python
+adjustment_history = [
+    {
+        "action": "add",           # 或 "reduce"
+        "price": 42300.0,          # 操作时价格
+        "stake_amount": 500.0,     # 本次投入/减少金额
+        "order_type": "limit",     # 订单类型
+        "minutes_ago": 15.0        # 距离现在的分钟数
+    },
+    ...
+]
+```
+
+### 使用示例：
+
+```jinja2
+{% if adjustment_history %}
+## 近期调仓记录
+{% for record in adjustment_history %}
+**{{ loop.index }}.** {{ "%.0f"|format(record.minutes_ago) }}分钟前 |
+**{{ record.action|upper }}** @ ${{ "%.6f"|format(record.price) }} |
+投入${{ "%.2f"|format(record.stake_amount) }} | {{ record.order_type }}
+{% endfor %}
+**分析提示**: 该持仓经过{{ adjustment_history|length }}次调整。
+{% endif %}
+```
+
+---
+
+## 风险指标 (Risk Metrics)
+
+当启用风险指标时（`include_risk_metrics: true`，默认启用），以下变量在 `exit` 和 `adjust_position` 决策点可用：
+
+### 止损相关
+
+| 变量名 | 类型 | 说明 |
+|--------|------|------|
+| `stop_loss` | float | 当前止损价格 |
+| `stop_loss_distance_pct` | float | 距离止损的百分比距离（正数=安全，负数=已触发） |
+| `initial_stop_loss` | float | 初始止损价格 |
+| `initial_stop_loss_pct` | float | 初始止损百分比（已乘100） |
+| `is_stop_loss_trailing` | bool | 是否启用跟踪止损 |
+
+### 清算相关（杠杆交易）
+
+| 变量名 | 类型 | 说明 |
+|--------|------|------|
+| `liquidation_price` | float | 清算价格 |
+| `liquidation_distance_pct` | float | 距离清算价的百分比距离（正数=安全，负数=已清算） |
+| `stoploss_or_liquidation` | float | 有效止损/清算价（更危险的那个） |
+
+### 距离计算逻辑
+
+**多头**:
+- `stop_loss_distance_pct = (当前价 - 止损价) / 当前价 * 100`
+- `liquidation_distance_pct = (当前价 - 清算价) / 当前价 * 100`
+
+**空头**:
+- `stop_loss_distance_pct = (止损价 - 当前价) / 当前价 * 100`
+- `liquidation_distance_pct = (清算价 - 当前价) / 当前价 * 100`
+
+**解读**:
+- 正数 = 安全距离
+- 负数 = 已触发止损或清算
+- 距离越小，风险越高
+
+### 使用示例：
+
+```jinja2
+## 风险指标
+{%- if stop_loss %}
+- **止损价**: ${{ "%.6f"|format(stop_loss) }} | **距止损**: {{ "%.2f"|format(stop_loss_distance_pct) }}%
+{%- if initial_stop_loss %}
+- **初始止损**: ${{ "%.6f"|format(initial_stop_loss) }} ({{ "%.2f"|format(initial_stop_loss_pct) }}%)
+{%- endif %}
+{%- if is_stop_loss_trailing %}
+- **跟踪止损**: 已启用
+{%- endif %}
+{%- endif %}
+{%- if liquidation_price %}
+- **清算价**: ${{ "%.6f"|format(liquidation_price) }} | **距清算**: {{ "%.2f"|format(liquidation_distance_pct) }}%
+- **有效止损/清算价**: ${{ "%.6f"|format(stoploss_or_liquidation) }}
+{%- endif %}
+```
+
+---
+
+## 技术指标（多周期支持）
+
+### 主周期指标
+
+`main_indicators` 字典包含主交易周期的所有技术指标：
+
+| 变量名 | 类型 | 说明 |
+|--------|------|------|
+| `main_timeframe` | string | 主交易周期 (如 "5m", "15m") |
+| `main_indicators` | dict | 主周期技术指标字典 |
+
+### 信息周期指标
+
+`informative_timeframes` 是一个列表，包含所有信息周期的指标：
+
+```python
+informative_timeframes = [
+    {
+        "timeframe": "15m",
+        "indicators": {
+            "rsi": 65.5,
+            "macd": 0.0023,
+            ...
+        }
+    },
+    {
+        "timeframe": "1h",
+        "indicators": {...}
+    }
+]
+```
+
+### 原始K线数据
+
+当启用 `include_raw_candles_in_summary: true` 时可用：
+
+**主周期K线**:
+```python
+market_data = {
+    "raw_candles": [
+        {
+            "date": "2025-11-14 10:00:00",
+            "open": 42300.0,
+            "high": 42450.0,
+            "low": 42250.0,
+            "close": 42400.0,
+            "volume": 1250.0
+        },
+        ...
+    ]
+}
+```
+
+**信息周期K线**:
+```python
+informative_candles = {
+    "15m": [
+        {
+            "date": "2025-11-14 09:45:00",
+            "open": 42200.0,
+            ...
+        },
+        ...
+    ],
+    "1h": [...]
+}
+```
+
+### 使用示例：
+
+```jinja2
+{% if main_indicators %}
+## 技术指标 ({{ main_timeframe }})
+{% for key, value in main_indicators.items() -%}
+- **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
+{% endfor -%}
+{% endif -%}
+
+{%- if informative_timeframes %}
+{% for tf_data in informative_timeframes -%}
+## 参考指标 ({{ tf_data.timeframe }})
+{% for key, value in tf_data.indicators.items() -%}
+- **{{ key }}**: {{ "%.4f"|format(value) if value is number else value }}
+{% endfor %}
+{% endfor -%}
+{% endif -%}
+
+{%- if market_data and market_data.raw_candles %}
+## 原始K线数据 {{ timeframe }} (最近{{ market_data.raw_candles|length }}根)
+{% for candle in market_data.raw_candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endif -%}
+
+{%- if informative_candles %}
+{% for tf, candles in informative_candles.items() -%}
+## 信息对K线数据 {{ tf }} (最近{{ candles|length }}根)
+{% for candle in candles -%}
+- **{{ candle.date }}**: {'open': {{ candle.open }}, 'high': {{ candle.high }}, 'low': {{ candle.low }}, 'close': {{ candle.close }}, 'volume': {{ candle.volume }}}
+{% endfor -%}
+{% endfor -%}
+{% endif -%}
+```
+
+---
+
+## Stake 和 Leverage 决策专用变量
+
+### Stake 决策点
+
+| 变量名 | 类型 | 说明 |
+|--------|------|------|
+| `available_balance` | float | 可用余额 |
+| `volatility` | float | 波动率百分比 |
+| `stake_multiplier_limits` | dict | 仓位倍数限制 |
+
+`stake_multiplier_limits` 结构：
+```python
+{
+    "min": 0.5,  # 最小仓位倍数
+    "max": 2.0   # 最大仓位倍数
+}
+```
+
+**最大/最小额度信息**:
+```python
+max_stake_per_trade = {
+    "description": "💰 最大开单额度",
+    "mode": "percent" | "fixed",
+    "percent_value": 10.0,  # 如果是百分比模式
+    "available_balance": 5000.0,
+    "max_stake_amount": 500.0
+}
+
+min_stake_per_trade = {
+    "description": "📌 最小开单额度",
+    "mode": "percent" | "fixed",
+    "percent_value": 2.0,   # 如果是百分比模式
+    "total_balance": 10000.0,
+    "min_stake_amount": 100.0
+}
+```
+
+### Leverage 决策点
+
+| 变量名 | 类型 | 说明 |
+|--------|------|------|
+| `proposed_leverage` | float | 建议的杠杆倍数 |
+| `current_leverage` | float | 当前杠杆倍数 |
+| `max_leverage` | float | 最大允许杠杆 |
+| `leverage_limits` | dict | 杠杆限制 |
+| `volatility` | float | 波动率百分比 |
+
+`leverage_limits` 结构：
+```python
+{
+    "min": 1.0,   # 最小杠杆
+    "max": 20.0   # 最大杠杆
+}
+```
+
+### 使用示例：
+
+```jinja2
+## Stake 决策框架
+{% set stake_min = stake_multiplier_limits.min if stake_multiplier_limits and stake_multiplier_limits.min is not none else 0.5 %}
+{% set stake_max = stake_multiplier_limits.max if stake_multiplier_limits and stake_multiplier_limits.max is not none else 2.0 %}
+
+根据技术信号强度确定仓位倍数（{{ "%.1f"|format(stake_min) }}x - {{ "%.1f"|format(stake_max) }}x）
+
+{% if max_stake_per_trade %}
+{{ max_stake_per_trade.description }}
+{% if max_stake_per_trade.mode == "percent" %}
+- **模式**: 百分比 ({{ "%.0f"|format(max_stake_per_trade.percent_value) }}%)
+- **当前可用**: ${{ "%.2f"|format(max_stake_per_trade.available_balance) }}
+- **本单最大**: ${{ "%.2f"|format(max_stake_per_trade.max_stake_amount) }}
+{% endif %}
+{% endif %}
+
+## Leverage 决策框架
+{% set leverage_min = leverage_limits["min"] if leverage_limits and leverage_limits["min"] is not none else 1.0 %}
+{% set leverage_max = leverage_limits["max"] if leverage_limits and leverage_limits["max"] is not none else max_leverage %}
+
+根据技术信号和市场环境确定杠杆倍数（{{ "%.1f"|format(leverage_min) }}x - {{ "%.1f"|format(leverage_max) }}x）
+- **建议杠杆**: {{ "%.1f"|format(proposed_leverage) }}x
+- **波动率**: {{ "%.2f"|format(volatility) }}%
+```
+
+---
+
+## 账户信息（Account Info）扩展
+
+在账户分离模式下，还有以下附加变量：
+
+| 变量名 | 类型 | 说明 |
+|--------|------|------|
+| `account_long_total` | float | 多头账户总价值（包括已用） |
+| `account_short_total` | float | 空头账户总价值（包括已用） |
+
+### 使用示例：
+
+```jinja2
+{% if account_mode_enabled %}
+## 账户分离模式
+- **多头账户**: 可用${{ "%.2f"|format(account_long_available) }} | 总计${{ "%.2f"|format(account_long_total or 0) }}
+- **空头账户**: 可用${{ "%.2f"|format(account_short_available) }} | 总计${{ "%.2f"|format(account_short_total or 0) }}
+- **账户总价值**: ${{ "%.2f"|format((account_long_total or 0) + (account_short_total or 0)) }}
+
+{% set long_usage = account_long_used / account_long_initial if account_long_initial > 0 else 0 %}
+{% set short_usage = account_short_used / account_short_initial if account_short_initial > 0 else 0 %}
+- **多头使用率**: {{ "%.1f"|format(long_usage * 100) }}%
+- **空头使用率**: {{ "%.1f"|format(short_usage * 100) }}%
+{% endif %}
+```
 
 ---
 
@@ -249,18 +581,39 @@ llm_config:
 {
   "llm_config": {
     "context": {
-      "lookback_candles": 100,
+      "lookback_candles": 32,
       "include_indicators": true,
-      "include_recent_trades": false,
-      "include_portfolio_state": false,
+      "include_raw_candles_in_summary": true,
+      "include_orderbook": false,
+      "include_funding_rate": false,
+      "include_portfolio_state": true,
       "include_account_info": true,
       "include_wallet_info": true,
       "include_positions_info": true,
-      "include_closed_trades_info": true
+      "include_closed_trades_info": true,
+      "include_risk_metrics": true,
+      "adjustment_history_limit": 999
     }
   }
 }
 ```
+
+### 配置项说明
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `lookback_candles` | int | 32 | 回看K线数量 |
+| `include_indicators` | bool | true | 包含技术指标 |
+| `include_raw_candles_in_summary` | bool | true | 包含原始K线数据 |
+| `include_orderbook` | bool | false | 包含订单簿数据 |
+| `include_funding_rate` | bool | false | 包含资金费率 |
+| `include_portfolio_state` | bool | true | 包含投资组合状态 |
+| `include_account_info` | bool | true | 包含账户信息 |
+| `include_wallet_info` | bool | true | 包含钱包信息 |
+| `include_positions_info` | bool | true | 包含持仓信息 |
+| `include_closed_trades_info` | bool | true | 包含已平仓统计 |
+| `include_risk_metrics` | bool | true | 包含风险指标（止损距离、清算距离） |
+| `adjustment_history_limit` | int | 999 | 调仓历史记录最大数量 |
 
 ---
 
@@ -399,11 +752,53 @@ llm_config:
 
 | 决策点 | 可用变量组 |
 |--------|-----------|
-| `entry` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 指标 |
-| `exit` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 指标 + 交易信息 |
-| `stake` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 指标 + 波动率 |
-| `adjust_position` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 指标 + 交易信息 |
-| `leverage` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 指标 + 波动率 |
+| `entry` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 技术指标 + K线数据 |
+| `exit` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 技术指标 + K线数据 + 交易信息 + **风险指标** |
+| `stake` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 技术指标 + K线数据 + 波动率 + 额度限制 |
+| `adjust_position` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 技术指标 + K线数据 + 交易信息 + **风险指标** + **调仓历史** |
+| `leverage` | 基础市场 + 账户 + 钱包 + 持仓 + 已平仓 + 技术指标 + K线数据 + 波动率 + 杠杆限制 |
+
+### 关键变量快速索引
+
+**基础信息**:
+- `pair`, `timeframe`, `current_time`, `current_candle`, `market_summary`
+
+**价格和盈亏**:
+- `current_price` / `current_rate`, `entry_price` / `entry_rate`
+- `current_profit_pct`, `current_profit_abs`
+- `average_entry_rate`, `profit_from_average_pct`
+
+**风险指标** (⭐ 新增):
+- `stop_loss`, `stop_loss_distance_pct`, `initial_stop_loss`
+- `liquidation_price`, `liquidation_distance_pct`
+- `stoploss_or_liquidation`, `is_stop_loss_trailing`
+
+**调仓相关**:
+- `nr_of_entries`, `max_adjustments`, `remaining_adjustments`
+- `stake_amount`, `total_stake_amount`
+- `adjustment_history`, `position_percent_of_account`
+- `min_stake_per_trade`
+
+**账户和资金**:
+- `wallet_total_balance`, `wallet_free_balance`, `wallet_used_balance`
+- `account_long_available`, `account_short_available`
+- `account_long_used`, `account_short_used`
+
+**持仓统计**:
+- `positions_total_count`, `positions_long_count`, `positions_short_count`
+- `positions_in_profit_count`, `positions_at_risk_count`
+- `positions_long_profit_pct`, `positions_short_profit_pct`
+- `current_pair_positions`, `max_single_position_stake`, `avg_position_stake`
+
+**技术指标**:
+- `main_timeframe`, `main_indicators`
+- `informative_timeframes`, `informative_candles`
+- `market_data.raw_candles`
+
+**杠杆和仓位**:
+- `current_leverage`, `max_leverage`, `proposed_leverage`
+- `leverage_limits`, `stake_multiplier_limits`
+- `volatility`, `available_balance`
 
 ---
 
@@ -492,4 +887,22 @@ A: 使用 Jinja2 语法：
 
 ## 更新日志
 
-- **v1.0** (2024-01): 初始版本，添加账户、钱包、持仓、已平仓统计的细粒度变量
+- **v1.2** (2025-11-14):
+  - ⭐ **重大更新**: 添加风险指标系统 (`include_risk_metrics`)
+    - 止损相关: `stop_loss`, `stop_loss_distance_pct`, `initial_stop_loss`, `initial_stop_loss_pct`, `is_stop_loss_trailing`
+    - 清算相关: `liquidation_price`, `liquidation_distance_pct`, `stoploss_or_liquidation`
+  - 添加调仓历史记录 `adjustment_history`
+  - 添加调仓专用变量: `average_entry_rate`, `profit_from_average_pct`, `total_stake_amount`, `position_percent_of_account`, `min_stake_per_trade`
+  - 添加技术指标多周期支持: `main_timeframe`, `main_indicators`, `informative_timeframes`, `informative_candles`
+  - 添加原始K线数据: `market_data.raw_candles`
+  - 添加 Stake/Leverage 专用变量: `stake_multiplier_limits`, `leverage_limits`, `max_stake_per_trade`, `min_stake_per_trade`
+  - 完善配置控制选项文档
+  - 添加关键变量快速索引
+
+- **v1.1** (2024-06):
+  - 添加 `current_leverage`, `max_leverage` 杠杆相关变量
+  - 添加 `max_rate`, `min_rate` 最高/最低价
+  - 完善持仓信息结构
+
+- **v1.0** (2024-01):
+  - 初始版本，添加账户、钱包、持仓、已平仓统计的细粒度变量
