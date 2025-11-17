@@ -4,12 +4,10 @@ import talib.abstract as ta
 from freqtrade.strategy import merge_informative_pair
 from freqtrade.strategy.LLMStrategy import LLMStrategy
 
+
 class ExampleLLMStrategy(LLMStrategy):
     # 策略接口版本
     INTERFACE_VERSION = 3
-
-    # 基本策略参数
-    timeframe = "15m"
 
     # 启动K线数量 (用于指标计算)
     startup_candle_count = 100
@@ -29,30 +27,30 @@ class ExampleLLMStrategy(LLMStrategy):
     def populate_indicators(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         # 获取 8 小时级别的数据
         if self.dp:
-            informative_8h = self.dp.get_pair_dataframe(pair=metadata['pair'], timeframe='8h')
+            informative_8h = self.dp.get_pair_dataframe(pair=metadata["pair"], timeframe="8h")
 
-            # 计算 8 小时级别的指标（merge_informative_pair 会自动添加 _8h 后缀）
-            informative_8h['rsi'] = ta.RSI(informative_8h, timeperiod=14)
-            informative_8h['ema_21'] = ta.EMA(informative_8h, timeperiod=21)
-            informative_8h['ema_50'] = ta.EMA(informative_8h, timeperiod=50)
+            # 计算 8 小时级别的指标(merge_informative_pair 会自动添加 _8h 后缀)
+            informative_8h["rsi"] = ta.RSI(informative_8h, timeperiod=14)
+            informative_8h["ema_21"] = ta.EMA(informative_8h, timeperiod=21)
+            informative_8h["ema_50"] = ta.EMA(informative_8h, timeperiod=50)
 
             # MACD 8小时
             macd_8h = ta.MACD(informative_8h)
-            informative_8h['macd'] = macd_8h['macd']
-            informative_8h['macdsignal'] = macd_8h['macdsignal']
+            informative_8h["macd"] = macd_8h["macd"]
+            informative_8h["macdsignal"] = macd_8h["macdsignal"]
 
             # ATR 8小时
-            informative_8h['atr'] = ta.ATR(informative_8h, timeperiod=14)
+            informative_8h["atr"] = ta.ATR(informative_8h, timeperiod=14)
 
             # ADX 8小时 (趋势强度)
-            informative_8h['adx'] = ta.ADX(informative_8h, timeperiod=14)
+            informative_8h["adx"] = ta.ADX(informative_8h, timeperiod=14)
 
-            # 合并到主时间框架（会自动添加 _8h 后缀，如 rsi_8h, ema_21_8h 等）
+            # 合并到主时间框架(会自动添加 _8h 后缀, 如 rsi_8h, ema_21_8h 等)
             dataframe = merge_informative_pair(
                 dataframe,
                 informative_8h,
                 self.timeframe,
-                '8h',
+                "8h",
                 ffill=True,
             )
 
@@ -70,7 +68,9 @@ class ExampleLLMStrategy(LLMStrategy):
         dataframe["bb_lower"] = bollinger["lowerband"]
         dataframe["bb_middle"] = bollinger["middleband"]
         dataframe["bb_upper"] = bollinger["upperband"]
-        dataframe["bb_width"] = (dataframe["bb_upper"] - dataframe["bb_lower"]) / dataframe["bb_middle"]
+        dataframe["bb_width"] = (dataframe["bb_upper"] - dataframe["bb_lower"]) / dataframe[
+            "bb_middle"
+        ]
 
         # EMAs (指数移动平均线)
         dataframe["ema_9"] = ta.EMA(dataframe, timeperiod=9)
@@ -96,6 +96,6 @@ class ExampleLLMStrategy(LLMStrategy):
 
     def populate_exit_trend(self, dataframe: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """
-        我们使用 custom_exit 进行基于 LLM 的出场，所以这里不需要。
+        我们使用 custom_exit 进行基于 LLM 的出场, 所以这里不需要。
         """
         return dataframe

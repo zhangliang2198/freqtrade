@@ -2,17 +2,19 @@
 带快照功能的策略基类
 提供通用的资产统计、日志记录和数据库存储功能
 """
-from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+
 import logging
 import re
+from datetime import datetime
+from typing import Any, Dict, Optional, Tuple
 
 from pandas import DataFrame
 
+from freqtrade.enums import RunMode
 from freqtrade.persistence import Trade
 from freqtrade.persistence.strategy_snapshot import StrategySnapshot
 from freqtrade.strategy.interface import IStrategy
-from freqtrade.enums import RunMode
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,27 +44,29 @@ class BaseStrategyWithSnapshot(IStrategy):
         self.config = config
 
         # 检测运行模式
-        self.runmode = config.get('runmode', RunMode.OTHER) if hasattr(config, 'get') else RunMode.OTHER
+        self.runmode = (
+            config.get("runmode", RunMode.OTHER) if hasattr(config, "get") else RunMode.OTHER
+        )
         self.is_hyperopt = self.runmode == RunMode.HYPEROPT
         self.is_backtest = self.runmode == RunMode.BACKTEST
         self.is_optimize_mode = self.runmode in [RunMode.BACKTEST, RunMode.HYPEROPT]
         self.is_live_mode = self.runmode in [RunMode.LIVE, RunMode.DRY_RUN]
 
         # 初始化总资金
-        self.dry_run_wallet = config.get('dry_run_wallet', 0) if hasattr(config, 'get') else 0
+        self.dry_run_wallet = config.get("dry_run_wallet", 0) if hasattr(config, "get") else 0
 
         # ========== 账户分离配置 ==========
-        account_config = config.get('strategy_account', {}) if hasattr(config, 'get') else {}
+        account_config = config.get("strategy_account", {}) if hasattr(config, "get") else {}
 
         # 账户分离开关：启用即严格限制
-        self.account_enabled = account_config.get('enabled', False)
+        self.account_enabled = account_config.get("enabled", False)
         self.strict_account_mode = self.account_enabled  # 启用即严格限制
 
         # 保存配置，稍后在 bot_loop_start 中获取实际资金
         self._account_config = account_config
-        self._use_ratio = account_config.get('use_ratio', False)
-        self._long_ratio = account_config.get('long_ratio', 0.5)
-        self._short_ratio = account_config.get('short_ratio', 0.5)
+        self._use_ratio = account_config.get("use_ratio", False)
+        self._long_ratio = account_config.get("long_ratio", 0.5)
+        self._short_ratio = account_config.get("short_ratio", 0.5)
 
         # 初始化为0，第一次 bot_loop_start 时获取实际资金
         self.long_initial_balance = 0.0
@@ -82,27 +86,27 @@ class BaseStrategyWithSnapshot(IStrategy):
         }
 
         # ========== 快照和日志配置 ==========
-        snapshot_config = config.get('strategy_snapshot', {}) if hasattr(config, 'get') else {}
+        snapshot_config = config.get("strategy_snapshot", {}) if hasattr(config, "get") else {}
 
         # 在 hyperopt 模式下自动禁用快照和日志（除非明确配置）
         if self.is_hyperopt:
             # Hyperopt 默认禁用所有输出
-            default_snapshot_enabled = snapshot_config.get('enabled', False)
-            default_detailed_logs = snapshot_config.get('enable_detailed_logs', False)
-            default_strategy_logs = snapshot_config.get('enable_strategy_logs', False)
-            default_frequency = snapshot_config.get('snapshot_frequency', 100)  # 降低频率
+            default_snapshot_enabled = snapshot_config.get("enabled", False)
+            default_detailed_logs = snapshot_config.get("enable_detailed_logs", False)
+            default_strategy_logs = snapshot_config.get("enable_strategy_logs", False)
+            default_frequency = snapshot_config.get("snapshot_frequency", 100)  # 降低频率
         elif self.is_backtest:
             # 回测默认启用，但频率较低
-            default_snapshot_enabled = snapshot_config.get('enabled', True)
-            default_detailed_logs = snapshot_config.get('enable_detailed_logs', True)
-            default_strategy_logs = snapshot_config.get('enable_strategy_logs', True)
-            default_frequency = snapshot_config.get('snapshot_frequency', 10)
+            default_snapshot_enabled = snapshot_config.get("enabled", True)
+            default_detailed_logs = snapshot_config.get("enable_detailed_logs", True)
+            default_strategy_logs = snapshot_config.get("enable_strategy_logs", True)
+            default_frequency = snapshot_config.get("snapshot_frequency", 10)
         else:
             # 实盘/模拟盘默认全部启用
-            default_snapshot_enabled = snapshot_config.get('enabled', True)
-            default_detailed_logs = snapshot_config.get('enable_detailed_logs', True)
-            default_strategy_logs = snapshot_config.get('enable_strategy_logs', True)
-            default_frequency = snapshot_config.get('snapshot_frequency', 1)
+            default_snapshot_enabled = snapshot_config.get("enabled", True)
+            default_detailed_logs = snapshot_config.get("enable_detailed_logs", True)
+            default_strategy_logs = snapshot_config.get("enable_strategy_logs", True)
+            default_frequency = snapshot_config.get("snapshot_frequency", 1)
 
         self.enable_snapshot = default_snapshot_enabled
         self.enable_detailed_logs = default_detailed_logs
@@ -121,12 +125,12 @@ class BaseStrategyWithSnapshot(IStrategy):
         self.total_profit_pct = 0.0
 
         # ========== 黑名单配置 ==========
-        blacklist_config = config.get('strategy_blacklist', {}) if hasattr(config, 'get') else {}
+        blacklist_config = config.get("strategy_blacklist", {}) if hasattr(config, "get") else {}
 
-        self.blacklist_enabled = blacklist_config.get('enabled', False)
-        self.long_blacklist = blacklist_config.get('long_blacklist', [])
-        self.short_blacklist = blacklist_config.get('short_blacklist', [])
-        self.common_blacklist = blacklist_config.get('common_blacklist', [])
+        self.blacklist_enabled = blacklist_config.get("enabled", False)
+        self.long_blacklist = blacklist_config.get("long_blacklist", [])
+        self.short_blacklist = blacklist_config.get("short_blacklist", [])
+        self.common_blacklist = blacklist_config.get("common_blacklist", [])
 
         # 编译正则表达式以提高性能
         self._long_blacklist_patterns = [re.compile(pattern) for pattern in self.long_blacklist]
@@ -138,15 +142,27 @@ class BaseStrategyWithSnapshot(IStrategy):
             logger.info("=" * 80)
             logger.info("📋 策略账户配置:")
             logger.info(f"  运行模式: {self.runmode.value.upper()}")
-            logger.info(f"  账户分离: {'✅ 启用 (严格限制)' if self.account_enabled else '❌ 禁用'}")
+            logger.info(
+                f"  账户分离: {'✅ 启用 (严格限制)' if self.account_enabled else '❌ 禁用'}"
+            )
             if self.account_enabled:
                 if self._use_ratio:
-                    logger.info(f"  资金分配: Long {self._long_ratio:.1%} / Short {self._short_ratio:.1%}")
+                    logger.info(
+                        f"  资金分配: Long {self._long_ratio:.1%} / Short {self._short_ratio:.1%}"
+                    )
                 else:
-                    long_amt = self._account_config.get('long_initial_balance', '自动(50%)')
-                    short_amt = self._account_config.get('short_initial_balance', '自动(50%)')
-                    logger.info(f"  Long 账户: {long_amt} USDT" if isinstance(long_amt, (int, float)) else f"  Long 账户: {long_amt}")
-                    logger.info(f"  Short 账户: {short_amt} USDT" if isinstance(short_amt, (int, float)) else f"  Short 账户: {short_amt}")
+                    long_amt = self._account_config.get("long_initial_balance", "自动(50%)")
+                    short_amt = self._account_config.get("short_initial_balance", "自动(50%)")
+                    logger.info(
+                        f"  Long 账户: {long_amt} USDT"
+                        if isinstance(long_amt, (int, float))
+                        else f"  Long 账户: {long_amt}"
+                    )
+                    logger.info(
+                        f"  Short 账户: {short_amt} USDT"
+                        if isinstance(short_amt, (int, float))
+                        else f"  Short 账户: {short_amt}"
+                    )
             logger.info(f"  数据库快照: {'✅ 启用' if self.enable_snapshot else '❌ 禁用'}")
             if self.enable_snapshot:
                 logger.info(f"  快照频率: 每 {self.snapshot_frequency} 个 loop")
@@ -169,7 +185,7 @@ class BaseStrategyWithSnapshot(IStrategy):
                 initial_usdt = 0.0
 
                 # 尝试获取实际钱包余额
-                if hasattr(self, 'wallets') and self.wallets:
+                if hasattr(self, "wallets") and self.wallets:
                     try:
                         # 优先使用 get_starting_balance()
                         initial_usdt = float(self.wallets.get_starting_balance())
@@ -203,21 +219,29 @@ class BaseStrategyWithSnapshot(IStrategy):
                     self.short_initial_balance = initial_usdt * short_ratio
                 else:
                     # 使用具体金额
-                    configured_long = float(self._account_config.get(
-                        'long_initial_balance',
-                        initial_usdt * 0.5  # 默认 50/50
-                    ))
-                    configured_short = float(self._account_config.get(
-                        'short_initial_balance',
-                        initial_usdt * 0.5  # 默认 50/50
-                    ))
+                    configured_long = float(
+                        self._account_config.get(
+                            "long_initial_balance",
+                            initial_usdt * 0.5,  # 默认 50/50
+                        )
+                    )
+                    configured_short = float(
+                        self._account_config.get(
+                            "short_initial_balance",
+                            initial_usdt * 0.5,  # 默认 50/50
+                        )
+                    )
 
                     total_configured = configured_long + configured_short
                     self.long_initial_balance = configured_long
                     self.short_initial_balance = configured_short
 
                     # 如果钱包资金不足以覆盖固定金额，则按比例缩放
-                    if initial_usdt > 0 and total_configured > initial_usdt and total_configured > 0:
+                    if (
+                        initial_usdt > 0
+                        and total_configured > initial_usdt
+                        and total_configured > 0
+                    ):
                         scale = initial_usdt / total_configured
                         self.long_initial_balance = configured_long * scale
                         self.short_initial_balance = configured_short * scale
@@ -254,12 +278,12 @@ class BaseStrategyWithSnapshot(IStrategy):
             asset_data = self._get_detailed_assets()
 
             # 更新实例变量
-            self.total_short_usdt = asset_data['total_short_usdt']
-            self.short_profit_ratio = asset_data['short_position_profit_pct']
-            self.total_long_usdt = asset_data['total_long_usdt']
-            self.long_profit_ratio = asset_data['long_position_profit_pct']
-            self.real_usdt = asset_data['real_usdt']
-            self.total_profit_pct = asset_data['total_profit_pct']
+            self.total_short_usdt = asset_data["total_short_usdt"]
+            self.short_profit_ratio = asset_data["short_position_profit_pct"]
+            self.total_long_usdt = asset_data["total_long_usdt"]
+            self.long_profit_ratio = asset_data["long_position_profit_pct"]
+            self.real_usdt = asset_data["real_usdt"]
+            self.total_profit_pct = asset_data["total_profit_pct"]
 
             # 根据配置决定是否输出日志
             if self.enable_detailed_logs:
@@ -382,52 +406,51 @@ class BaseStrategyWithSnapshot(IStrategy):
 
         # 9. 计算盈利比率
         short_position_profit_pct = (
-            0.0 if short_stake == 0
-            else 100.0 * short_open_profit / short_stake
+            0.0 if short_stake == 0 else 100.0 * short_open_profit / short_stake
         )
-        long_position_profit_pct = (
-            0.0 if long_stake == 0
-            else 100.0 * long_open_profit / long_stake
-        )
+        long_position_profit_pct = 0.0 if long_stake == 0 else 100.0 * long_open_profit / long_stake
 
         short_total_profit_pct = (
-            0.0 if initial_short == 0
+            0.0
+            if initial_short == 0
             else 100.0 * (short_closed_profit + short_open_profit) / initial_short
         )
         long_total_profit_pct = (
-            0.0 if initial_long == 0
+            0.0
+            if initial_long == 0
             else 100.0 * (long_closed_profit + long_open_profit) / initial_long
         )
 
         total_profit_pct = (
-            0.0 if initial_usdt == 0
+            0.0
+            if initial_usdt == 0
             else 100.0 * (total_closed_profit + total_open_profit) / initial_usdt
         )
 
         return {
-            'initial_usdt': initial_usdt,
-            'initial_short': initial_short,
-            'initial_long': initial_long,
-            'wallet_balance': wallet_balance,
-            'total_balance': real_usdt,
-            'real_usdt': real_usdt,
-            'total_profit_pct': total_profit_pct,
-            'open_trade_count': len(all_open_trades),
-            'closed_trade_count': len(all_closed_trades),
+            "initial_usdt": initial_usdt,
+            "initial_short": initial_short,
+            "initial_long": initial_long,
+            "wallet_balance": wallet_balance,
+            "total_balance": real_usdt,
+            "real_usdt": real_usdt,
+            "total_profit_pct": total_profit_pct,
+            "open_trade_count": len(all_open_trades),
+            "closed_trade_count": len(all_closed_trades),
             # Short数据
-            'total_short_usdt': total_short_usdt,
-            'short_stake': short_stake,
-            'short_open_profit': short_open_profit,
-            'short_closed_profit': short_closed_profit,
-            'short_position_profit_pct': short_position_profit_pct,
-            'short_total_profit_pct': short_total_profit_pct,
+            "total_short_usdt": total_short_usdt,
+            "short_stake": short_stake,
+            "short_open_profit": short_open_profit,
+            "short_closed_profit": short_closed_profit,
+            "short_position_profit_pct": short_position_profit_pct,
+            "short_total_profit_pct": short_total_profit_pct,
             # Long数据
-            'total_long_usdt': total_long_usdt,
-            'long_stake': long_stake,
-            'long_open_profit': long_open_profit,
-            'long_closed_profit': long_closed_profit,
-            'long_position_profit_pct': long_position_profit_pct,
-            'long_total_profit_pct': long_total_profit_pct,
+            "total_long_usdt": total_long_usdt,
+            "long_stake": long_stake,
+            "long_open_profit": long_open_profit,
+            "long_closed_profit": long_closed_profit,
+            "long_position_profit_pct": long_position_profit_pct,
+            "long_total_profit_pct": long_total_profit_pct,
         }
 
     def _log_asset_summary(self, asset_data: dict[str, Any]) -> None:
@@ -448,9 +471,7 @@ class BaseStrategyWithSnapshot(IStrategy):
         )
         logger.info(f"  ✅ 已平仓盈亏: {asset_data['short_closed_profit']:>12.2f} USDT")
         logger.info(f"  📊 账户总资产: {asset_data['total_short_usdt']:>12.2f} USDT")
-        logger.info(
-            f"  📈 总收益率: {asset_data['short_total_profit_pct']:>12.2f}% (基于初始资金)"
-        )
+        logger.info(f"  📈 总收益率: {asset_data['short_total_profit_pct']:>12.2f}% (基于初始资金)")
         logger.info("-" * 80)
 
         # Long 账户信息
@@ -463,9 +484,7 @@ class BaseStrategyWithSnapshot(IStrategy):
         )
         logger.info(f"  ✅ 已平仓盈亏: {asset_data['long_closed_profit']:>12.2f} USDT")
         logger.info(f"  📊 账户总资产: {asset_data['total_long_usdt']:>12.2f} USDT")
-        logger.info(
-            f"  📈 总收益率: {asset_data['long_total_profit_pct']:>12.2f}% (基于初始资金)"
-        )
+        logger.info(f"  📈 总收益率: {asset_data['long_total_profit_pct']:>12.2f}% (基于初始资金)")
         logger.info("-" * 80)
 
         # 总览信息
@@ -494,24 +513,24 @@ class BaseStrategyWithSnapshot(IStrategy):
             StrategySnapshot.create_snapshot(
                 strategy_name=self.__class__.__name__,
                 timestamp=current_time,
-                initial_balance=asset_data['initial_usdt'],
-                wallet_balance=asset_data['wallet_balance'],
-                total_balance=asset_data['real_usdt'],
-                total_profit_pct=asset_data['total_profit_pct'],
-                open_trade_count=asset_data['open_trade_count'],
-                closed_trade_count=asset_data['closed_trade_count'],
-                short_balance=asset_data['total_short_usdt'],
-                short_stake=asset_data['short_stake'],
-                short_open_profit=asset_data['short_open_profit'],
-                short_closed_profit=asset_data['short_closed_profit'],
-                short_position_profit_pct=asset_data['short_position_profit_pct'],
-                short_total_profit_pct=asset_data['short_total_profit_pct'],
-                long_balance=asset_data['total_long_usdt'],
-                long_stake=asset_data['long_stake'],
-                long_open_profit=asset_data['long_open_profit'],
-                long_closed_profit=asset_data['long_closed_profit'],
-                long_position_profit_pct=asset_data['long_position_profit_pct'],
-                long_total_profit_pct=asset_data['long_total_profit_pct'],
+                initial_balance=asset_data["initial_usdt"],
+                wallet_balance=asset_data["wallet_balance"],
+                total_balance=asset_data["real_usdt"],
+                total_profit_pct=asset_data["total_profit_pct"],
+                open_trade_count=asset_data["open_trade_count"],
+                closed_trade_count=asset_data["closed_trade_count"],
+                short_balance=asset_data["total_short_usdt"],
+                short_stake=asset_data["short_stake"],
+                short_open_profit=asset_data["short_open_profit"],
+                short_closed_profit=asset_data["short_closed_profit"],
+                short_position_profit_pct=asset_data["short_position_profit_pct"],
+                short_total_profit_pct=asset_data["short_total_profit_pct"],
+                long_balance=asset_data["total_long_usdt"],
+                long_stake=asset_data["long_stake"],
+                long_open_profit=asset_data["long_open_profit"],
+                long_closed_profit=asset_data["long_closed_profit"],
+                long_position_profit_pct=asset_data["long_position_profit_pct"],
+                long_total_profit_pct=asset_data["long_total_profit_pct"],
                 extra_data=extra_data,
             )
             logger.debug("💾 资金快照已保存到数据库")
@@ -556,14 +575,19 @@ class BaseStrategyWithSnapshot(IStrategy):
             for trade in open_trades:
                 trade_is_long = not trade.is_short
                 # 使用 max_stake_amount 以包含所有加仓金额
-                stake = float(trade.max_stake_amount) if hasattr(trade, 'max_stake_amount') else float(trade.stake_amount)
+                if hasattr(trade, "max_stake_amount") and trade.max_stake_amount is not None:
+                    stake = float(trade.max_stake_amount)
+                else:
+                    stake = float(trade.stake_amount)
                 if side == "long" and trade_is_long:
                     used_balance += stake
                 elif side == "short" and trade.is_short:
                     used_balance += stake
 
             # 该账户的初始资金
-            initial_balance = self.long_initial_balance if side == "long" else self.short_initial_balance
+            initial_balance = (
+                self.long_initial_balance if side == "long" else self.short_initial_balance
+            )
 
             # 可用余额 = 初始资金 - 当前使用资金
             available = initial_balance - used_balance
@@ -707,27 +731,27 @@ class BaseStrategyWithSnapshot(IStrategy):
             return df
 
         # 3. 获取交易对名称
-        pair = metadata.get('pair', '')
+        pair = metadata.get("pair", "")
 
         # 4. 根据黑名单过滤信号
         # 检查是否在通用黑名单中
         if self._is_pair_in_blacklist(pair, self._common_blacklist_patterns):
             logger.info(f"🚫 {pair} 在通用黑名单中，清除所有入场信号")
-            df.loc[:, 'enter_long'] = 0
-            df.loc[:, 'enter_short'] = 0
+            df.loc[:, "enter_long"] = 0
+            df.loc[:, "enter_short"] = 0
             return df
 
         # 检查 long 黑名单
         if self._is_pair_in_blacklist(pair, self._long_blacklist_patterns):
-            if 'enter_long' in df.columns and df['enter_long'].sum() > 0:
+            if "enter_long" in df.columns and df["enter_long"].sum() > 0:
                 logger.info(f"🚫 {pair} 在 LONG 黑名单中，清除做多信号")
-                df.loc[:, 'enter_long'] = 0
+                df.loc[:, "enter_long"] = 0
 
         # 检查 short 黑名单
         if self._is_pair_in_blacklist(pair, self._short_blacklist_patterns):
-            if 'enter_short' in df.columns and df['enter_short'].sum() > 0:
+            if "enter_short" in df.columns and df["enter_short"].sum() > 0:
                 logger.info(f"🚫 {pair} 在 SHORT 黑名单中，清除做空信号")
-                df.loc[:, 'enter_short'] = 0
+                df.loc[:, "enter_short"] = 0
 
         return df
 
@@ -767,12 +791,12 @@ class BaseStrategyWithSnapshot(IStrategy):
         try:
             asset_data = self._get_detailed_assets()
             return (
-                asset_data['total_short_usdt'],
-                asset_data['short_position_profit_pct'],
-                asset_data['total_long_usdt'],
-                asset_data['long_position_profit_pct'],
-                asset_data['real_usdt'],
-                asset_data['total_profit_pct'],
+                asset_data["total_short_usdt"],
+                asset_data["short_position_profit_pct"],
+                asset_data["total_long_usdt"],
+                asset_data["long_position_profit_pct"],
+                asset_data["real_usdt"],
+                asset_data["total_profit_pct"],
             )
         except Exception as e:
             logger.error(f"计算资产情况时发生错误: {e}", exc_info=True)
