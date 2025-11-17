@@ -1,0 +1,10 @@
+{
+    "strategy_account": {
+      "enabled": true,
+      "long_initial_balance": 2000,
+      "short_initial_balance": 2000,
+      "use_ratio": true,
+      "long_ratio": 1,
+      "short_ratio": 1
+    }
+  }

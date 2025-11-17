@@ -1,0 +1,37 @@
+{
+  "exchange": {
+    "pair_blacklist": [
+      ".*_.*",
+      ".*DOWN.*",
+      ".*UP.*",
+      ".*BEAR.*",
+      ".*BULL.*",
+      "USDC/USDT:USDT",
+      "USDT/USDC:USDT",
+      "BUSD/USDT:USDT",
+      "BUSD/USDC:USDT",
+      "DAI/USDT:USDT",
+      "TUSD/USDT:USDT",
+      "FDUSD/USDT:USDT",
+      "USDC/BUSD:USDT",
+      ".*USDC.*USDT.*",
+      ".*USDT.*USDC.*",
+      ".*BUSD.*USDT.*",
+      ".*DAI.*USDT.*"
+    ]
+  },
+  "strategy_blacklist": {
+    "enabled": true,
+    "long_blacklist": [
+      ".*DOWN.*",
+      ".*BEAR.*"
+    ],
+    "short_blacklist": [
+      ".*UP.*",
+      ".*BULL.*"
+    ],
+    "common_blacklist": [
+
+    ]
+  }
+}

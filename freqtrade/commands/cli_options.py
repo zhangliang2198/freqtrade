@@ -143,6 +143,12 @@ AVAILABLE_CLI_OPTIONS = {
         help="Starting balance, used for backtesting / hyperopt and dry-runs.",
         type=float,
     ),
+    "start_exporter": Arg(
+        "--start-exporter",
+        help="Start Prometheus exporter alongside the trading process.",
+        action="store_true",
+        default=False,
+    ),
     # Optimize common
     "timeframe": Arg(
         "-i",

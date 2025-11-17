@@ -110,7 +110,11 @@ class ApiServer(RPCHandler):
             ApiServer._message_stream.publish(msg)
 
     def handle_rpc_exception(self, request, exc):
-        logger.error(f"API Error calling: {exc}")
+        # 如果是 trader 未运行的错误，使用 info 级别而不是 error
+        if "trader is not running" in str(exc.message):
+            logger.info(f"Trader 服务未运行")
+        else:
+            logger.error(f"API Error calling: {exc}")
         return JSONResponse(
             status_code=502, content={"error": f"Error querying {request.url.path}: {exc.message}"}
         )

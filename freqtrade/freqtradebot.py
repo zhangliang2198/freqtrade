@@ -66,7 +66,8 @@ from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
 from freqtrade.util import FtPrecise, MeasureTime, PeriodicCache, dt_from_ts, dt_now
 from freqtrade.util.migrations.binance_mig import migrate_binance_futures_names
 from freqtrade.wallets import Wallets
-
+from freqtrade.llm.background_tasks import stop_background_tasks
+from freqtrade.llm.background_tasks import start_background_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,13 @@ class FreqtradeBot(LoggingMixin):
         :return: None
         """
         logger.info("Cleaning up modules ...")
+
+        # 停止 LLM 后台任务（如果启用）
+        try:
+            stop_background_tasks()
+        except Exception as e:
+            logger.warning(f"停止 LLM 后台任务失败: {e}")
+
         try:
             # Wrap db activities in shutdown to avoid problems if database is gone,
             # and raises further exceptions.
@@ -247,6 +255,14 @@ class FreqtradeBot(LoggingMixin):
 
         # 预加载历史数据以加快启动速度
         self.startup_preload_data()
+
+        # 启动 LLM 后台任务（如果启用）
+        llm_config = self.config.get("llm_config", {})
+        if llm_config.get("enabled", False):
+            try:
+                start_background_tasks(self.config)
+            except Exception as e:
+                logger.warning(f"启动 LLM 后台任务失败: {e}")
 
     def process(self) -> None:
         """
@@ -563,7 +579,18 @@ class FreqtradeBot(LoggingMixin):
         Only used balance disappeared, which would make exiting impossible.
         :return: True if the trade was deleted, False otherwise
         """
+        trade_id = getattr(trade, "id", None)
+
         try:
+            if Trade.use_db and trade_id is not None:
+                persistent_trade = Trade.get_trades([Trade.id == trade_id]).first()
+                if persistent_trade is None:
+                    logger.warning(
+                        f"Unable to reload trade {trade_id} from database session. Skipping refresh."
+                    )
+                    return False
+                trade = persistent_trade
+
             orders = self.exchange.fetch_orders(
                 trade.pair, trade.open_date_utc - timedelta(seconds=10)
             )
@@ -580,10 +607,12 @@ class FreqtradeBot(LoggingMixin):
                     logger.info(f"Found previously unknown order {order['id']} for {trade.pair}.")
 
                     order_obj = Order.parse_from_ccxt_object(order, trade.pair, order["side"])
+                    order_obj.ft_trade_id = trade.id
                     order_obj.order_filled_date = dt_from_ts(
                         safe_value_fallback(order, "lastTradeTimestamp", "timestamp")
                     )
                     trade.orders.append(order_obj)
+                    Trade.session.add(order_obj)
                     Trade.commit()
                     trade.exit_reason = ExitType.SOLD_ON_EXCHANGE.value
 
@@ -648,6 +677,9 @@ class FreqtradeBot(LoggingMixin):
         except Exception:
             # catching https://github.com/freqtrade/freqtrade/issues/9025
             logger.warning("Error finding onexchange order", exc_info=True)
+        finally:
+            if Trade.use_db:
+                Trade.session.remove()
         return False
 
     #
@@ -772,6 +804,12 @@ class FreqtradeBot(LoggingMixin):
         Process position adjustment for a single trade.
         Private helper method for process_open_trade_positions.
         """
+        trade_id = trade.id
+        trade = Trade.get_trades([Trade.id == trade_id]).first()
+        if not trade:
+            logger.warning(f"Trade {trade_id} not found in database")
+            return
+
         try:
             self.check_and_call_adjust_trade_position(trade)
         except DependencyException as exception:
@@ -1041,6 +1079,8 @@ class FreqtradeBot(LoggingMixin):
         )
         order_obj = Order.parse_from_ccxt_object(order, pair, side, amount, enter_limit_requested)
         order_obj.ft_order_tag = enter_tag
+        if trade:
+            order_obj.ft_trade_id = trade.id
         order_id = order["id"]
         order_status = order.get("status")
         logger.info(f"Order {order_id} was created for {pair} and status is {order_status}.")
@@ -1135,9 +1175,15 @@ class FreqtradeBot(LoggingMixin):
             trade.is_open = True
             trade.set_funding_fees(funding_fees)
 
+        trade_id = getattr(trade, "id", None)
+        if Trade.use_db and trade_id is not None:
+            persistent_trade = Trade.get_trades([Trade.id == trade_id]).first()
+            if persistent_trade is not None:
+                trade = persistent_trade
         trade.orders.append(order_obj)
         trade.recalc_trade_from_orders()
         Trade.session.add(trade)
+        Trade.session.add(order_obj)
         Trade.commit()
 
         # Updating wallets
@@ -1382,6 +1428,12 @@ class FreqtradeBot(LoggingMixin):
         Private helper method for exit_positions.
         Returns True if trade was closed, False otherwise.
         """
+        trade_id = trade.id
+        trade = Trade.get_trades([Trade.id == trade_id]).first()
+        if not trade:
+            logger.warning(f"Trade {trade_id} not found in database")
+            return False
+
         if (
             not trade.has_open_orders
             and not trade.has_open_sl_orders
@@ -1560,7 +1612,14 @@ class FreqtradeBot(LoggingMixin):
             order_obj = Order.parse_from_ccxt_object(
                 stoploss_order, trade.pair, "stoploss", trade.amount, stop_price
             )
+            order_obj.ft_trade_id = trade.id
+            trade_id = getattr(trade, "id", None)
+            if Trade.use_db and trade_id is not None:
+                persistent_trade = Trade.get_trades([Trade.id == trade_id]).first()
+                if persistent_trade is not None:
+                    trade = persistent_trade
             trade.orders.append(order_obj)
+            Trade.session.add(order_obj)
             return True
         except InsufficientFundsError as e:
             logger.warning(f"Unable to place stoploss order {e}.")
@@ -2290,7 +2349,14 @@ class FreqtradeBot(LoggingMixin):
         self._exit_reason_cache[f"{trade.pair}_{trade.id}_{exit_reason}"] = dt_now()
         order_obj = Order.parse_from_ccxt_object(order, trade.pair, trade.exit_side, amount, limit)
         order_obj.ft_order_tag = exit_reason
+        order_obj.ft_trade_id = trade.id
+        trade_id = getattr(trade, "id", None)
+        if Trade.use_db and trade_id is not None:
+            persistent_trade = Trade.get_trades([Trade.id == trade_id]).first()
+            if persistent_trade is not None:
+                trade = persistent_trade
         trade.orders.append(order_obj)
+        Trade.session.add(order_obj)
 
         trade.exit_order_status = ""
         trade.close_rate_requested = limit
@@ -2300,6 +2366,7 @@ class FreqtradeBot(LoggingMixin):
         # In case of market sell orders the order can be closed immediately
         if order.get("status", "unknown") in ("closed", "expired"):
             self.update_trade_state(trade, order_obj.order_id, order)
+
         Trade.commit()
 
         return True
@@ -2483,6 +2550,7 @@ class FreqtradeBot(LoggingMixin):
         trade.update_trade(order_obj, not send_msg)
 
         trade = self._update_trade_after_fill(trade, order_obj, send_msg)
+
         Trade.commit()
 
         self.order_close_notify(trade, order_obj, stoploss_order, send_msg)

@@ -1,0 +1,6 @@
+{
+    "trading_mode": "futures",
+    "margin_mode": "cross",
+    "dataformat_ohlcv": "feather",
+    "dataformat_trades": "feather"
+}

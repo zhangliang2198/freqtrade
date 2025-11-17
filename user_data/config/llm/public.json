@@ -1,0 +1,50 @@
+{
+    "bot_name": "Freqtrade",
+    "dry_run": true,
+    "dry_run_wallet": 10000,
+    "grinding_enable": true,
+    "$schema": "https:schema.freqtrade.io/schema.json",
+    "stake_currency": "USDT",
+    "fiat_display_currency": "CNY",
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 0.99,
+    "force_entry_enable": true,
+    "initial_state": "running",
+    "cancel_open_orders_on_exit": false,
+    "max_entry_position_adjustment": 9999,
+    "timeframe": "15m",
+    "allow_custom_messages": true,
+    "unfilledtimeout": {
+      "entry": 3,
+      "exit": 2,
+      "exit_timeout_count": 0,
+      "unit": "minutes"
+    },
+    "order_types": {
+      "entry": "market",
+      "exit": "market",
+      "emergency_exit": "market",
+      "force_entry": "market",
+      "force_exit": "market",
+      "stoploss": "market",
+      "stoploss_on_exchange": false,
+      "stoploss_on_exchange_interval": 60,
+      "stoploss_on_exchange_limit_ratio": 0.99
+    },
+    "entry_pricing": {
+      "price_side": "other",
+      "use_order_book": true,
+      "order_book_top": 1,
+      "price_last_balance": 0,
+      "check_depth_of_market": {
+        "enabled": false,
+        "bids_to_ask_delta": 1
+      }
+    },
+    "exit_pricing": {
+      "price_side": "other",
+      "use_order_book": true,
+      "order_book_top": 1,
+      "price_last_balance": 0
+    }
+  }

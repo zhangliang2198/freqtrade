@@ -1,5 +1,5 @@
 # Freqtrade rules
-config*.json
+private*.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
@@ -10,6 +10,14 @@ user_data/*
 !user_data/models
 !user_data/freqaimodels
 !user_data/*.json
+!user_data/config/
+!user_data/llm_prompts/
+
+# Ignore LLM prompt templates (paid version), but keep README files
+user_data/llm_prompts/conservative/*.j2
+user_data/llm_prompts/default/*.j2
+user_data/llm_prompts/aggressive/*.j2
+
 user_data/freqaimodels/*
 user_data/models/*
 user_data/notebooks/*

@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c:*)",
+      "Bash(timeout 3 python:*)",
+      "Bash(python temp_fix_prompts.py:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(timeout 10 python:*)",
+      "Bash(find:*)",
+      "Bash(for file in \"C:\\Users\\zhang\\GitHub\\freqtrade\\user_data\\llm_prompts\"/*.j2)",
+      "Bash(done)",
+      "Bash(\"C:\\Users\\zhang\\GitHub\\freqtrade\\ADJUST_POSITION_OPTIMIZATION_SUGGESTIONS.md\")",
+      "Bash(python test_risk_metrics.py:*)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)",
+      "Bash(git check-ignore:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

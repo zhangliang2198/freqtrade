@@ -1,0 +1,16 @@
+{
+    "strategy": "ExampleLLMStrategy",
+
+    "add_config_files": [
+        "./trading_futures.json",
+        "./pairlist_static_llm.json",
+        "./blacklist.json",
+        "./public.json",
+        "./thread.json",
+        "./log.json",
+        "./accounts.json",
+        "./private.deepseek.json",
+        "./exporter_metrics_llm.json",
+        "./private.llm.json"
+    ]
+}

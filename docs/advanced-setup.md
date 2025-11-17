@@ -134,7 +134,7 @@ The following systems have been tested and are known to work with freqtrade:
 ### PostgreSQL
 
 Installation:
-`pip install "psycopg[binary]"`
+`ip pinstall "psycopg[binary]"`
 
 Usage:
 `... --db-url postgresql+psycopg://<username>:<password>@localhost:5432/<database>`

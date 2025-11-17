@@ -1,0 +1,8 @@
+{
+    "strategy_snapshot": {
+      "enabled": true,
+      "enable_detailed_logs": true,
+      "enable_strategy_logs": true,
+      "snapshot_frequency": 10
+    }
+  }

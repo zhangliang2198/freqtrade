@@ -6,6 +6,10 @@
         "./pairlist_short.json",
         "./blacklist.json",
         "./public.json",
+        "./thread.json",
+        "./log.json",
+        "./accounts.json",
+        "./exporter_metrics.json",
         "./private.copy.json"
     ]
 }

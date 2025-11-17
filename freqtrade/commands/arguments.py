@@ -31,7 +31,7 @@ ARGS_STRATEGY = [
     "freqaimodel_path",
 ]
 
-ARGS_TRADE = ["db_url", "sd_notify", "dry_run", "dry_run_wallet", "fee"]
+ARGS_TRADE = ["db_url", "sd_notify", "dry_run", "dry_run_wallet", "start_exporter", "fee"]
 
 ARGS_WEBSERVER: list[str] = []
 
@@ -379,6 +379,7 @@ class Arguments:
             start_convert_trades,
             start_create_userdir,
             start_download_data,
+            start_exporter_service,
             start_edge,
             start_hyperopt,
             start_hyperopt_list,
@@ -418,6 +419,13 @@ class Arguments:
         )
         trade_cmd.set_defaults(func=start_trading)
         self._build_args(optionlist=ARGS_TRADE, parser=trade_cmd)
+
+        exporter_cmd = subparsers.add_parser(
+            "exporter",
+            help="启动 Prometheus Exporter 服务。",
+            parents=[_common_parser],
+        )
+        exporter_cmd.set_defaults(func=start_exporter_service)
 
         # add create-userdir subcommand
         create_userdir_cmd = subparsers.add_parser(

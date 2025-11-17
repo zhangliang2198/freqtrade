@@ -154,6 +154,18 @@ def test_parse_args_strategy_path_invalid() -> None:
         Arguments(["--strategy-path"]).get_parsed_arg()
 
 
+def test_parse_args_start_exporter() -> None:
+    args = Arguments(["trade", "--start-exporter"]).get_parsed_arg()
+    assert args["start_exporter"] is True
+
+
+def test_parse_args_exporter_command(mocker) -> None:
+    mocker.patch.object(Path, "is_file", MagicMock(return_value=True))
+    args = Arguments(["exporter", "--config", "user_data/config.json"]).get_parsed_arg()
+    assert args["command"] == "exporter"
+    assert callable(args["func"])
+
+
 def test_parse_args_backtesting_invalid() -> None:
     with pytest.raises(SystemExit, match=r"2"):
         Arguments(["backtesting --timeframe"]).get_parsed_arg()

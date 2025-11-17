@@ -2082,37 +2082,32 @@ class Trade(ModelBase, LocalTrade):
         finally:
             Trade.session.remove()
 
-        resp: list[dict] = []
+        resp: dict[str, dict[str, Any]] = {}
         for _, enter_tag, exit_reason, profit, profit_abs, count in mix_tag_perf:
             enter_tag = enter_tag if enter_tag is not None else "Other"
             exit_reason = exit_reason if exit_reason is not None else "Other"
 
-            if exit_reason is not None and enter_tag is not None:
-                mix_tag = enter_tag + " " + exit_reason
-                i = 0
-                if not any(item["mix_tag"] == mix_tag for item in resp):
-                    resp.append(
-                        {
-                            "mix_tag": mix_tag,
-                            "profit_ratio": profit,
-                            "profit_pct": round(profit * 100, 2),
-                            "profit_abs": profit_abs,
-                            "count": count,
-                        }
-                    )
-                else:
-                    while i < len(resp):
-                        if resp[i]["mix_tag"] == mix_tag:
-                            resp[i] = {
-                                "mix_tag": mix_tag,
-                                "profit_ratio": profit + resp[i]["profit_ratio"],
-                                "profit_pct": round(profit + resp[i]["profit_ratio"] * 100, 2),
-                                "profit_abs": profit_abs + resp[i]["profit_abs"],
-                                "count": 1 + resp[i]["count"],
-                            }
-                        i += 1
+            mix_tag = f"{enter_tag} {exit_reason}"
+            profit = float(profit or 0.0)
+            profit_abs = float(profit_abs or 0.0)
+            count = int(count or 0)
 
-        return resp
+            if mix_tag not in resp:
+                resp[mix_tag] = {
+                    "mix_tag": mix_tag,
+                    "profit_ratio": 0.0,
+                    "profit_abs": 0.0,
+                    "count": 0,
+                }
+
+            resp[mix_tag]["profit_ratio"] += profit
+            resp[mix_tag]["profit_abs"] += profit_abs
+            resp[mix_tag]["count"] += count
+
+        for item in resp.values():
+            item["profit_pct"] = round(item["profit_ratio"] * 100, 2)
+
+        return list(resp.values())
 
     @staticmethod
     def get_best_pair(trade_filter: list | None = None):

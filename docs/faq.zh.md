@@ -87,7 +87,7 @@ RPC 调用（Telegram 的 `/balance`，对 `/balance` 的 API 调用）最多每
 
 Freqtrade 不会向策略提供不完整的 K 线。使用不完整的 K 线会导致重绘，从而导致策略出现“幽灵”买入，这既无法回测，也无法在事后验证。
 
-您可以通过使用[数据提供者](strategy-customization.md#orderbookpair-maximum)的订单簿或代码方法来使用“当前”市场数据 - 但是，这在回测期间无法使用。
+您可以通过使用[数据提供商](strategy-customization.md#orderbookpair-maximum)的订单簿或代码方法来使用“当前”市场数据 - 但是，这在回测期间无法使用。
 
 ### 是否有设置只退出持有的交易而不执行任何新的入场？
 
