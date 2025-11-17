@@ -6,7 +6,20 @@ fork自源仓库，每月同步一次源框架稳定代码。不断优化和添�
 
 <img src="小森林量化logo.png" alt="小森林量化QQ群" width="300">
 
-也可关注币安：`theshortgod` 的带单账户。
+## 获取更详细说明，提示词模板，技术讨论，指导，定制需求请加星球
+
+<img src="海报.png" alt="知识星球" width="300">
+
+
+
+
+## v1.0.7 新增 大模型交易
+
+相关配置，模板变量说明，已经放置在对应位置。
+
+```
+freqtrade trade --config user_data/config/llm/config.json
+```
 
 
 ## v1.0.6 新增 Prometheus 指标抛出
