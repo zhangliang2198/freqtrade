@@ -17,7 +17,7 @@ fork自源仓库，每月同步一次源框架稳定代码。不断优化和添�
 
 相关配置，模板变量说明，已经放置在对应位置。可以自己拼凑提示词。
 
-运行，配置里面prive.xxx.conf,llm_deepseek,需要修改成自己的
+- 注意：配置里面private.llm.conf,llm_deepseek.conf,需要修改成自己的。
 
 ```
 freqtrade trade --config user_data/config/llm/config.json
@@ -26,22 +26,24 @@ freqtrade trade --config user_data/config/llm/config.json
 ### 提示词
 example (简化版)
 
-✅ 基础市场信息（价格、时间周期）
-✅ 主时间框架技术指标
-❌ 无多周期分析
-❌ 无原始K线数据
-❌ 无详细资金管理
-❌ 无持仓深度分析
+- ✅ 基础市场信息（价格、时间周期）
+- ✅ 主时间框架技术指标
+- ❌ 无多周期分析
+- ❌ 无原始K线数据
+- ❌ 无详细资金管理
+- ❌ 无持仓深度分析
+
 default/aggressive/conservative (完整版)
 
-✅ 详细市场概况
-✅ 主时间框架指标
-✅ 多个信息周期指标
-✅ 原始K线数据
-✅ 详细资金状况
-✅ 完整持仓组合分析
-✅ 历史交易表现
+- ✅ 详细市场概况
+- ✅ 主时间框架指标
+- ✅ 多个信息周期指标
+- ✅ 原始K线数据
+- ✅ 详细资金状况
+- ✅ 完整持仓组合分析
+- ✅ 历史交易表现
 
+详细使用说明：https://articles.zsxq.com/id_dxr1veo9s7cw.html
 
 ## v1.0.6 新增 Prometheus 指标抛出
 
@@ -122,6 +124,8 @@ bug：修复使用 `mysql/pgsql `时，且开启多线程处理的情况下，�
 - 命令：[`freqtrade/commands/list_commands.py`](freqtrade/commands/list_commands.py) - 传递配置
 
 ## v1.0.2 新增策略资金快照和账户分离功能
+
+参考文章：https://articles.zsxq.com/id_jj8cp54fm4gl.html
 
 添加 `BaseStrategyWithSnapshot` 策略基类，提供**资金快照记录**、**Long/Short 账户分离**、**严格资金限制**等功能。
 
