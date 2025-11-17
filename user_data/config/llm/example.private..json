@@ -2,7 +2,7 @@
     "dry_run": true,
     "max_open_trades": 300,
     "max_entry_position_adjustment": 5,
-    "timeframe": "5m",
+    "timeframe": "1h",
     "db_url": "postgresql+psycopg://postgres:postgres@localhost:5432/llm_strategy?client_encoding=utf8&options=-c%20timezone%3DUTC",
     "exchange": {
         "name": "binance",
@@ -11,14 +11,14 @@
         "sandbox": false,
         "ccxt_config": {
             "wsProxy": "<PROXY_URL>",
-            "httpsProxy": "<PROXY_URL>", 
+            "httpsProxy": "<PROXY_URL>",
             "enableRateLimit": true,
             "rateLimit": 30,
             "timeout": 30000
         },
         "ccxt_async_config": {
             "wsProxy": "<PROXY_URL>",
-            "httpsProxy": "<PROXY_URL>", 
+            "httpsProxy": "<PROXY_URL>",
             "enableRateLimit": true,
             "rateLimit": 30,
             "timeout": 30000
@@ -66,6 +66,6 @@
         "password": "<PASSWORD>"
     },
     "internals": {
-        "process_throttle_secs": 5
+        "process_throttle_secs": 1800
     }
   }
