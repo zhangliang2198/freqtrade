@@ -21,20 +21,35 @@
 
 1. [Freqtrade 【custom_data】 全面理解](https://articles.zsxq.com/id_443ngi0lprlc.html)
 2. [Freqtrade 【adjust_trade_position】 方法理解程](https://articles.zsxq.com/id_wvmlm9ol7prp.html)
-3. [FreqTrade对象详解：【Trade】 类完全理解](https://articles.zsxq.com/id_tnu9mmpxpz52.html)
-4. [Freqtrade【populate_indicators】 完全理解](https://articles.zsxq.com/id_fwn8ntpopkbb.html)
-5. [Freqtrade 【populate_entry_trend】 完全理解](https://articles.zsxq.com/id_pmz68ubb39w8.html)
-6. [Freqtrade 【informative_pairs】 完全理解](https://articles.zsxq.com/id_e13wz2p7tdbx.html)
-7. [Freqtrade 【custom_exit】 方法完全理解](https://articles.zsxq.com/id_zi1bmb3c3kg0.html)
-8. [Freqtrade 【custom_stake_amount】 完全理解](https://articles.zsxq.com/id_62xh51gkcir8.html)
-9. [Freqtrade 【ROI】退出机制完全指南](https://articles.zsxq.com/id_fpjcapuhxfvg.html)
-10. 
+3. [Freqtrade【populate_indicators】 完全理解](https://articles.zsxq.com/id_fwn8ntpopkbb.html)
+4. [Freqtrade 【populate_entry_trend】 完全理解](https://articles.zsxq.com/id_pmz68ubb39w8.html)
+5. [Freqtrade 【informative_pairs】 完全理解](https://articles.zsxq.com/id_e13wz2p7tdbx.html)
+6. [Freqtrade 【custom_exit】 方法完全理解](https://articles.zsxq.com/id_zi1bmb3c3kg0.html)
+7. [Freqtrade 【custom_stake_amount】 完全理解](https://articles.zsxq.com/id_62xh51gkcir8.html)
+8. [Freqtrade 【ROI】退出机制完全指南](https://articles.zsxq.com/id_fpjcapuhxfvg.html)
+9. [Freqtrade 【Trailing Stop】 退出机制完全指南](https://articles.zsxq.com/id_wblldsrons7x.html)
+
+### 框架进阶
+
+以下想深入了解freqtrade，希望之后自己开发一套量化交易系统的，可以学习。
+
+1. [FreqTrade对象详解：【Trade】 类完全理解](https://articles.zsxq.com/id_tnu9mmpxpz52.html)
+2. [FreqTrade对象详解：【Wallets】 类完全理解]()
+3. [FreqTrade对象详解：【Order】 类完全理解]()
+4. [Freqtrade IStrategy 【钩子函数】完全指南（上）](https://articles.zsxq.com/id_q745i49956ij.html)
+5. [Freqtrade IStrategy 【钩子函数】完全指南（下）](https://articles.zsxq.com/id_56mewzrabmu0.html)
+6. [Freqtrade 【Wallets】 模块深度解析](https://articles.zsxq.com/id_o58qx3lhwfho.html)
 
 ### 框架定制化开发
 
 一些比较实用的扩展，包括各个社区的项目，付费用户提出的定制化等等。帮你赚钱路上更加轻松。
 
 1. [（freqtrade）BaseStrategyWithSnapshot：让量化策略更智能的增强基类](https://articles.zsxq.com/id_jj8cp54fm4gl.html)
+
+### 大神策略思路
+
+一些大神的策略思路
+
 
 ### 大模型预语言交易
 
