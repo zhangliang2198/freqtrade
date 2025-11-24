@@ -28,6 +28,7 @@
 7. [Freqtrade 【custom_stake_amount】 完全理解](https://articles.zsxq.com/id_62xh51gkcir8.html)
 8. [Freqtrade 【ROI】退出机制完全指南](https://articles.zsxq.com/id_fpjcapuhxfvg.html)
 9. [Freqtrade 【Trailing Stop】 退出机制完全指南](https://articles.zsxq.com/id_wblldsrons7x.html)
+10. [Freqtrade 数据库切换指南](https://articles.zsxq.com/id_qako4lhz12oo.html)
 
 ### 框架进阶
 
@@ -38,6 +39,9 @@
 3. [Freqtrade IStrategy 【钩子函数】完全指南（上）](https://articles.zsxq.com/id_q745i49956ij.html)
 4. [Freqtrade IStrategy 【钩子函数】完全指南（下）](https://articles.zsxq.com/id_56mewzrabmu0.html)
 5. [Freqtrade 【Wallets】 模块深度解析](https://articles.zsxq.com/id_o58qx3lhwfho.html)
+6. [Freqtrade 机器人运行机制高阶教程（上）](https://articles.zsxq.com/id_0qa13891co0r.html)
+7. [Freqtrade 机器人运行机制高阶教程（下）](https://articles.zsxq.com/id_2qctgdl1grfj.html)
+8. [](https://articles.zsxq.com/id_dlx7lq1wl443.html)
 
 ### 框架定制化开发
 
