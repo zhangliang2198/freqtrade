@@ -34,11 +34,10 @@
 以下想深入了解freqtrade，希望之后自己开发一套量化交易系统的，可以学习。
 
 1. [FreqTrade对象详解：【Trade】 类完全理解](https://articles.zsxq.com/id_tnu9mmpxpz52.html)
-2. [FreqTrade对象详解：【Wallets】 类完全理解]()
-3. [FreqTrade对象详解：【Order】 类完全理解]()
-4. [Freqtrade IStrategy 【钩子函数】完全指南（上）](https://articles.zsxq.com/id_q745i49956ij.html)
-5. [Freqtrade IStrategy 【钩子函数】完全指南（下）](https://articles.zsxq.com/id_56mewzrabmu0.html)
-6. [Freqtrade 【Wallets】 模块深度解析](https://articles.zsxq.com/id_o58qx3lhwfho.html)
+2. [FreqTrade对象详解：【Order】 类完全理解]()
+3. [Freqtrade IStrategy 【钩子函数】完全指南（上）](https://articles.zsxq.com/id_q745i49956ij.html)
+4. [Freqtrade IStrategy 【钩子函数】完全指南（下）](https://articles.zsxq.com/id_56mewzrabmu0.html)
+5. [Freqtrade 【Wallets】 模块深度解析](https://articles.zsxq.com/id_o58qx3lhwfho.html)
 
 ### 框架定制化开发
 
