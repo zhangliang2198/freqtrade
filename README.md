@@ -11,6 +11,49 @@
 <img src="海报.png" alt="知识星球" width="300">
 
 
+## 更新文章
+
+### 基础知识
+
+精通freqtrade框架是赚钱的前提。
+
+以下内容不仅分析实现原理，还给出使用场景，最佳实践等等说明。
+
+1. [Freqtrade 【custom_data】 全面理解](https://articles.zsxq.com/id_443ngi0lprlc.html)
+2. [Freqtrade 【adjust_trade_position】 方法理解程](https://articles.zsxq.com/id_wvmlm9ol7prp.html)
+3. [FreqTrade对象详解：【Trade】 类完全理解](https://articles.zsxq.com/id_tnu9mmpxpz52.html)
+4. [Freqtrade【populate_indicators】 完全理解](https://articles.zsxq.com/id_fwn8ntpopkbb.html)
+5. [Freqtrade 【populate_entry_trend】 完全理解](https://articles.zsxq.com/id_pmz68ubb39w8.html)
+6. [Freqtrade 【informative_pairs】 完全理解](https://articles.zsxq.com/id_e13wz2p7tdbx.html)
+7. [Freqtrade 【custom_exit】 方法完全理解](https://articles.zsxq.com/id_zi1bmb3c3kg0.html)
+8. [Freqtrade 【custom_stake_amount】 完全理解](https://articles.zsxq.com/id_62xh51gkcir8.html)
+9. [Freqtrade 【ROI】退出机制完全指南](https://articles.zsxq.com/id_fpjcapuhxfvg.html)
+10. 
+
+### 框架定制化开发
+
+一些比较实用的扩展，包括各个社区的项目，付费用户提出的定制化等等。帮你赚钱路上更加轻松。
+
+1. [（freqtrade）BaseStrategyWithSnapshot：让量化策略更智能的增强基类](https://articles.zsxq.com/id_jj8cp54fm4gl.html)
+
+### 大模型预语言交易
+
+采用最前沿的llm方式来指导决策。
+
+1. [LLM 交易提示词（保守）](https://articles.zsxq.com/id_q863oidwk8dv.html)，[LLM 交易提示词（默认）](https://articles.zsxq.com/id_r9pd9xaqvghb.html)，[LLM 交易提示词（激进）](https://articles.zsxq.com/id_kxnf44g827uw.html)
+2. [(freqtrade)LLM策略使用指南](https://articles.zsxq.com/id_dxr1veo9s7cw.html)
+
+### fraqAI
+
+使用机器学习来自动化交易。
+
+1. [fraqAI基本入门](https://articles.zsxq.com/id_zv9q9a0esn9s.html)
+
+### fraq new UI
+
+使用更好的UI，更加优化的用户体验，更方便的交易机器人管理方式来进行自动化交易
+
+1. 敬请期待......
 
 
 ## v1.0.7 新增 大模型交易
