@@ -41,7 +41,7 @@
 5. [Freqtrade 【Wallets】 模块深度解析](https://articles.zsxq.com/id_o58qx3lhwfho.html)
 6. [Freqtrade 机器人运行机制高阶教程（上）](https://articles.zsxq.com/id_0qa13891co0r.html)
 7. [Freqtrade 机器人运行机制高阶教程（下）](https://articles.zsxq.com/id_2qctgdl1grfj.html)
-8. [](https://articles.zsxq.com/id_dlx7lq1wl443.html)
+8. [Freqtrade 机器人运行机制图示](https://articles.zsxq.com/id_dlx7lq1wl443.html)
 
 ### 框架定制化开发
 
