@@ -1,0 +1,30 @@
+{
+  "exchange": {
+    "pair_whitelist": []
+  },
+  "pairlists": [
+    {
+      "method": "VolumePairList",
+      "number_assets": 100,
+      "sort_key": "quoteVolume",
+      "min_value": 50000000,
+      "refresh_period": 300
+    },
+    {
+      "method": "AgeFilter",
+      "min_days_listed": 30
+    },
+    {
+      "method": "SpreadFilter",
+      "max_spread_ratio": 0.0015
+    },
+    {
+      "method": "PercentChangePairList",
+      "number_assets": 10,
+      "lookback_timeframe": "5m",
+      "lookback_period": 12,
+      "refresh_period": 300,
+      "sort_direction": "desc"
+    }
+  ]
+}
