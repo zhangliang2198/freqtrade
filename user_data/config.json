@@ -56,7 +56,7 @@
     "min_positions": 2,
     "max_positions": 5,
     "base_entry_score": 40.0,
-    "additional_entry_score": 50.0,
+    "additional_entry_score": 45.0,
     "min_short_share": 0.5,
     "min_absolute_momentum": 0.0,
     "min_trend_continuity": 0.6666666666666666,

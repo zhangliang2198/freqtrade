@@ -1037,7 +1037,7 @@ def test_selects_two_base_positions_and_only_high_confidence_extras() -> None:
         "BLOCKED": 100.0,
         "A": 90.0,
         "B": 60.0,
-        "C": 49.0,
+        "C": 44.99,
     }
     strategy._metrics = {pair: _fresh_score_metric() for pair in strategy._scores}
     strategy._score_leaders = list(strategy._scores)
@@ -1060,6 +1060,8 @@ def test_selects_two_base_positions_and_only_high_confidence_extras() -> None:
 
     with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
         assert strategy._select_entries() == {"A", "B"}
+        strategy._scores["C"] = 45.0
+        assert strategy._select_entries() == {"A", "B", "C"}
 
         strategy._scores = {"LOW": 39.0}
         strategy._metrics = {"LOW": _fresh_score_metric()}

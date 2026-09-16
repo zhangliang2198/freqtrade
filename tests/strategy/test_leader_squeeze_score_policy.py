@@ -206,16 +206,16 @@ def test_low_intensity_hard_gates_reject_even_a_100_point_candidate(override) ->
         assert strategy._select_entries() == set()
 
 
-def test_two_initial_positions_accept_40_but_third_position_requires_50() -> None:
+def test_two_initial_positions_accept_40_but_third_position_requires_45() -> None:
     strategy = _entry_strategy({"A": 40.0, "B": 40.0})
     with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
         assert strategy._select_entries() == {"A", "B"}
 
-    strategy = _entry_strategy({"A": 50.0, "B": 40.0, "C": 49.99})
+    strategy = _entry_strategy({"A": 45.0, "B": 40.0, "C": 44.99})
     with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
         assert strategy._select_entries() == {"A", "C"}
     assert "B" not in strategy._entry_pairs
-    assert "50.0" in strategy._entry_decisions["B"]
+    assert "45.0" in strategy._entry_decisions["B"]
 
 
 def _rotation_strategy(weak_score: float, target_score: float) -> LeaderSqueezeStrategy:
@@ -331,7 +331,7 @@ def test_unsubmitted_rotation_is_cancelled_when_score_gap_disappears() -> None:
 
 @pytest.mark.parametrize("held_count,allowed", [(0, True), (1, True), (2, False)])
 def test_confirmation_checks_actual_position_count_after_funding_expires(held_count, allowed):
-    strategy = _entry_strategy({PAIR: 51.0})
+    strategy = _entry_strategy({PAIR: 46.0})
     strategy._metrics[PAIR].update(
         {
             "score_funding": 1.0,
@@ -350,7 +350,7 @@ def test_confirmation_checks_actual_position_count_after_funding_expires(held_co
             is allowed
         )
     if not allowed:
-        assert "48.0 < 门槛 50.0" in strategy._entry_block_reason
+        assert "43.0 < 门槛 45.0" in strategy._entry_block_reason
         strategy._execution_is_safe.assert_not_called()
 
 
