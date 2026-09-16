@@ -1,97 +1,100 @@
-"""Long-only leader strategy for crowded-short squeezes on Binance futures."""
+"""币安合约上的多头龙头挤空策略。"""
 
 from __future__ import annotations
 
-import json
-import logging
 import math
 import threading
 import time
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-import requests
+from leader_squeeze_config import LeaderConfigMixin, configure_strategy, validate_runtime_settings
+from leader_squeeze_data import LeaderDataMixin
+from leader_squeeze_execution import LeaderExecutionMixin
+from leader_squeeze_reporting import LeaderReportingMixin
+from leader_squeeze_storage import LeaderStorageMixin
+from leader_squeeze_support import (
+    DISPLAY_TZ,
+    LOG_ERROR,
+    LOG_GOOD,
+    LOG_INFO,
+    LOG_SCORE,
+    LOG_WARN,
+    logger,
+    report_cached,
+)
+from leader_squeeze_trend import LeaderTrendMixin
 from pandas import DataFrame
-from websockets.sync.client import connect
 
-from freqtrade.constants import BuySell
-from freqtrade.exchange import Exchange
-from freqtrade.persistence import Trade
+from freqtrade.exchange import timeframe_to_seconds
+from freqtrade.persistence import Order, Trade
 from freqtrade.strategy import IStrategy
-from freqtrade.wallets import Wallets
 
 
-logger = logging.getLogger(__name__)
-
-
-class LeaderSqueezeStrategy(IStrategy):
+class LeaderSqueezeStrategy(
+    LeaderConfigMixin,
+    LeaderTrendMixin,
+    LeaderDataMixin,
+    LeaderReportingMixin,
+    LeaderStorageMixin,
+    LeaderExecutionMixin,
+    IStrategy,
+):
     INTERFACE_VERSION = 3
     can_short = False
-    timeframe = "5m"
-    process_only_new_candles = False
-    startup_candle_count = 60
 
-    minimal_roi = {"0": 100.0}
-    stoploss = -0.10
-    use_exit_signal = True
-    exit_profit_only = False
-    position_adjustment_enable = False
+    def __init__(self, config: dict) -> None:
+        configure_strategy(self, config)
+        super().__init__(config)
 
-    order_types = {
-        "entry": "market",
-        "exit": "market",
-        "stoploss": "market",
-        "stoploss_on_exchange": True,
-        "stoploss_on_exchange_interval": 60,
-        "stoploss_price_type": "mark",
-    }
-    order_time_in_force = {"entry": "GTC", "exit": "GTC"}
+    @property
+    def ETH_PAIR(self) -> str:
+        return self.settings["eth_pair"]
 
-    DEFAULTS: dict[str, Any] = {
-        "leverage": 5.0,
-        "stake_ratio": 0.10,
-        "min_positions": 2,
-        "max_positions": 5,
-        "additional_entry_score": 70.0,
-        "min_short_share": 0.30,
-        "score_refresh_seconds": 300,
-        "score_retry_seconds": 30,
-        "data_grace_seconds": 30,
-        "remote_metric_max_age_seconds": 660,
-        "liquidation_stream_max_age_seconds": 15,
-        "external_stop_check_seconds": 60,
-        "max_spread_ratio": 0.001,
-        "max_slippage_ratio": 0.0025,
-        "replacement_score_ratio": 1.30,
-        "replacement_confirmations": 2,
-        "replacement_min_age_minutes": 15,
-        "replacement_cooldown_minutes": 30,
-        "daily_loss_limit": 0.05,
-        "max_drawdown_limit": 0.10,
-        "manage_external_positions": True,
-        "weights": {
-            "short_crowding": 0.30,
-            "momentum": 0.25,
-            "volume": 0.15,
-            "taker_buy": 0.10,
-            "liquidation": 0.10,
-            "oi_squeeze": 0.10,
-        },
-    }
+    @property
+    def ORDER_BOOK_MAX_AGE_SECONDS(self) -> float:
+        return self.settings["order_book_max_age_seconds"]
+
+    @property
+    def ENTRY_HEAT_HISTORY_CANDLES(self) -> int:
+        return (
+            int(
+                self.settings["entry_heat_history_days"]
+                * 86400
+                / timeframe_to_seconds(self.timeframe)
+            )
+            + 1
+        )
 
     def bot_start(self, **kwargs) -> None:
-        """Initialize runtime state and background market-data workers."""
-        supplied = self.config.get("leader_squeeze", {})
-        self.settings = {**self.DEFAULTS, **supplied}
-        self.settings["weights"] = {**self.DEFAULTS["weights"], **supplied.get("weights", {})}
-        if not math.isclose(sum(self.settings["weights"].values()), 1.0, abs_tol=1e-9):
-            raise ValueError("leader_squeeze weights must add up to 1.0")
+        """初始化运行时状态和后台行情数据工作线程。"""
+        # The resolver has already normalized framework attributes after __init__.
+        # Reloading raw JSON here would restore string ROI keys and break exits.
+        configure_strategy(self, self.config, framework=False)
+        self._validate_score_settings()
+        self._validate_reversal_settings()
+        self._validate_entry_heat_settings()
+        self._validate_tuning_settings()
+        validate_runtime_settings(self)
+        self._initialize_runtime()
+        self._initialize_rotation_audit()
+        if not self.order_types.get("stoploss_on_exchange"):
+            logger.info(
+                "🛡️ 止损模式=程序内止损 | 不新建交易所止损; 历史条件单保留并核对成交 | "
+                "停机或断网期间, 无交易所止损的新仓无法自动止损",
+                extra=LOG_WARN,
+            )
 
+    def _initialize_runtime(self) -> None:
+        self._pending_entry_scores: dict[str, dict[str, Any]] = {}
+        self._order_book_cache: dict[str, tuple[float, dict]] = {}
         self._scores: dict[str, float] = {}
+        self._score_leaders: list[str] = []
         self._metrics: dict[str, dict[str, float]] = {}
+        self._exit_metrics: dict[str, dict[str, float]] = {}
         self._entry_pairs: set[str] = set()
         self._external_pairs: set[str] = set()
         self._position_details: dict[str, Any] = {}
@@ -99,6 +102,8 @@ class LeaderSqueezeStrategy(IStrategy):
         self._external_stop_protected: dict[str, bool] = {}
         self._position_first_seen: dict[str, float] = {}
         self._last_score_refresh = 0.0
+        self._last_score_request = 0.0
+        self._entry_leaders: list[str] | None = None
         self._next_score_refresh = 0.0
         self._score_pending = False
         self._score_result: tuple[float, list[str], dict[str, dict[str, float]]] | None = None
@@ -108,11 +113,26 @@ class LeaderSqueezeStrategy(IStrategy):
         self._last_good_data = 0.0
         self._data_healthy = False
         self._account_stopped = False
-        self._daily_blocked = False
+        self._risk_state_load_failed = False
+        self._risk_state_save_failed = False
+        self._market_data_healthy = False
+        self._market_down = False
+        self._market_emergency = False
+        self._market_valid_until = 0.0
+        self._eth_last_log_reason: str | None = None
+        self._eth_last_log_time = 0.0
+        self._last_status_log = -math.inf
+        self._last_status_signature: tuple | None = None
+        self._entry_block_reason = "尚未评估"
+        self._entry_decisions: dict[str, str] = {}
+        self._exit_log_reasons: dict[str, str] = {}
         self._rotation_pair: str | None = None
         self._rotation_target: str | None = None
+        self._rotation_state: dict[str, Any] | None = None
         self._rotation_candidate: tuple[str, str] | None = None
         self._rotation_seen = 0
+        self._rotation_candidate_bar: float | None = None
+        self._rotation_candidate_channel: str | None = None
         self._rotation_score_snapshot = 0.0
         self._last_rotation = 0.0
         self._external_exit_requested: dict[str, float] = {}
@@ -126,9 +146,32 @@ class LeaderSqueezeStrategy(IStrategy):
         self._adl_ranks: dict[str, float] = {}
 
         user_data_dir = Path(self.config.get("user_data_dir", "user_data"))
-        self._state_path = user_data_dir / "leader_squeeze_state.json"
+        state_file = (
+            self.settings["state_file_dry_run"]
+            if self.config.get("dry_run", True)
+            else self.settings["state_file_live"]
+        )
+        self._state_path = user_data_dir / state_file
         self._risk_state = self._load_risk_state()
+        self._rotation_state = self._risk_state.get("rotation")
+        if self._rotation_state:
+            self._rotation_pair = self._rotation_state["weak"]
+            self._rotation_target = self._rotation_state["target"]
+        self._last_rotation = float(self._risk_state.get("last_rotation", 0.0))
         self._sync_external_pairs()
+        logger.info(
+            "🚀 策略初始化 | 模式=%s | 杠杆=%.1fx 单笔占交易总资金=%.1f%% 最大仓位=%s | "
+            "基础/追加评分=%.1f/%.1f | 状态日志间隔=%.0fs | 外部仓位接管=%s",
+            "模拟盘" if self.config.get("dry_run", True) else "实盘",
+            self.settings["leverage"],
+            100 * float(self.settings["stake_ratio"]),
+            self.settings["max_positions"],
+            self.settings["base_entry_score"],
+            self.settings["additional_entry_score"],
+            self.settings["status_log_seconds"],
+            "开启" if self.settings["manage_external_positions"] else "关闭",
+            extra=LOG_INFO,
+        )
 
         runmode = str(self.config.get("runmode", ""))
         if runmode in {"live", "dry_run"}:
@@ -139,38 +182,51 @@ class LeaderSqueezeStrategy(IStrategy):
             ).start()
 
     def ft_bot_cleanup(self) -> None:
-        """Request shutdown of background workers."""
-        self._stop_event.set()
+        """请求关闭后台工作线程。"""
+        stop_event = getattr(self, "_stop_event", None)
+        if stop_event is not None:
+            stop_event.set()
         super().ft_bot_cleanup()
 
     def informative_pairs(self):
-        """Keep 15m candles for leaders and every managed open position."""
+        """保留主周期源K线; 小时趋势和背景由完整源K线聚合。"""
         if not getattr(self, "dp", None):
             return []
         pairs = set(self.dp.current_whitelist())
+        pairs.add(self.ETH_PAIR)
         db_pairs = {trade.pair for trade in Trade.get_open_trades()}
         external = set(getattr(self, "_external_pairs", set()))
         pairs.update(db_pairs)
         pairs.update(external)
-        return [(pair, "15m") for pair in pairs] + [(pair, "5m") for pair in external]
+        return [(pair, self.timeframe) for pair in pairs]
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """Populate indicators used by the strategy interface."""
-        dataframe["ema20"] = dataframe["close"].ewm(span=20, adjust=False).mean()
+        """填充策略接口所使用的指标。"""
+        dataframe["ema20"] = (
+            dataframe["close"].ewm(span=self.settings["trend_ema_candles"], adjust=False).mean()
+        )
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """Emit entries only for candidates selected from the cached ranking."""
+        """仅为缓存排名中选出的候选交易对发出开仓信号。"""
         dataframe["enter_long"] = 0
-        if metadata["pair"] in self._entry_pairs and not dataframe.empty:
+        if (
+            metadata["pair"] in self._entry_pairs
+            and not dataframe.empty
+            and self._eth_entries_allowed(time.time())
+            and self._pair_score_current(metadata["pair"])
+            and self._candle_metrics(metadata["pair"]) is not None
+        ):
             dataframe.loc[dataframe.index[-1], ["enter_long", "enter_tag"]] = (
                 1,
-                f"squeeze_{self._scores.get(metadata['pair'], 0):.1f}",
+                self._rotation_entry_tag()
+                if metadata["pair"] == getattr(self, "_rotation_target", None)
+                else f"squeeze_{self._entry_score(metadata['pair']):.1f}",
             )
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """Leave exits to custom_exit and exchange stop-loss orders."""
+        """退出交给 custom_exit 和框架程序止损; 历史交易所止损仍核对成交。"""
         dataframe["exit_long"] = 0
         return dataframe
 
@@ -185,7 +241,7 @@ class LeaderSqueezeStrategy(IStrategy):
         side: str,
         **kwargs,
     ) -> float:
-        """Use the configured leverage without exceeding the market limit."""
+        """使用配置的杠杆。不超过市场允许的上限。"""
         return min(float(self.settings["leverage"]), max_leverage)
 
     def custom_stake_amount(
@@ -201,8 +257,43 @@ class LeaderSqueezeStrategy(IStrategy):
         side: str,
         **kwargs,
     ) -> float:
-        """Allocate the configured fraction of currently available stake."""
-        return max_stake * float(self.settings["stake_ratio"])
+        """同一交易资金基数按比例分仓, 不随已有仓位占用而逐笔递减。"""
+        try:
+            capital = float(self._wallets.get_total_stake_amount())
+            target = capital * float(self.settings["stake_ratio"])
+            if (
+                not math.isfinite(target)
+                or target <= 0
+                or math.isnan(max_stake)
+                or (min_stake is not None and not math.isfinite(min_stake))
+            ):
+                raise ValueError("invalid stake budget")
+            if target > max_stake or (min_stake is not None and target < min_stake):
+                logger.warning(
+                    "⛔ 等额分仓 %s | 资金基准=%.2f 目标保证金=%.2f "
+                    "可下单上限=%.2f 最小保证金=%s | 金额不满足限制, 跳过",
+                    pair,
+                    capital,
+                    target,
+                    max_stake,
+                    min_stake,
+                    extra=LOG_WARN,
+                )
+                return 0.0
+            logger.info(
+                "💰 等额分仓 %s | 交易资金基准=%.2f 比例=%.1f%% 保证金=%.2f 杠杆=%.1fx",
+                pair,
+                capital,
+                100 * float(self.settings["stake_ratio"]),
+                target,
+                leverage,
+                extra=LOG_INFO,
+            )
+            return target
+        except Exception as exc:
+            # Returning zero prevents the framework's proposed-stake exception fallback.
+            logger.warning("⛔ 分仓资金计算失败 %s (%s), 跳过开仓", pair, type(exc).__name__)
+            return 0.0
 
     def confirm_trade_entry(
         self,
@@ -216,13 +307,132 @@ class LeaderSqueezeStrategy(IStrategy):
         side: str,
         **kwargs,
     ) -> bool:
-        """Perform the final cached-data safety check before entry."""
-        return (
+        """按实际数量复核盘口; 缓存到期时仅补取一次, 不放宽5秒时效。"""
+        allowed = (
             side == "long"
             and pair in self._entry_pairs
             and self._entries_allowed(time.time())
             and pair not in self._external_pairs
         )
+        if allowed and self._candle_metrics(pair) is None:
+            self._entry_block_reason = "当前交易对K线缺失、过期或无效"
+            allowed = False
+        if allowed and (reason := self._confirmation_quality_reason(pair)):
+            self._entry_block_reason = reason
+            allowed = False
+        if allowed and not self._entry_pair_available(pair):
+            self._entry_block_reason = self._pair_entry_block_reason
+            allowed = False
+        if allowed:
+            allowed = self._entry_slot_available(pair, entry_tag)
+        if allowed and not self._execution_is_safe(pair, amount=amount):
+            self._entry_block_reason = self._execution_block_reason
+            allowed = False
+        # 补取盘口可能跨过行情/ETH有效期, 网络调用后再次确认开仓条件。
+        if allowed:
+            allowed = self._entries_allowed(time.time())
+        if allowed and (reason := self._confirmation_quality_reason(pair)):
+            self._entry_block_reason = reason
+            allowed = False
+        if allowed and pair == getattr(self, "_rotation_target", None):
+            allowed = self._prepare_rotation_buy(pair, amount)
+        if allowed:
+            self._record_approved_entry_score(pair, entry_tag)
+            reason = "通过复核, 等待框架下单 (尚未成交)"
+        elif side != "long":
+            reason = "策略仅允许多单"
+        elif pair not in self._entry_pairs:
+            reason = "不在本轮入选名单"
+        else:
+            reason = self._entry_block_reason or "交易对已有外部仓位"
+        self._audit_entry_confirmation(pair, allowed, reason, amount, rate)
+        logger.info(
+            "%s 开仓复核 %s | 方向=%s 数量=%.8f 参考价=%.8f | %s",
+            "✅" if allowed else "⛔",
+            pair,
+            side,
+            amount,
+            rate,
+            reason,
+            extra=LOG_GOOD if allowed else LOG_WARN,
+        )
+        return allowed
+
+    def _prune_pending_entry_scores(self, now: float) -> None:
+        pending = getattr(self, "_pending_entry_scores", {})
+        if not pending:
+            return
+        active = {trade.pair for trade in Trade.get_open_trades()}
+        self._pending_entry_scores = {
+            pair: snapshot
+            for pair, snapshot in pending.items()
+            if pair in active
+            or 0 <= now - snapshot["confirmed_at"] <= self.settings["data_grace_seconds"]
+        }
+
+    def _record_approved_entry_score(self, pair: str, entry_tag: str | None) -> None:
+        """Keep the approved score without making diagnostic failures block an order."""
+        pending = getattr(self, "_pending_entry_scores", {})
+        pending.pop(pair, None)
+        self._pending_entry_scores = pending
+        try:
+            score = self._entry_score(pair)
+            if math.isfinite(score):
+                pending[pair] = {
+                    "score": score,
+                    "tag": entry_tag,
+                    "confirmed_at": time.time(),
+                }
+        except Exception as exc:
+            logger.warning("开仓评分记录失败 %s: %s", pair, type(exc).__name__)
+
+    def order_filled(
+        self, pair: str, trade: Trade, order: Order, current_time: datetime, **kwargs
+    ) -> None:
+        """Persist the approved entry score on the first entry fill, including rotations."""
+        state = getattr(self, "_rotation_state", None) or {}
+        if pair in (state.get("weak"), state.get("target")):
+            self._record_rotation_event(
+                "order_filled",
+                "轮换关联订单成交回调",
+                {
+                    "pair": pair,
+                    "trade_id": trade.id,
+                    "order": {
+                        key: getattr(order, key, None)
+                        for key in (
+                            "order_id",
+                            "ft_order_side",
+                            "filled",
+                            "average",
+                            "price",
+                            "status",
+                        )
+                    },
+                },
+            )
+        if (
+            order.ft_order_side != trade.entry_side
+            or not order.filled
+            or order.filled <= 0
+            or trade.get_custom_data("leader_entry_score")
+        ):
+            return
+        pending = getattr(self, "_pending_entry_scores", {})
+        snapshot = pending.get(pair)
+        if (
+            snapshot
+            and snapshot["tag"] == trade.enter_tag
+            and trade.open_date_utc.timestamp() >= snapshot["confirmed_at"] - 1
+        ):
+            trade.set_custom_data(
+                "leader_entry_score",
+                {
+                    "score": snapshot["score"],
+                    "source": "confirmation",
+                },
+            )
+            pending.pop(pair, None)
 
     def custom_exit(
         self,
@@ -233,19 +443,45 @@ class LeaderSqueezeStrategy(IStrategy):
         current_profit: float,
         **kwargs,
     ) -> str | None:
-        """Exit on account risk, planned rotation, or confirmed reversal."""
-        if self._account_stopped:
-            return "account_drawdown"
-        if pair == self._rotation_pair:
-            return "leader_rotation"
-        if self._trend_reversed(pair):
-            return "trend_reversal"
-        return None
+        """因市场普跌、计划中的轮换或确认的趋势反转而退出。"""
+        if self._market_exit_required():
+            reason = "market_emergency"
+        elif self._rotation_exit_allowed(pair):
+            reason = "leader_rotation"
+        elif self._trend_reversed(pair):
+            reason = "trend_reversal"
+        else:
+            reason = None
+        logged = getattr(self, "_exit_log_reasons", {})
+        log_key = (reason, self._trend_exit_rule(pair)) if reason == "trend_reversal" else reason
+        if reason and logged.get(pair) != log_key:
+            descriptions = {
+                "market_emergency": "龙头市场严重普跌",
+                "leader_rotation": "龙头轮换",
+                "trend_reversal": "持仓趋势反转 | "
+                + getattr(self, "_trend_exit_details", {}).get(pair, "多周期趋势退出"),
+            }
+            logger.info(
+                "🚪 退出信号 %s | 原因=%s | 当前收益=%.2f%% | 等待框架执行, 尚非成交确认",
+                pair,
+                descriptions[reason],
+                current_profit * 100,
+                extra=LOG_WARN,
+            )
+            logged[pair] = log_key
+        elif not reason:
+            logged.pop(pair, None)
+        self._exit_log_reasons = logged
+        return reason
 
     def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
-        """Refresh position state and schedule non-blocking market-data work."""
+        """刷新仓位状态。安排非阻塞的行情数据任务。"""
         now = time.time()
-        if now - self._last_position_sync >= 30:
+        self._prune_pending_entry_scores(now)
+        journal = getattr(self, "_rotation_journal", None)
+        if journal is not None:
+            journal.flush(now)
+        if now - self._last_position_sync >= self.settings["position_sync_seconds"]:
             try:
                 self._wallets.update(require_update=True)
                 positions = self._exchange.fetch_positions()
@@ -258,86 +494,121 @@ class LeaderSqueezeStrategy(IStrategy):
                 self._last_position_sync = now
                 self._position_data_healthy = True
             except Exception as exc:
-                logger.warning("Position sync failed: %s", exc)
+                logger.warning("⚠️ 仓位同步失败, 暂停新开仓: %s", exc, extra=LOG_WARN)
                 self._position_data_healthy = False
         self._sync_external_pairs()
-        score_updated = self._consume_score_refresh(now)
+        eth_allowed = self._eth_entries_allowed(now)
+        eth_reason = self._eth_block_reason if not eth_allowed else self._eth_trend
+        if eth_reason != self._eth_last_log_reason or (
+            now - self._eth_last_log_time >= float(self.settings["status_log_seconds"])
+        ):
+            logger.info(
+                "%s ETH 15m 过滤: %s | %s",
+                "⛔" if not eth_allowed else "✅",
+                f"{eth_reason}; 暂停评分、选币、新轮换和新开仓, 已有仓位继续止损和退出; "
+                "已提交轮换继续核对成交"
+                if not eth_allowed
+                else "不拦截, ETH 条件允许开仓 (仍需通过其他风控检查)",
+                self._eth_trend_summary,
+                extra=LOG_WARN if not eth_allowed else LOG_GOOD,
+            )
+            self._eth_last_log_reason = eth_reason
+            self._eth_last_log_time = now
+        if not eth_allowed:
+            self._record_rotation_event("blocked", self._eth_block_reason, once=True)
+            self._entry_pairs.clear()
+            if not self._rotation_in_flight():
+                self._clear_rotation("ETH过滤暂停开仓")
+            self._rotation_candidate, self._rotation_seen = None, 0
+        self._entry_leaders = self.dp.current_whitelist()
+        self._consume_score_refresh(now, allow_scoring=eth_allowed)
+        # 普跌退出仅依赖本地K线, ETH拦截或远程接口失败时也必须重新评估。
+        leaders = self._entry_leaders
+        self._update_market_state(
+            leaders,
+            {pair: item for pair in leaders if (item := self._candle_metrics(pair)) is not None},
+        )
+        self._advance_score_refresh(now, allow_scoring=eth_allowed)
         if now >= self._next_score_refresh and not self._score_pending:
-            self._start_score_refresh(now)
+            self._start_score_refresh(now, exit_only=not eth_allowed)
         self._refresh_risk_state(current_time)
         self._sync_rotation_state()
-        if score_updated:
+        if eth_allowed:
             self._plan_rotation(now, current_time)
         self._manage_external_positions(now)
         self._entry_pairs = self._select_entries()
+        self._log_strategy_status(now)
 
     @staticmethod
     def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
         return max(low, min(high, value))
 
-    @classmethod
-    def _minmax(cls, values: dict[str, float]) -> dict[str, float]:
-        if not values:
-            return {}
-        low, high = min(values.values()), max(values.values())
-        if math.isclose(low, high):
-            return {pair: 0.5 for pair in values}
-        return {pair: cls._clamp((value - low) / (high - low)) for pair, value in values.items()}
+    def _required_leader_count(self, total: int) -> int:
+        if not total:
+            return 0
+        return min(
+            total,
+            max(1, math.ceil(total * float(self.settings["market_min_coverage_ratio"]))),
+        )
 
-    def _start_score_refresh(self, now: float) -> None:
-        leaders = self.dp.current_whitelist()[:10]
-        held = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
-        pairs = list(dict.fromkeys([*leaders, *sorted(held)]))
-        if not leaders:
-            self._data_healthy = False
-            self._next_score_refresh = now + float(self.settings["score_retry_seconds"])
+    def _update_market_state(
+        self, leaders: list[str], candle_metrics: dict[str, dict[str, float]]
+    ) -> None:
+        required = self._required_leader_count(len(leaders))
+        available = [candle_metrics[pair] for pair in leaders if pair in candle_metrics]
+        self._market_valid_until = min(
+            (item.get("_candle_valid_until", 0.0) for item in available), default=0.0
+        )
+        self._market_data_healthy = bool(required) and len(available) >= required
+        self._market_emergency = False
+        if not self._market_data_healthy:
+            self._market_down = False
             return
+        down_required = math.ceil(len(leaders) * float(self.settings["market_down_ratio"]))
+        min_momentum = float(self.settings["min_absolute_momentum"])
+        self._market_down = (
+            sum(item["momentum"] <= min_momentum for item in available) >= down_required
+        )
+        self._market_emergency = sum(
+            item["momentum"] <= -self.settings["market_emergency_drop"] for item in available
+        ) >= math.ceil(len(leaders) * self.settings["market_emergency_ratio"])
+        self._market_down = self._market_down or self._market_emergency
 
-        self._score_pending = True
-        self._next_score_refresh = math.inf
+    def _market_exit_required(self) -> bool:
+        """Ordinary breadth weakness blocks entries; only a severe decline forces exits."""
+        return bool(
+            self.settings["market_emergency_enabled"]
+            and getattr(self, "_market_emergency", False)
+            and self._market_is_down()
+        )
 
-        def fetch() -> None:
-            try:
-                metrics = self._fetch_market_metrics(pairs)
-            except Exception as exc:
-                logger.warning("Market metric refresh failed: %s", exc)
-                metrics = {}
-            with self._score_result_lock:
-                self._score_result = (time.time(), leaders, metrics)
-                self._score_pending = False
-
-        threading.Thread(target=fetch, name="leader-squeeze-metrics", daemon=True).start()
-
-    def _consume_score_refresh(self, now: float) -> bool:
-        with self._score_result_lock:
-            result, self._score_result = self._score_result, None
-        if result is None:
+    def _market_is_down(self) -> bool:
+        if not self._market_down:
             return False
-
-        completed_at, leaders, metrics = result
-        combined: dict[str, dict[str, float]] = {}
-        for pair, remote in metrics.items():
-            candle = self._candle_metrics(pair)
-            combined[pair] = {**remote, **(candle or {})}
-        valid = {
-            pair: combined[pair]
-            for pair in leaders
-            if pair in combined and "momentum" in combined[pair]
-        }
-
-        required = min(int(self.settings["min_positions"]), len(leaders))
-        if len(valid) < required:
-            logger.warning(
-                "Only %s/%s leader pairs have complete data; keeping the last valid snapshot.",
-                len(valid),
-                len(leaders),
-            )
-            self._next_score_refresh = now + float(self.settings["score_retry_seconds"])
+        if time.time() > getattr(self, "_market_valid_until", 0.0):
+            self._warn_data_unavailable("市场普跌", "K线判断已过期, 等待新数据")
+            self._market_down = False
+            self._market_emergency = False
+            self._market_data_healthy = False
             return False
-
-        self._apply_scores(completed_at, valid, combined)
-        self._next_score_refresh = now + float(self.settings["score_refresh_seconds"])
         return True
+
+    def _price_components(self, item: dict[str, float]) -> tuple[float, float, float]:
+        price_weight = self.settings["momentum_return_weight"]
+        return (
+            price_weight * self._clamp(item["momentum"] / self.settings["momentum_full_score"])
+            + (1 - price_weight) * self._clamp(item["trend_continuity"]),
+            self.settings["volume_activity_weight"]
+            * self._clamp(
+                (item["volume_activity_ratio"] - 1)
+                / (self.settings["volume_activity_full_ratio"] - 1)
+            )
+            + (1 - self.settings["volume_activity_weight"])
+            * self._clamp(
+                (item["volume_ratio"] - 1) / (self.settings["volume_score_full_ratio"] - 1)
+            ),
+            self._clamp((item["taker_ratio"] - 1) / (self.settings["taker_score_full_ratio"] - 1)),
+        )
 
     def _apply_scores(
         self,
@@ -345,291 +616,1017 @@ class LeaderSqueezeStrategy(IStrategy):
         valid: dict[str, dict[str, float]],
         all_metrics: dict[str, dict[str, float]],
     ) -> None:
-        momentum_scores = self._minmax({pair: item["momentum"] for pair, item in valid.items()})
         weights = self.settings["weights"]
         scores: dict[str, float] = {}
         for pair, item in valid.items():
+            # 使用固定尺度, 同币分数不随候选池/持仓变化, 也不随硬门槛调整而漂移。
             short_score = self._clamp(
-                (item["short_share"] - float(self.settings["min_short_share"])) / 0.25
+                (item["short_share"] - self.settings["short_score_start_share"])
+                / (
+                    self.settings["short_score_full_share"]
+                    - self.settings["short_score_start_share"]
+                )
             )
-            volume_score = self._clamp((item["volume_ratio"] - 1.0) / 2.0)
-            taker_score = self._clamp((item["taker_ratio"] - 0.8) / 1.2)
+            momentum_score, volume_score, taker_score = self._price_components(item)
             oi_score = (
-                self._clamp(-item["oi_change"] / 0.05)
+                self._clamp(-item["oi_change"] / self.settings["oi_score_full_drop"])
                 if item["momentum"] > 0 and item["oi_change"] < 0
                 else 0.0
             )
             components = {
                 "short_crowding": short_score,
-                "momentum": (momentum_scores[pair] + self._clamp(item["trend_continuity"])) / 2,
+                "momentum": momentum_score,
                 "volume": volume_score,
                 "taker_buy": taker_score,
                 "liquidation": self._liquidation_score(self._market_id(pair), now),
                 "oi_squeeze": oi_score,
+                "funding": self._funding_score(item, now),
             }
             item.update({f"score_{name}": value for name, value in components.items()})
-            scores[pair] = 100.0 * sum(weights[name] * value for name, value in components.items())
+            contributions = {
+                name: 100.0 * weights[name] * value for name, value in components.items()
+            }
+            scores[pair] = sum(contributions.values())
 
         self._scores = scores
         self._metrics = all_metrics
         self._last_score_refresh = now
         self._last_good_data = now
         self._data_healthy = True
-        logger.info("Leader squeeze ranking: %s", self._ranked_pairs())
+        self._log_score_tables(now, valid)
 
-    def _fetch_market_metrics(self, pairs: list[str]) -> dict[str, dict[str, float]]:
-        result: dict[str, dict[str, float]] = {}
-        with ThreadPoolExecutor(max_workers=min(10, len(pairs))) as pool:
-            futures = {pool.submit(self._fetch_pair_metrics, pair): pair for pair in pairs}
-            for future in as_completed(futures):
-                pair = futures[future]
-                try:
-                    result[pair] = future.result()
-                except Exception as exc:
-                    logger.warning("Unable to score %s: %s", pair, exc)
+    def _funding_score(self, metric: dict[str, float], now: float) -> float:
+        rate = metric.get("funding_rate_hourly", math.nan)
+        floor = metric.get("funding_floor_hourly", math.nan)
+        if not (
+            metric.get("_funding_valid_until", 0) > now
+            and math.isfinite(rate)
+            and math.isfinite(floor)
+            and floor < 0
+        ):
+            return 0.0
+        return self._clamp(max(0.0, -rate) / -floor)
+
+    def _current_score(self, pair: str, now: float | None = None) -> float:
+        """资金数据过期/跨结算时只去掉可选加分, 不延长或否定核心数据时效。"""
+        metric = getattr(self, "_metrics", {}).get(pair, {})
+        points = 100 * float(self.settings["weights"].get("funding", 0))
+        return self._scores.get(pair, math.nan) + points * (
+            self._funding_score(metric, time.time() if now is None else now)
+            - metric.get("score_funding", 0.0)
+        )
+
+    def _entry_score(self, pair: str) -> float:
+        """Discount prospective buys without weakening the score of an existing holding."""
+        score = self._current_score(pair)
+        if not self.settings["entry_heat_max_penalty"]:
+            return score
+        heat = self._entry_heat_metrics(pair)
+        return score * (1 - heat["penalty"]) if heat is not None else math.nan
+
+    @report_cached
+    def _entry_heat_metrics(self, pair: str) -> dict[str, float] | None:
+        """Measure 15-day appreciation, ATR-normalized extension and a cooled breakout."""
+        frame = self._closed_candles(
+            pair,
+            self.timeframe,
+            self.ENTRY_HEAT_HISTORY_CANDLES,
+            columns=("high", "low", "close"),
+        )
+        if frame is None:
+            return None
+        frame = frame.tail(self.ENTRY_HEAT_HISTORY_CANDLES)
+        if ((frame["low"] > frame["close"]) | (frame["high"] < frame["close"])).any():
+            self._warn_data_unavailable(f"{pair} 入场过热", "K线高低收关系无效")
+            return None
+        reference = frame.iloc[:-1]
+        atr = self._wilder_atr(reference)
+        if not math.isfinite(atr) or atr <= 0:
+            self._warn_data_unavailable(f"{pair} 入场过热", "ATR14缺少有效波动")
+            return None
+        close = float(frame["close"].iloc[-1])
+        ema = float(
+            reference["close"]
+            .ewm(span=self.settings["entry_heat_ema_candles"], adjust=False)
+            .mean()
+            .iloc[-1]
+        )
+        gain = close / float(frame["close"].iloc[0]) - 1
+        extension = (close - ema) / atr
+        growth = self._clamp(gain / float(self.settings["entry_heat_return_scale"]))
+        start = float(self.settings["entry_heat_extension_start_atr"])
+        full = float(self.settings["entry_heat_extension_full_atr"])
+        heat = self._clamp((extension - start) / (full - start))
+        box = reference.tail(self.settings["entry_heat_box_candles"])
+        box_high, box_low = float(box["high"].max()), float(box["low"].min())
+        cooled_breakout = (
+            box_high - box_low <= self.settings["entry_heat_box_max_width_atr"] * atr
+            and abs(float(reference["close"].iloc[-1]) - ema)
+            <= self.settings["entry_heat_prebreak_extension_max_atr"] * atr
+            and box_high
+            < close
+            <= box_high + self.settings["entry_heat_breakout_overshoot_atr"] * atr
+        )
+        base = self.settings["entry_heat_base_fraction"]
+        penalty = (
+            float(self.settings["entry_heat_max_penalty"]) * growth * (base + (1 - base) * heat)
+        )
+        if cooled_breakout:
+            penalty *= self.settings["entry_heat_cooled_breakout_factor"]
+        result = {
+            "return_15d": gain,
+            "extension_atr": extension,
+            "cooled_breakout": float(cooled_breakout),
+            "penalty": penalty,
+            "reference_ema": ema,
+            "reference_atr": atr,
+            "box_high": box_high,
+            "box_low": box_low,
+        }
         return result
 
-    def _fetch_pair_metrics(self, pair: str) -> dict[str, float]:
-        symbol = self._market_id(pair)
-        base = "https://fapi.binance.com/futures/data"
-        common: dict[str, str] = {"symbol": symbol, "period": "5m"}
-        proxy = self.config.get("exchange", {}).get("ccxt_config", {}).get("httpsProxy")
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-        api_key = self.config.get("exchange", {}).get("key")
-        if not api_key:
-            raise ValueError("Binance API key is required for top-trader position metrics")
-
-        session = requests.Session()
-        session.headers["X-MBX-APIKEY"] = api_key
-
-        def get(path: str, limit: int) -> list[dict[str, Any]]:
-            params: dict[str, str | int] = {**common, "limit": limit}
-            response = session.get(
-                f"{base}/{path}",
-                params=params,
-                proxies=proxies,
-                timeout=10,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, list) or not payload:
-                raise ValueError(f"empty {path} response")
-            timestamp = int(payload[-1].get("timestamp") or 0)
-            max_age = float(self.settings["remote_metric_max_age_seconds"])
-            period_end = timestamp / 1000
-            if path == "takerlongshortRatio":
-                period_end += 5 * 60
-            if timestamp <= 0 or time.time() - period_end > max_age:
-                raise ValueError(f"stale {path} response")
-            return payload
-
-        try:
-            global_ratio = get("globalLongShortAccountRatio", 1)[-1]
-            top_position = get("topLongShortPositionRatio", 1)[-1]
-            taker = get("takerlongshortRatio", 1)[-1]
-            oi = get("openInterestHist", 4)
-        finally:
-            session.close()
-
-        short_account_share = float(global_ratio["shortAccount"])
-        short_position_share = float(top_position["shortAccount"])
-        oi_first, oi_last = float(oi[0]["sumOpenInterest"]), float(oi[-1]["sumOpenInterest"])
-        return {
-            "short_share": max(short_account_share, short_position_share),
-            "short_account_share": short_account_share,
-            "short_position_share": short_position_share,
-            "taker_ratio": float(taker["buySellRatio"]),
-            "oi_change": (oi_last / oi_first - 1.0) if oi_first else 0.0,
-        }
-
     def _candle_metrics(self, pair: str) -> dict[str, float] | None:
-        dataframe = self.dp.get_pair_dataframe(pair, self.timeframe)
-        if len(dataframe) < 21:
+        minimum = max(
+            self.settings["candle_min_history"],
+            self.settings["momentum_lookback_candles"] + 1,
+            self.settings["trend_continuity_candles"] + 1,
+            self.settings["volume_window_candles"]
+            + max(
+                self.settings["volume_baseline_windows"],
+                self.settings["volume_activity_baseline_candles"],
+            ),
+        )
+        dataframe = self._closed_candles(pair, self.timeframe, minimum, columns=("close", "volume"))
+        if dataframe is None or not {"close", "volume"}.issubset(dataframe.columns):
             return None
         close = dataframe["close"]
-        recent_trend = close.iloc[-4:].pct_change().dropna()
-        volumes = dataframe["volume"].rolling(3).sum()
-        baseline = volumes.shift(1).tail(20).mean()
+        recent_trend = (
+            close.iloc[-self.settings["trend_continuity_candles"] - 1 :].pct_change().dropna()
+        )
+        window = self.settings["volume_window_candles"]
+        recent_volume = float(dataframe["volume"].tail(window).mean())
+        reference = dataframe["volume"].iloc[:-window]
+        baseline = float(reference.tail(self.settings["volume_baseline_windows"]).mean())
+        activity_baseline = float(
+            reference.tail(self.settings["volume_activity_baseline_candles"]).mean()
+        )
         return {
-            "momentum": float(close.iloc[-1] / close.iloc[-13] - 1.0),
+            "momentum": float(
+                close.iloc[-1] / close.iloc[-self.settings["momentum_lookback_candles"] - 1] - 1.0
+            ),
             "trend_continuity": float((recent_trend > 0).mean()),
-            "volume_ratio": float(volumes.iloc[-1] / baseline) if baseline else 1.0,
+            # A zero-volume reference is not evidence of a liquid, active market.
+            "volume_ratio": recent_volume / baseline if baseline > 0 else 1.0,
+            "volume_activity_ratio": (
+                recent_volume / activity_baseline if activity_baseline > 0 else 1.0
+            ),
+            "volume_recent_mean": recent_volume,
+            "volume_short_baseline": baseline,
+            "volume_activity_baseline": activity_baseline,
+            "_candle_valid_until": dataframe["date"].iloc[-1].timestamp()
+            + 2 * timeframe_to_seconds(self.timeframe)
+            + float(self.settings["data_grace_seconds"]),
         }
 
     def _ranked_pairs(self) -> list[tuple[str, float]]:
-        return sorted(self._scores.items(), key=lambda item: item[1], reverse=True)
+        leaders = getattr(self, "_entry_leaders", None)
+        return sorted(
+            (
+                (pair, self._entry_score(pair))
+                for pair in self._scores
+                if leaders is None or pair in leaders
+            ),
+            key=lambda item: item[1] if math.isfinite(item[1]) else -math.inf,
+            reverse=True,
+        )
 
     def _select_entries(self) -> set[str]:
+        self._entry_decisions = {}
         if not self._entries_allowed(time.time()):
             return set()
 
         db_open = {trade.pair for trade in Trade.get_open_trades()}
         occupied = db_open | self._external_pairs
-        capacity = max(0, int(self.settings["max_positions"]) - len(occupied))
-        if not capacity:
+        self._entry_decisions.update({pair: "已持仓" for pair in sorted(occupied)})
+        rotation_target = getattr(self, "_rotation_target", None)
+        limit = int(self.settings["max_positions"])
+        capacity = min(1, limit + 1 - len(occupied)) if rotation_target else limit - len(occupied)
+        if capacity <= 0:
+            self._entry_decisions.update(
+                {pair: "仓位已满" for pair in self._scores if pair not in occupied}
+            )
             return set()
 
         min_needed = max(0, int(self.settings["min_positions"]) - len(occupied))
         ranked = [item for item in self._ranked_pairs() if item[0] not in occupied]
-        rotation_target = getattr(self, "_rotation_target", None)
         if rotation_target:
-            ranked.sort(key=lambda item: item[0] != rotation_target)
+            ranked = [item for item in ranked if item[0] == rotation_target]
         selected: list[str] = []
-        min_short_share = float(self.settings["min_short_share"])
         for pair, score in ranked:
             if len(selected) >= capacity:
-                break
-            if min_short_share and self._metrics[pair]["short_share"] < min_short_share:
+                self._entry_decisions[pair] = "本轮剩余名额已用完"
                 continue
-            if (
-                pair != rotation_target
-                and len(selected) >= min_needed
-                and score < float(self.settings["additional_entry_score"])
-            ):
+            score_floor = float(
+                self.settings["base_entry_score"]
+                if pair != rotation_target and len(selected) < min_needed
+                else self.settings["additional_entry_score"]
+            )
+            if pair == rotation_target:
+                channel = (getattr(self, "_rotation_state", None) or {}).get("channel", "normal")
+                score_floor = self._rotation_floor(channel)
+            reason = self._entry_quality_reason(pair, score_floor)
+            if reason:
+                self._entry_decisions[pair] = reason
                 continue
-            if self._execution_is_safe(pair):
+            if self._entry_pair_available(pair) and self._execution_is_safe(pair):
                 selected.append(pair)
+                self._entry_decisions[pair] = f"入选: 评分 {score:.1f} >= {score_floor:.1f}"
+            else:
+                self._entry_decisions[pair] = getattr(
+                    self, "_pair_entry_block_reason", ""
+                ) or getattr(self, "_execution_block_reason", "盘口安全检查未通过")
         return set(selected)
 
+    def _confirmation_quality_reason(self, pair: str) -> str:
+        """成交前按实时仓位数和有效资金费加分复核, 防止追加仓误用基础门槛。"""
+        try:
+            occupied = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
+            rotation = pair == getattr(self, "_rotation_target", None)
+            if rotation and self._rotation_pair is None:
+                return "轮换旧仓缺失"
+            floor = float(
+                self.settings[
+                    "additional_entry_score"
+                    if rotation or len(occupied) >= int(self.settings["min_positions"])
+                    else "base_entry_score"
+                ]
+            )
+            if rotation:
+                channel = (getattr(self, "_rotation_state", None) or {}).get("channel", "normal")
+                floor = self._rotation_floor(channel)
+            reason = self._entry_quality_reason(pair, floor)
+            if reason:
+                return reason
+            if (
+                rotation
+                and self._rotation_pair is not None
+                and not self._rotation_scores_qualify(self._rotation_pair, pair)
+            ):
+                return "轮换分差或目标评分不再达标"
+            state = getattr(self, "_rotation_state", None) or {}
+            if rotation and "channel" in state:
+                if self._rotation_pair is None:
+                    return "轮换旧仓缺失"
+                if len(occupied) != self.settings["max_positions"]:
+                    return "仓位数量已变化, 重新评估普通开仓"
+                if not self._pair_score_current(self._rotation_pair):
+                    return "轮换旧仓评分过期"
+                if not self._rotation_signal_valid(self._rotation_pair, pair, state["channel"]):
+                    return "轮换突破或旧仓小时走弱条件不再成立"
+            return ""
+        except Exception as exc:
+            logger.warning("⚠️ 开仓质量/仓位复核异常 %s: %s", pair, exc, extra=LOG_WARN)
+            return f"开仓质量/仓位复核异常 ({type(exc).__name__})"
+
+    def _entry_quality_reason(self, pair: str, score_floor: float) -> str:
+        """选币、轮换和下单复核共用质量门槛, 全局风控仍独立硬拦截。"""
+        if not self._pair_score_current(pair):
+            return "评分指标缺失、过期或无效"
+        if time.time() < getattr(self, "_risk_state", {}).get("rotation_reentry_until", {}).get(
+            pair, 0
+        ):
+            return "刚被轮换退出, 重新买入冷却中"
+        metric = self._metrics[pair]
+        short_floor = float(self.settings["min_short_share"])
+        if (
+            self.settings["short_share_filter_enabled"]
+            and short_floor
+            and metric["short_share"] <= short_floor
+        ):
+            return f"空头占比 {metric['short_share']:.1%} <= {short_floor:.1%}"
+        # 评分可以缓存, 入场趋势必须按当前已收盘K线重算。
+        candle = self._candle_metrics(pair)
+        if candle is None:
+            return "当前交易对K线缺失、过期或无效"
+        if not (
+            candle.get("momentum", -math.inf) > float(self.settings["min_absolute_momentum"])
+            and candle.get("trend_continuity", 0.0) >= float(self.settings["min_trend_continuity"])
+        ):
+            return (
+                f"上涨条件不足: 1h涨幅={candle.get('momentum', 0):.2%}, "
+                f"上涨连续性={candle.get('trend_continuity', 0):.0%}"
+            )
+        score = self._entry_score(pair)
+        if not math.isfinite(score):
+            return "买入评分缺失或无效 (需完整有效的15日行情)"
+        if score < score_floor:
+            return f"评分 {score:.1f} < 门槛 {score_floor:.1f}"
+        reversed_trend = self._trend_reversed(pair)
+        if reversed_trend is None:
+            return "趋势退出指标不足或无效, 禁止开仓"
+        if reversed_trend:
+            return f"趋势退出: {self._trend_exit_rule(pair)}, 禁止开仓"
+        return self._higher_entry_reason(pair)
+
+    def _entry_pair_available(self, pair: str) -> bool:
+        """复用框架交易锁, 同时排除已离开当前交易名单的候选。"""
+        self._pair_entry_block_reason = ""
+        try:
+            if pair not in self.dp.current_whitelist():
+                self._pair_entry_block_reason = "已离开当前交易名单"
+            else:
+                candles = self._closed_candles(pair, self.timeframe, 1)
+                if candles is None:
+                    self._pair_entry_block_reason = "交易锁复核所需K线不可用"
+                elif self.is_pair_locked(pair, candle_date=candles["date"].iloc[-1], side="long"):
+                    self._pair_entry_block_reason = "交易对或全局多单交易锁生效"
+        except Exception as exc:
+            self._pair_entry_block_reason = f"交易名单/交易锁检查异常 ({type(exc).__name__})"
+        if self._pair_entry_block_reason:
+            if self._pair_entry_block_reason not in {
+                "已离开当前交易名单",
+                "交易对或全局多单交易锁生效",
+            }:
+                self._warn_data_unavailable(f"{pair} 开仓资格", self._pair_entry_block_reason)
+            return False
+        return True
+
     def _entries_allowed(self, now: float) -> bool:
+        if not self._eth_entries_allowed(now):
+            self._entry_block_reason = f"ETH拦截: {self._eth_block_reason}"
+            return False
         max_age = float(self.settings["score_refresh_seconds"]) + float(
             self.settings["data_grace_seconds"]
         )
-        position_max_age = 30 + float(self.settings["data_grace_seconds"])
-        return (
-            self._data_healthy
-            and now - self._last_good_data <= max_age
-            and self._liquidation_connected.is_set()
-            and now - self._liquidation_last_message
-            <= float(self.settings["liquidation_stream_max_age_seconds"])
-            and self._position_data_healthy
-            and now - self._last_position_sync <= position_max_age
-            and (
-                not self.settings["manage_external_positions"]
-                or all(
-                    self._external_stop_protected.get(pair, False) for pair in self._external_pairs
-                )
+        position_max_age = float(self.settings["position_stale_seconds"])
+        fresh_count, total, required = self._score_coverage(now)
+        score_checks = (
+            (
+                (self._data_healthy, "行情评分数据不完整"),
+                (
+                    bool(required) and fresh_count >= required,
+                    f"评分指标有效覆盖不足 ({fresh_count}/{total}, 至少{required})",
+                ),
+                (now - self._last_good_data <= max_age, "评分数据过期"),
             )
-            and not self._daily_blocked
-            and not self._account_stopped
+            if self._last_good_data
+            else ((False, "首批行情与评分加载中"),)
         )
+        checks = (
+            (not getattr(self, "_risk_state_load_failed", False), "风控状态读取失败"),
+            (not getattr(self, "_risk_state_save_failed", False), "风控状态保存失败"),
+            (getattr(self, "_database_time_healthy", True), "数据库持仓时间异常, 请修复UTC时间"),
+            (not self._rotation_in_flight(), "轮换买单/旧仓退出尚未完成, 暂停新开仓"),
+            *score_checks,
+            (self._liquidation_connected.is_set(), "强平数据流断开"),
+            (
+                now - self._liquidation_last_message
+                <= float(self.settings["liquidation_stream_max_age_seconds"]),
+                "强平流心跳过期",
+            ),
+            (self._position_data_healthy, "仓位同步失败"),
+            (now - self._last_position_sync <= position_max_age, "仓位数据过期"),
+            (
+                (
+                    not self.settings["manage_external_positions"]
+                    or all(
+                        self._external_stop_protected.get(pair, False)
+                        for pair in self._external_pairs
+                    )
+                ),
+                "外部仓位止损未确认"
+                if self.order_types.get("stoploss_on_exchange")
+                else "外部仓位本地风控未确认",
+            ),
+            (self._market_data_healthy, "龙头K线覆盖不足"),
+            (not getattr(self, "_market_down", False), "龙头市场普跌"),
+        )
+        self._entry_block_reason = "; ".join(reason for allowed, reason in checks if not allowed)
+        return not self._entry_block_reason
 
-    def _execution_is_safe(self, pair: str) -> bool:
+    def _eth_entries_allowed(self, now: float) -> bool:
+        """ETH 连续两根已收盘 15m 低于 EMA20 或数据不可用时禁止开仓。"""
+        self._eth_block_reason = "数据缺失、过期或无效"
+        self._eth_trend = "未知"
+        self._eth_trend_summary = "趋势未知"
         try:
-            book = self._exchange.fetch_l2_order_book(pair, 20)
-            bid, ask = float(book["bids"][0][0]), float(book["asks"][0][0])
-            spread = 1.0 - bid / ask
-            if spread > float(self.settings["max_spread_ratio"]):
+            closed = self._closed_candles(
+                self.ETH_PAIR,
+                self.timeframe,
+                self.settings["trend_ema_candles"] + self.settings["eth_confirm_candles"],
+                now=now,
+            )
+            if closed is None:
                 return False
-            stake = self._wallets.get_available_stake_amount() * float(self.settings["stake_ratio"])
-            notional = stake * float(self.settings["leverage"])
-            remaining = notional / ask
-            cost = 0.0
-            for price, amount in book["asks"]:
-                take = min(remaining, float(amount))
-                cost += take * float(price)
-                remaining -= take
-                if remaining <= 0:
-                    break
-            if remaining > 0:
-                return False
-            vwap = cost / (notional / ask)
-            return vwap / ask - 1.0 <= float(self.settings["max_slippage_ratio"])
+            current_time = datetime.fromtimestamp(now, UTC)
+            # date 是开盘时间. 最新一根应在上一周期内收盘, 允许行情刷新短暂延迟.
+            age = (current_time - closed["date"].iloc[-1]).total_seconds()
+            close = closed["close"]
+            ema20 = close.ewm(span=self.settings["trend_ema_candles"], adjust=False).mean()
+            confirms = self.settings["eth_confirm_candles"]
+            down = bool((close.iloc[-confirms:] < ema20.iloc[-confirms:]).all())
+            up = bool((close.iloc[-confirms:] > ema20.iloc[-confirms:]).all())
+            trend = "下跌" if down else "上涨" if up else "震荡/未确认下跌"
+            self._eth_trend = trend
+            display_date = closed["date"].iloc[-1].astimezone(DISPLAY_TZ).isoformat()
+            self._eth_trend_summary = (
+                f"当前趋势={trend} | 前根收盘={close.iloc[-2]:.4f} EMA20={ema20.iloc[-2]:.4f} | "
+                f"最新收盘={close.iloc[-1]:.4f} EMA20={ema20.iloc[-1]:.4f} | "
+                f"最新K线开盘(北京时间)={display_date} "
+                f"距收盘={age - timeframe_to_seconds(self.timeframe):.0f}s"
+            )
+            self._eth_block_reason = "ETH 下跌: 最近两根已收盘 K 线均低于 EMA20" if down else ""
+            return not down
         except Exception as exc:
-            logger.warning("Execution safety check failed for %s: %s", pair, exc)
+            self._eth_block_reason = f"数据读取异常 ({type(exc).__name__})"
+            logger.debug("🔎 ETH 15m 数据异常, 暂停新开仓: %s", exc, extra=LOG_WARN)
             return False
 
+    def _rotation_in_flight(self) -> bool:
+        state = getattr(self, "_rotation_state", None)
+        return bool(state and state["phase"] != "buy")
+
+    def _rotation_entry_tag(self) -> str:
+        state = getattr(self, "_rotation_state", None)
+        return f"rotation_{state['token']}" if state else ""
+
+    def _persist_rotation(self) -> bool:
+        self._risk_state["rotation"] = self._rotation_state
+        self._risk_state["last_rotation"] = self._last_rotation
+        saved = self._save_risk_state()
+        if not saved:
+            self._record_rotation_event(
+                "state_save_failed", "轮换状态保存失败, 禁止新开仓", once=True
+            )
+        return saved
+
+    def _prepare_rotation_buy(self, pair: str, amount: float) -> bool:
+        if self._rotation_state is None:
+            return False
+        try:
+            # confirm_trade_entry 收到的是精度处理前数量, 使用与框架下单相同的合约精度。
+            requested = self._exchange.amount_to_contract_precision(pair, amount)
+            if not math.isfinite(requested) or requested <= 0:
+                raise ValueError("交易所精度处理后数量无效")
+            self._rotation_state.update(
+                phase="buy_pending", amount=requested, submitted_at=time.time()
+            )
+            self._last_rotation = time.time()
+            self._risk_state.setdefault("rotation_reentry_until", {})[
+                self._rotation_state["weak"]
+            ] = self._last_rotation + self.settings["replacement_reentry_cooldown_minutes"] * 60
+            if self._persist_rotation():
+                self._record_rotation_event(
+                    "entry_approved", "买单提交前状态已保存", {"requested_amount": requested}
+                )
+                return True
+        except Exception as exc:
+            logger.error("🚨 轮换买入准备失败 %s: %s", pair, exc, extra=LOG_ERROR)
+        self._entry_block_reason = "轮换数量校验或状态保存失败, 不发送买单"
+        self._record_rotation_event("entry_rejected", self._entry_block_reason)
+        return False
+
+    def _clear_rotation(
+        self, reason: str = "轮换条件失效", *, event_type: str = "cancelled"
+    ) -> None:
+        if getattr(self, "_rotation_state", None) or getattr(self, "_rotation_candidate", None):
+            self._record_rotation_event(event_type, reason)
+        had_state = bool(getattr(self, "_rotation_state", None))
+        self._rotation_pair = self._rotation_target = None
+        self._rotation_state = None
+        self._rotation_candidate, self._rotation_seen = None, 0
+        if had_state:
+            self._persist_rotation()
+
+    def _entry_slot_available(self, pair: str, entry_tag: str | None) -> bool:
+        try:
+            occupied = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
+        except Exception as exc:
+            self._entry_block_reason = f"仓位名额检查失败 ({type(exc).__name__})"
+            logger.error("🚨 %s, 拒绝新开仓", self._entry_block_reason, extra=LOG_ERROR)
+            return False
+        state = getattr(self, "_rotation_state", None)
+        limit = int(self.settings["max_positions"])
+        allowed = (
+            pair not in occupied
+            and len(occupied) < limit
+            and not (entry_tag or "").startswith("rotation_")
+        )
+        if state:
+            allowed = (
+                state["phase"] == "buy"
+                and pair == state["target"]
+                and entry_tag == self._rotation_entry_tag()
+                and state["weak"] in occupied
+                and pair not in occupied
+                and len(occupied) < limit + 1
+            )
+        if not allowed:
+            self._entry_block_reason = "仓位名额不足或不属于当前先买后卖轮换"
+        return allowed
+
+    def _rotation_trade_filled(self, trade: Trade) -> bool:
+        """累计实际成交达到本次请求数量, 未成交/部分成交或已开始退出均不算完成。"""
+        state = self._rotation_state
+        if not state or trade.enter_tag != self._rotation_entry_tag() or trade.is_short:
+            return False
+        if not trade.is_open or trade.amount <= 0 or trade.has_open_orders:
+            return False
+        if any(o.ft_order_side == trade.exit_side and (o.filled or 0) > 0 for o in trade.orders):
+            return False
+        filled = sum(
+            float(o.filled or 0)
+            for o in trade.orders
+            if o.ft_order_side == trade.entry_side
+            and not o.ft_is_open
+            and o.status in {"closed", "canceled", "expired"}
+        )
+        requested = state["amount"]
+        return math.isfinite(filled) and requested > 0 and filled >= requested * (1 - 1e-8)
+
     def _sync_rotation_state(self) -> None:
-        held = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
-        if self._rotation_target in held:
-            self._rotation_target = None
-        if not self._rotation_pair:
-            if self._rotation_target and self._rotation_target not in self._scores:
-                self._rotation_target = None
+        state = getattr(self, "_rotation_state", None)
+        if not state or not self._position_data_healthy:
             return
-        if self._rotation_pair not in held:
-            self._rotation_pair = None
-            self._next_score_refresh = 0.0
+        trades = {trade.pair: trade for trade in Trade.get_open_trades()}
+        held = trades.keys() | self._external_pairs
+        weak = trades.get(state["weak"])
+        weak_held = state["weak"] in held and (
+            state["weak_trade_id"] is None or (weak and weak.id == state["weak_trade_id"])
+        )
+        target = trades.get(state["target"])
+        if state["phase"] == "buy":
+            if not weak_held or state["target"] in held:
+                self._clear_rotation("买单提交前旧仓消失或目标已有持仓")
+            return
+        if target is None and self._recover_missing_rotation_target():
+            return
+        self._record_rotation_event(
+            "execution_status",
+            "核对目标订单及成交数量",
+            self._rotation_execution_details(target),
+            once=True,
+        )
+        if target and self._rotation_trade_filled(target):
+            if not weak_held:
+                self._risk_state.setdefault("rotation_reentry_until", {})[state["weak"]] = (
+                    time.time() + self.settings["replacement_reentry_cooldown_minutes"] * 60
+                )
+                logger.info(
+                    "✅ 先买后卖轮换完成 | %s -> %s", state["weak"], state["target"], extra=LOG_GOOD
+                )
+                self._clear_rotation("目标已完整买入且旧仓已退出", event_type="completed")
+            elif state["phase"] != "sell":
+                state["phase"] = "sell"
+                self._persist_rotation()
+                self._record_rotation_event(
+                    "target_filled",
+                    "目标完整成交, 允许退出旧仓",
+                    self._rotation_execution_details(target),
+                )
+                logger.info(
+                    "✅ 轮换目标完整成交 %s | 允许退出旧仓 %s; 暂停其他开仓",
+                    state["target"],
+                    state["weak"],
+                    extra=LOG_GOOD,
+                )
+            return
+        if state["phase"] != "review" and (
+            state["phase"] == "sell" or (target and not target.has_open_orders)
+        ):
+            state["phase"] = "review"
+            self._persist_rotation()
+            self._record_rotation_event(
+                "review_required",
+                "成交异常, 保留旧仓并暂停开仓",
+                self._rotation_execution_details(target),
+            )
+            logger.error(
+                "🚨 轮换成交异常 %s -> %s | 保留旧仓, 暂停新开仓, 请核对订单",
+                state["weak"],
+                state["target"],
+                extra=LOG_ERROR,
+            )
+        self._warn_data_unavailable(
+            "轮换成交确认",
+            f"{state['weak']} -> {state['target']} 阶段={state['phase']}; "
+            "未确认完整买入或目标已退出, "
+            "保留旧仓并暂停新开仓; 失败/部分成交/结果不明时请核对订单",
+        )
+
+    def _rotation_bar(self, pair: str) -> float | None:
+        frame = self._closed_candles(pair, self.timeframe, 1)
+        return float(frame["date"].iloc[-1].timestamp()) if frame is not None else None
+
+    def _fast_rotation_quality(self, pair: str) -> bool:
+        """A high composite score cannot substitute for a closed, supported breakout."""
+        lookback = self.settings["replacement_fast_breakout_candles"]
+        volume_count = self.settings["replacement_fast_volume_baseline_candles"]
+        frame = self._closed_candles(
+            pair,
+            self.timeframe,
+            max(lookback, volume_count, self.settings["atr_period"] + 1) + 1,
+            columns=("high", "low", "close", "volume"),
+        )
+        candle = self._candle_metrics(pair)
+        metric = self._metrics.get(pair, {})
+        if frame is None or candle is None or not self._pair_score_current(pair):
+            self._audit_rotation_check(
+                target=pair, stage="breakout", passed=False, reason="突破数据缺失或过期"
+            )
+            return False
+        if ((frame["low"] > frame["close"]) | (frame["high"] < frame["close"])).any():
+            return False
+        reference, signal = frame.iloc[:-1], frame.iloc[-1]
+        resistance = float(reference["high"].tail(lookback).max())
+        atr = self._wilder_atr(reference)
+        baseline = float(reference["volume"].tail(volume_count).mean())
+        height = float(signal["high"] - signal["low"])
+        taker = metric.get("taker_ratio_latest", math.nan)
+        taker_aligned = metric.get("taker_latest_candle_time") == signal["date"].timestamp()
+        components = self._price_components({**candle, "taker_ratio": taker})
+        core = 100 * sum(
+            self.settings["weights"][key] * value
+            for key, value in zip(("momentum", "volume", "taker_buy"), components, strict=True)
+        )
+        passed = bool(
+            math.isfinite(atr)
+            and taker_aligned
+            and atr > 0
+            and baseline > 0
+            and height > 0
+            and resistance
+            < signal["close"]
+            <= resistance + self.settings["replacement_fast_max_breakout_atr"] * atr
+            and signal["volume"] / baseline >= self.settings["replacement_fast_volume_ratio"]
+            and (signal["close"] - signal["low"]) / height
+            >= self.settings["replacement_fast_close_location"]
+            and taker >= self.settings["replacement_fast_taker_ratio"]
+            and core >= self.settings["replacement_fast_core_score"]
+        )
+        details = getattr(self, "_fast_rotation_details", {})
+        details[pair] = {
+            "resistance": resistance,
+            "atr": atr,
+            "close": float(signal["close"]),
+            "volume_ratio": float(signal["volume"] / baseline) if baseline > 0 else None,
+            "close_location": float((signal["close"] - signal["low"]) / height)
+            if height > 0
+            else None,
+            "taker_ratio": taker,
+            "taker_aligned": taker_aligned,
+            "taker_candle_time": metric.get("taker_latest_candle_time"),
+            "core_score": core,
+            "passed": passed,
+        }
+        self._fast_rotation_details = details
+        self._audit_rotation_check(target=pair, channel="fast", stage="breakout", **details[pair])
+        return passed
+
+    def _rotation_signal_valid(self, weak: str, target: str, channel: str) -> bool:
+        return self._rotation_holding_weak(weak) and (
+            channel != "fast" or self._fast_rotation_quality(target)
+        )
 
     def _plan_rotation(self, now: float, current_time: datetime) -> None:
-        if self._rotation_pair or self._rotation_target:
+        if self._rotation_in_flight():
+            return
+        new_snapshot = getattr(self, "_rotation_score_snapshot", None) != self._last_score_refresh
+        self._rotation_evaluation: dict[str, Any] | None = {
+            "score_snapshot": self._last_score_refresh,
+            "checks": [],
+            "previous_candidate": getattr(self, "_rotation_candidate", None),
+            "previous_confirmations": getattr(self, "_rotation_seen", 0),
+        }
+        self._rotation_audit_reason = "没有合格的轮换组合"
+        self._evaluate_rotation(now, current_time)
+        if new_snapshot:
+            self._rotation_score_snapshot = self._last_score_refresh
+            self._record_rotation_event(
+                "evaluation", self._rotation_audit_reason, self._rotation_evaluation
+            )
+        self._rotation_evaluation = None
+
+    def _audit_rotation_check(self, **check) -> None:
+        evaluation = getattr(self, "_rotation_evaluation", None)
+        if evaluation is not None:
+            evaluation["checks"].append(check)
+
+    def _rotation_challengers(self, occupied: set[str]) -> list[tuple[str, float]]:
+        challengers = []
+        for pair, score in self._ranked_pairs():
+            reason = "已持仓" if pair in occupied else ""
+            if not reason and not self._entry_pair_available(pair):
+                reason = getattr(self, "_pair_entry_block_reason", "交易资格不通过")
+            if not reason:
+                reason = self._entry_quality_reason(
+                    pair, min(self._rotation_floor("normal"), self._rotation_floor("fast"))
+                )
+            self._audit_rotation_check(
+                target=pair, stage="entry_quality", passed=not bool(reason), reason=reason
+            )
+            if not reason:
+                challengers.append((pair, score))
+        return challengers
+
+    def _pending_rotation_reason(self, now: float) -> str:
+        if self._rotation_target is None:
+            return "轮换目标缺失"
+        state = getattr(self, "_rotation_state", None) or {}
+        channel = state.get("channel", "normal")
+        if "channel" in state:
+            occupied = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
+            if len(occupied) != self.settings["max_positions"]:
+                return "持仓数量变化, 取消未提交轮换"
+        if not self._entry_pair_available(self._rotation_target):
+            return getattr(self, "_pair_entry_block_reason", "目标交易资格失效")
+        if not self._rotation_pair or not self._pair_score_current(self._rotation_pair, now):
+            return "旧仓评分缺失或过期"
+        if not self._pair_score_current(self._rotation_target, now):
+            return "目标评分缺失或过期"
+        if not self._rotation_scores_qualify(self._rotation_pair, self._rotation_target):
+            return "轮换评分或分差不再达标"
+        reason = self._entry_quality_reason(self._rotation_target, self._rotation_floor(channel))
+        if reason:
+            return reason
+        if not self._rotation_holding_weak(self._rotation_pair):
+            return "旧仓小时趋势已恢复或走弱证据不足"
+        if channel == "fast" and not self._fast_rotation_quality(self._rotation_target):
+            return "快速突破质量不再达标"
+        return ""
+
+    def _evaluate_rotation(self, now: float, current_time: datetime) -> None:
+        if self._rotation_in_flight():
+            self._rotation_audit_reason = "已有轮换正在执行"
+            return
+        if not self._entries_allowed(now):
+            self._rotation_audit_reason = getattr(self, "_entry_block_reason", "禁止开仓")
+            self._record_rotation_event("blocked", self._rotation_audit_reason, once=True)
+            self._clear_rotation(self._rotation_audit_reason)
+            self._rotation_score_snapshot = self._last_score_refresh
+            return
+        if self._rotation_target:
+            reason = self._pending_rotation_reason(now)
+            if reason:
+                self._rotation_audit_reason = reason
+                self._clear_rotation(reason)
             return
         if self._rotation_score_snapshot == self._last_score_refresh:
             return
         self._rotation_score_snapshot = self._last_score_refresh
-        if now - self._last_rotation < float(self.settings["replacement_cooldown_minutes"]) * 60:
-            return
+        previous = self._rotation_candidate
+        seen = self._rotation_seen
+        previous_bar = getattr(self, "_rotation_candidate_bar", None)
+        previous_channel = getattr(self, "_rotation_candidate_channel", None)
+        self._rotation_candidate, self._rotation_seen = None, 0
         open_trades = {trade.pair: trade for trade in Trade.get_open_trades() if not trade.is_short}
+        # Fill ordinary free slots first. Rotation only borrows a slot at the normal limit.
+        occupied = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
         held_pairs = set(open_trades) | self._external_pairs
-        if not held_pairs or not self._scores:
-            return
-
-        min_short_share = float(self.settings["min_short_share"])
-        challengers = [
-            item
-            for item in self._ranked_pairs()
-            if item[0] not in held_pairs
-            and (
-                not min_short_share
-                or self._metrics.get(item[0], {}).get("short_share", 0.0) >= min_short_share
+        if len(occupied) != self.settings["max_positions"] or not held_pairs or not self._scores:
+            self._rotation_audit_reason = "仓位未满、超限或没有有效持仓评分"
+            self._audit_rotation_check(
+                stage="capacity", held_count=len(occupied), required=self.settings["max_positions"]
             )
-        ][:3]
-        if not challengers:
             return
-        weak_pair = min(held_pairs, key=lambda pair: self._scores.get(pair, 0.0))
-        challenger, challenger_score = challengers[0]
-        weak_score = self._scores.get(weak_pair, 0.0)
-        weak_trade = open_trades.get(weak_pair)
-        min_age = float(self.settings["replacement_min_age_minutes"]) * 60
-        old_enough = (
-            (current_time - weak_trade.open_date_utc).total_seconds() >= min_age
-            if weak_trade is not None
-            else now - self._position_first_seen.get(weak_pair, now) >= min_age
+        period = timeframe_to_seconds(self.timeframe)
+        if self._last_rotation and int(now // period) == int(self._last_rotation // period):
+            self._rotation_audit_reason = "本15分钟周期已授权一次轮换"
+            return
+        challengers = self._rotation_challengers(occupied)
+        scored_held = sorted(
+            (
+                pair
+                for pair in held_pairs & self._scores.keys()
+                if self._pair_score_current(pair, now)
+            ),
+            key=lambda pair: (self._current_score(pair), pair),
         )
-        qualifies = (
-            old_enough
-            and weak_score < float(self.settings["additional_entry_score"])
-            and challenger_score > weak_score * float(self.settings["replacement_score_ratio"])
-            and self._no_new_high(weak_pair)
+        eligible = challengers.copy()
+        if previous and eligible:
+            incumbent = next((item for item in eligible if item[0] == previous[1]), None)
+            if (
+                incumbent
+                and eligible[0][1] - incumbent[1]
+                <= self.settings["replacement_candidate_hysteresis"]
+            ):
+                eligible.remove(incumbent)
+                eligible.insert(0, incumbent)
+        selected = self._find_rotation_candidate(
+            now, current_time, open_trades, scored_held, eligible
         )
-        candidate = (weak_pair, challenger)
-        if qualifies and candidate == self._rotation_candidate:
-            self._rotation_seen += 1
-        elif qualifies:
-            self._rotation_candidate, self._rotation_seen = candidate, 1
-        else:
-            self._rotation_candidate, self._rotation_seen = None, 0
+        if selected is None:
+            return
+        weak, target, channel, bar, score = selected
+        self._rotation_audit_reason = "找到合格组合, 更新收盘确认"
+        self._advance_rotation_confirmation(
+            weak,
+            target,
+            channel,
+            bar,
+            score,
+            open_trades.get(weak),
+            previous,
+            previous_channel,
+            previous_bar,
+            seen,
+        )
 
-        if self._rotation_seen >= int(self.settings["replacement_confirmations"]):
-            self._rotation_pair = weak_pair
-            self._rotation_target = challenger
-            self._last_rotation = now
-            self._rotation_candidate, self._rotation_seen = None, 0
+    def _advance_rotation_confirmation(
+        self,
+        weak: str,
+        target: str,
+        channel: str,
+        bar: float,
+        score: float,
+        weak_trade: Trade | None,
+        previous: tuple[str, str] | None,
+        previous_channel: str | None,
+        previous_bar: float | None,
+        seen: int,
+    ) -> None:
+        period = timeframe_to_seconds(self.timeframe)
+        prefix = "replacement_fast_" if channel == "fast" else "replacement_"
+        candidate = (weak, target)
+        confirmations = 1
+        if candidate == previous and channel == previous_channel:
+            if bar == previous_bar:
+                confirmations = seen
+            elif previous_bar is not None and bar == previous_bar + period:
+                confirmations = seen + 1
+        self._rotation_candidate = candidate
+        self._rotation_candidate_channel = channel
+        self._rotation_candidate_bar = bar
+        self._rotation_seen = confirmations
+        required = self.settings[prefix + "confirmations"]
+        self._record_rotation_event(
+            "candidate_observed",
+            "收盘K线轮换确认",
+            {"count": confirmations, "required": required, "bar": bar},
+            once=True,
+        )
+        if confirmations < required:
+            logger.info(
+                "⏳ %s轮换观察 | %s -> %s | 原评分%.1f -> 买入评分%.1f | 已收盘K线确认=%s/%s",
+                "快速" if channel == "fast" else "普通",
+                weak,
+                target,
+                self._current_score(weak),
+                score,
+                confirmations,
+                required,
+                extra=LOG_SCORE,
+            )
+            return
+        self._rotation_pair, self._rotation_target = candidate
+        self._rotation_state = {
+            "weak": weak,
+            "target": target,
+            "channel": channel,
+            "signal_bar": bar,
+            "token": uuid4().hex,
+            "phase": "buy",
+            "amount": 0.0,
+            "weak_trade_id": weak_trade.id if weak_trade else None,
+        }
+        logger.info(
+            "🔄 %s先买后卖轮换确认 | 保留旧仓=%s (原评分%.1f) -> "
+            "先买目标=%s (买入评分%.1f) | 连续收盘确认=%s根",
+            "快速" if channel == "fast" else "普通",
+            weak,
+            self._current_score(weak),
+            target,
+            score,
+            confirmations,
+            extra=LOG_SCORE,
+        )
+        self._persist_rotation()
+        self._record_rotation_event("plan_created", "轮换确认, 准备先买目标后卖旧仓")
+        self._rotation_candidate, self._rotation_seen = None, 0
+        return
 
-    def _trend_reversed(self, pair: str) -> bool:
-        dataframe_15m = self.dp.get_pair_dataframe(pair, "15m")
-        dataframe_5m = self.dp.get_pair_dataframe(pair, "5m")
-        if len(dataframe_15m) < 22 or len(dataframe_5m) < 2:
+    def _find_rotation_candidate(
+        self,
+        now: float,
+        current_time: datetime,
+        open_trades: dict[str, Trade],
+        scored_held: list[str],
+        challengers: list[tuple[str, float]],
+    ) -> tuple[str, str, str, float, float] | None:
+        for channel in ("fast", "normal"):
+            if channel == "fast" and not self.settings["replacement_fast_enabled"]:
+                continue
+            prefix = "replacement_fast_" if channel == "fast" else "replacement_"
+            cooldown = self.settings[prefix + "cooldown_minutes"] * 60
+            self._audit_rotation_check(
+                channel=channel,
+                stage="cooldown",
+                elapsed=now - self._last_rotation,
+                required=cooldown,
+                passed=now - self._last_rotation >= cooldown,
+            )
+            if now - self._last_rotation < cooldown:
+                continue
+            for weak in scored_held:
+                age = (
+                    (current_time - open_trades[weak].open_date_utc).total_seconds()
+                    if weak in open_trades
+                    else now - self._position_first_seen.get(weak, now)
+                )
+                age_ready = age >= self.settings[prefix + "min_age_minutes"] * 60
+                stalled = self._rotation_holding_weak(weak) if age_ready else None
+                self._audit_rotation_check(
+                    channel=channel,
+                    weak=weak,
+                    stage="holding",
+                    age_seconds=age,
+                    minimum_age=self.settings[prefix + "min_age_minutes"] * 60,
+                    holding_weak=stalled,
+                    passed=age_ready and stalled,
+                )
+                if not age_ready or not stalled:
+                    continue
+                weak_bar = self._rotation_bar(weak)
+                if weak_bar is None:
+                    continue
+                for target, score in challengers:
+                    if not self._rotation_scores_qualify(weak, target, channel):
+                        continue
+                    if channel == "fast" and not self._fast_rotation_quality(target):
+                        continue
+                    bar = self._rotation_bar(target)
+                    same_bar = bar is not None and bar == weak_bar
+                    safe = self._execution_is_safe(target) if same_bar else False
+                    self._audit_rotation_check(
+                        channel=channel,
+                        weak=weak,
+                        target=target,
+                        stage="execution",
+                        target_bar=bar,
+                        weak_bar=weak_bar,
+                        passed=same_bar and safe,
+                        reason=getattr(self, "_execution_block_reason", "")
+                        if same_bar and not safe
+                        else "",
+                    )
+                    if not same_bar or not safe or bar is None:
+                        continue
+                    return weak, target, channel, bar, score
+        return None
+
+    def _rotation_floor(self, channel: str) -> float:
+        prefix = "replacement_fast_" if channel == "fast" else "replacement_"
+        return max(self.settings["additional_entry_score"], self.settings[prefix + "entry_score"])
+
+    def _rotation_scores_qualify(self, weak: str, target: str, channel: str | None = None) -> bool:
+        if channel is None:
+            channel = (getattr(self, "_rotation_state", None) or {}).get("channel", "normal")
+        if channel not in ("normal", "fast") or (
+            channel == "fast" and not self.settings["replacement_fast_enabled"]
+        ):
             return False
-        close = dataframe_15m["close"]
-        ema20 = close.ewm(span=20, adjust=False).mean()
-        below_ema = bool((close.iloc[-2:] < ema20.iloc[-2:]).all())
-        lower_low = dataframe_5m["low"].iloc[-1] < dataframe_5m["low"].iloc[-2]
-        metric = self._metrics.get(pair, {})
-        seller_reversal = (
-            lower_low
-            and metric.get("taker_ratio", 1.0) < 1.0
-            and metric.get("oi_change", -1.0) >= 0.0
+        old_score, new_score = self._current_score(weak), self._entry_score(target)
+        prefix = "replacement_fast_" if channel == "fast" else "replacement_"
+        qualifies = (
+            math.isfinite(old_score)
+            and math.isfinite(new_score)
+            and (channel == "fast" or old_score < self.settings["replacement_weak_score"])
+            and new_score >= self._rotation_floor(channel)
+            and new_score - old_score >= self.settings[prefix + "score_gap"]
         )
-        return below_ema or seller_reversal
+        self._audit_rotation_check(
+            channel=channel,
+            weak=weak,
+            target=target,
+            stage="score",
+            old_score=old_score,
+            new_score=new_score,
+            minimum=self._rotation_floor(channel),
+            minimum_gap=self.settings[prefix + "score_gap"],
+            weak_ceiling=self.settings["replacement_weak_score"] if channel == "normal" else None,
+            passed=qualifies,
+        )
+        return qualifies
 
-    def _no_new_high(self, pair: str) -> bool:
-        dataframe = self.dp.get_pair_dataframe(pair, "15m")
-        return len(dataframe) >= 4 and (
-            dataframe["high"].iloc[-1] <= dataframe["high"].iloc[-4:-1].max()
-        )
+    def _rotation_exit_allowed(self, pair: str) -> bool:
+        if pair != self._rotation_pair or not self._rotation_in_flight():
+            return False
+        self._sync_rotation_state()
+        state = self._rotation_state
+        if not state or state["phase"] != "sell" or not self._position_data_healthy:
+            return False
+        target = next((t for t in Trade.get_open_trades() if t.pair == state["target"]), None)
+        allowed = bool(target and self._rotation_trade_filled(target))
+        if allowed:
+            self._record_rotation_event(
+                "exit_allowed", "目标完整成交, 旧仓可执行轮换退出", once=True
+            )
+        return allowed
 
     def _refresh_risk_state(self, current_time: datetime) -> None:
+        if getattr(self, "_risk_state_load_failed", False):
+            # 无可靠历史基线时不重新建账, 让主循环继续处理已有仓位的止损和退出。
+            return
         positions = self._wallets.get_all_positions()
         equity = self._wallets.get_total(self.config["stake_currency"]) + sum(
             position.unrealized_pnl for position in positions.values()
@@ -638,276 +1635,46 @@ class LeaderSqueezeStrategy(IStrategy):
             return
         day = current_time.astimezone(UTC).date().isoformat()
         state = self._risk_state
+        state.pop("daily_blocked", None)
         if state.get("day") != day:
-            state.update({"day": day, "day_start_equity": equity, "daily_blocked": False})
+            state.update({"day": day, "day_start_equity": equity})
         state["peak_equity"] = max(float(state.get("peak_equity", equity)), equity)
-        daily_loss = 1.0 - equity / float(state.get("day_start_equity", equity))
-        drawdown = 1.0 - equity / float(state["peak_equity"])
-        was_daily_blocked = self._daily_blocked
-        was_account_stopped = self._account_stopped
-        self._daily_blocked = bool(state.get("daily_blocked")) or daily_loss >= float(
-            self.settings["daily_loss_limit"]
-        )
-        self._account_stopped = bool(state.get("account_stopped")) or drawdown >= float(
-            self.settings["max_drawdown_limit"]
-        )
-        if self._daily_blocked and not was_daily_blocked:
-            self.dp.send_msg("Leader squeeze: daily loss limit reached; new entries paused.")
-        if self._account_stopped and not was_account_stopped:
-            self.dp.send_msg("Leader squeeze: maximum drawdown reached; closing positions.")
         state.update(
             {
-                "daily_blocked": self._daily_blocked,
-                "account_stopped": self._account_stopped,
+                # 保留旧状态格式兼容性; 峰值回撤只统计, 不再触发账户停止。
+                "account_stopped": False,
                 "last_equity": equity,
                 "updated_at": current_time.astimezone(UTC).isoformat(),
             }
         )
         self._save_risk_state()
 
-    def _load_risk_state(self) -> dict[str, Any]:
-        try:
-            return json.loads(self._state_path.read_text())
-        except (FileNotFoundError, ValueError, OSError):
-            return {}
-
-    def _save_risk_state(self) -> None:
-        try:
-            temporary = self._state_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(self._risk_state, indent=2))
-            temporary.replace(self._state_path)
-        except OSError as exc:
-            logger.error("Unable to persist leader squeeze risk state: %s", exc)
-            self._data_healthy = False
-
-    def _market_id(self, pair: str) -> str:
-        return self._exchange._api.market_id(pair)
-
-    @property
-    def _exchange(self) -> Exchange:
-        exchange = self.dp._exchange
-        if exchange is None:
-            raise RuntimeError("Exchange is not available")
-        return exchange
-
-    @property
-    def _wallets(self) -> Wallets:
-        if self.wallets is None:
-            raise RuntimeError("Wallets are not available")
-        return self.wallets
-
-    def _liquidation_worker(self) -> None:
-        proxy = self.config.get("exchange", {}).get("ccxt_config", {}).get("wsProxy")
-        url = "wss://fstream.binance.com/market/stream?streams=!forceOrder@arr/!markPrice@arr@1s"
-        while not self._stop_event.is_set():
-            try:
-                with connect(url, proxy=proxy or True, open_timeout=10, close_timeout=1) as socket:
-                    while not self._stop_event.is_set():
-                        try:
-                            payload = json.loads(socket.recv(timeout=30))
-                        except TimeoutError:
-                            self._liquidation_connected.clear()
-                            if self._stop_event.is_set():
-                                break
-                            raise
-                        received_at = time.time()
-                        if self._process_liquidation_payload(payload, received_at):
-                            self._liquidation_last_message = received_at
-                            if not self._liquidation_started:
-                                self._liquidation_started = received_at
-                            self._liquidation_connected.set()
-            except Exception as exc:
-                self._liquidation_connected.clear()
-                if not self._stop_event.wait(5):
-                    logger.warning("Liquidation stream reconnecting: %s", exc)
-            finally:
-                self._liquidation_connected.clear()
-
-    def _process_liquidation_payload(self, payload: Any, received_at: float) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        stream = payload.get("stream")
-        data = payload.get("data", payload)
-        if stream == "!markPrice@arr@1s":
-            return isinstance(data, list)
-        if not isinstance(data, dict) or (
-            stream != "!forceOrder@arr" and data.get("e") != "forceOrder"
-        ):
-            return False
-        if data.get("st") != 1:
-            return True
-        order = data.get("o", {})
-        if order.get("S") != "BUY":
-            return True
-        symbol = order.get("s")
-        price = float(order.get("ap") or order.get("p") or 0)
-        quantity = float(order.get("z") or 0)
-        if symbol and price > 0 and quantity > 0:
-            with self._liquidation_lock:
-                self._liquidations[symbol].append((received_at, price * quantity))
-        return True
-
     def _liquidation_score(self, symbol: str, now: float) -> float:
         with self._liquidation_lock:
-            events = self._liquidations[symbol]
-            while events and events[0][0] < now - 3600:
+            events = self._liquidations.get(symbol, ())
+            while events and events[0][0] < now - self.settings["liquidation_window_seconds"]:
                 events.popleft()
-            if not events or now - self._liquidation_started < 3600:
-                return 0.5
-            recent = sum(value for timestamp, value in events if timestamp >= now - 60)
-            hourly_per_minute = sum(value for _, value in events) / 60
-        if hourly_per_minute <= 0:
-            return 0.5
-        return self._clamp((recent / hourly_per_minute - 1.0) / 4.0)
-
-    def _manage_external_positions(self, now: float) -> None:
-        positions = self._wallets.get_all_positions()
-        if not self.settings["manage_external_positions"]:
-            return
-        for pair in self._external_pairs:
-            position = positions.get(pair)
-            if position is None:
-                continue
-            should_exit = (
-                self._account_stopped
-                or position.side == "short"
-                or pair == self._rotation_pair
-                or self._trend_reversed(pair)
-                or self._external_hard_stop_hit(pair, position.side)
+            if (
+                not self._liquidation_started
+                or now - self._liquidation_started < self.settings["liquidation_window_seconds"]
+            ):
+                return self.settings["liquidation_warmup_score"]
+            recent = sum(
+                value
+                for timestamp, value in events
+                if now - self.settings["liquidation_recent_seconds"] <= timestamp <= now
             )
-            if not should_exit:
-                self._external_stop_protected[pair] = self._ensure_external_stop(
-                    pair, position, now
-                )
-            else:
-                self._external_stop_protected[pair] = False
-            if not should_exit or now - self._external_exit_requested.get(pair, 0) < 60:
-                continue
-            self._external_exit_requested[pair] = now
-            if self.config.get("dry_run", True):
-                logger.info("Would close external position %s in dry-run mode.", pair)
-                continue
-            try:
-                side: BuySell = "sell" if position.side == "long" else "buy"
-                rate = self._exchange.get_rate(
-                    pair, side="exit", is_short=position.side == "short", refresh=True
-                )
-                order = self._exchange.create_order(
-                    pair=pair,
-                    ordertype="market",
-                    side=side,
-                    amount=position.position,
-                    rate=rate,
-                    leverage=float(position.leverage or self.settings["leverage"]),
-                    reduceOnly=True,
-                    initial_order=False,
-                )
-                if order.get("status") == "closed":
-                    self._cancel_external_stops(pair, position.side, float(position.position))
-                self.dp.send_msg(f"Closed external position {pair}: {side} reduceOnly")
-            except Exception as exc:
-                logger.error("Unable to close external position %s: %s", pair, exc)
-
-    def _sync_external_pairs(self) -> None:
-        db_pairs = {trade.pair for trade in Trade.get_open_trades()}
-        positions = self._wallets.get_all_positions()
-        now = time.time()
-        for pair in positions:
-            self._position_first_seen.setdefault(pair, now)
-        for pair in set(self._position_first_seen) - set(positions):
-            self._position_first_seen.pop(pair, None)
-        self._external_pairs = {pair for pair in positions if pair not in db_pairs}
-        for state in (self._external_stop_last_check, self._external_stop_protected):
-            for pair in set(state) - self._external_pairs:
-                state.pop(pair, None)
-
-    def _refresh_adl_ranks(self) -> None:
-        try:
-            ranks = self._exchange._api.fetch_positions_adl_rank(None, params={"subType": "linear"})
-            self._adl_ranks = {
-                item["symbol"]: float(item["rank"])
-                for item in ranks
-                if item.get("symbol") and item.get("rank") is not None
-            }
-            high_risk = {pair: rank for pair, rank in self._adl_ranks.items() if rank >= 4}
-            if high_risk:
-                logger.warning("Positions at highest ADL rank: %s", high_risk)
-        except Exception as exc:
-            logger.warning("ADL rank refresh failed: %s", exc)
-
-    def _external_hard_stop_hit(self, pair: str, side: str) -> bool:
-        detail = self._position_details.get(pair, {})
-        entry = float(detail.get("entryPrice") or 0)
-        if entry <= 0:
-            return False
-        rate = self._exchange.get_rate(pair, side="exit", is_short=side == "short", refresh=True)
-        profit = ((rate / entry) - 1.0) * (-1 if side == "short" else 1)
-        profit *= float(detail.get("leverage") or self.settings["leverage"])
-        return profit <= self.stoploss
-
-    @staticmethod
-    def _is_protective_stop(
-        order: dict[str, Any], position_side: str, position_amount: float
-    ) -> bool:
-        info = order.get("info", {})
-        reduce_only = str(info.get("reduceOnly", order.get("reduceOnly", False))).lower() == "true"
-        stop_price = info.get("stopPrice") or order.get("stopPrice")
-        order_side = str(order.get("side") or info.get("side") or "").lower()
-        expected_side = "sell" if position_side == "long" else "buy"
-        amount = float(order.get("amount") or info.get("origQty") or 0)
-        order_type = str(order.get("type") or info.get("type") or "").lower()
-        return bool(
-            reduce_only
-            and float(stop_price or 0) > 0
-            and order_side == expected_side
-            and amount >= position_amount * 0.999
-            and "take_profit" not in order_type
+            previous = sum(
+                value
+                for timestamp, value in events
+                if timestamp < now - self.settings["liquidation_recent_seconds"]
+            )
+        # Scale the preceding 45m to a 15m baseline, with a minimum notional floor.
+        periods = (
+            self.settings["liquidation_window_seconds"]
+            - self.settings["liquidation_recent_seconds"]
+        ) / self.settings["liquidation_recent_seconds"]
+        baseline = max(previous / periods, float(self.settings["liquidation_min_notional"]))
+        return self._clamp(
+            (recent / baseline - 1.0) / (self.settings["liquidation_score_full_ratio"] - 1)
         )
-
-    def _external_stop_orders(self, pair: str) -> list[dict[str, Any]]:
-        return self._exchange._api.fetch_open_orders(pair, params={"stop": True})
-
-    def _ensure_external_stop(self, pair: str, position: Any, now: float) -> bool:
-        if self.config.get("dry_run", True):
-            return True
-        interval = float(self.settings["external_stop_check_seconds"])
-        if now - self._external_stop_last_check.get(pair, 0) < interval:
-            return self._external_stop_protected.get(pair, False)
-        self._external_stop_last_check[pair] = now
-        try:
-            position_amount = float(position.position)
-            existing = self._external_stop_orders(pair)
-            protected = any(
-                self._is_protective_stop(order, position.side, position_amount)
-                for order in existing
-            )
-            if not protected:
-                detail = self._position_details.get(pair, {})
-                leverage = float(
-                    detail.get("leverage") or position.leverage or self.settings["leverage"]
-                )
-                entry = float(detail.get("entryPrice") or 0)
-                if entry <= 0:
-                    raise ValueError("missing entry price")
-                distance = abs(self.stoploss) / leverage
-                stop_price = entry * (1.0 - distance)
-                self._exchange.create_stoploss(
-                    pair=pair,
-                    amount=position.position,
-                    stop_price=stop_price,
-                    order_types=self.order_types,
-                    side="sell",
-                    leverage=leverage,
-                )
-                self.dp.send_msg(f"Protected external position {pair} with exchange stop.")
-            self._external_stop_protected[pair] = True
-            return True
-        except Exception as exc:
-            logger.error("Unable to protect external position %s: %s", pair, exc)
-            self._external_stop_protected[pair] = False
-            return False
-
-    def _cancel_external_stops(self, pair: str, position_side: str, position_amount: float) -> None:
-        for order in self._external_stop_orders(pair):
-            if self._is_protective_stop(order, position_side, position_amount):
-                self._exchange.cancel_stoploss_order(order["id"], pair)

@@ -2,7 +2,7 @@ import copy
 import logging
 import re
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from functools import partial
 from random import randint
 from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, patch
@@ -4392,11 +4392,42 @@ def test_cancel_stoploss_order_with_result(default_conf, mocker, exchange_name):
     assert co["amount"] == 555
     assert co == {"id": "_", "fee": {}, "status": "canceled", "amount": 555, "info": {}}
 
-    with pytest.raises(InvalidOrderException):
-        exc = InvalidOrderException("Did not find order")
-        exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
-        mocker.patch.object(exchange, "cancel_stoploss_order", side_effect=exc)
+    exc = InvalidOrderException("Did not find order")
+    exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
+    mocker.patch.object(exchange, "cancel_stoploss_order", side_effect=exc)
+    fetch_stoploss = mocker.patch.object(
+        exchange,
+        "fetch_stoploss_order",
+        side_effect=InvalidOrderException("Could not fetch order"),
+    )
+    with pytest.raises(InvalidOrderException, match="Did not find order"):
         exchange.cancel_stoploss_order_with_result(order_id="_", pair="TKN/BTC", amount=123)
+    fetch_stoploss.assert_called_once_with("_", "TKN/BTC")
+
+
+@pytest.mark.parametrize("status", ["canceled", "closed", "open", "unknown"])
+def test_cancel_stoploss_order_with_result_after_cancel_error(default_conf, mocker, status):
+    default_conf["dry_run"] = False
+    exchange = get_patched_exchange(mocker, default_conf, exchange="binance")
+    cancel_error = InvalidOrderException("Unknown order")
+    mocker.patch.object(exchange, "cancel_stoploss_order", side_effect=cancel_error)
+    fetched_order = {
+        "id": "_",
+        "fee": {},
+        "status": status,
+        "amount": 123,
+    }
+    fetch_stoploss = mocker.patch.object(
+        exchange, "fetch_stoploss_order", return_value=fetched_order
+    )
+
+    if status in ("canceled", "closed"):
+        assert exchange.cancel_stoploss_order_with_result("_", "TKN/BTC", 123) == fetched_order
+    else:
+        with pytest.raises(InvalidOrderException, match="Unknown order"):
+            exchange.cancel_stoploss_order_with_result("_", "TKN/BTC", 123)
+
+    fetch_stoploss.assert_called_once_with("_", "TKN/BTC")
 
 
 @pytest.mark.usefixtures("init_persistence")
@@ -4634,9 +4665,17 @@ def test_name(default_conf_usdt, mocker, exchange_name):
     ],
 )
 @pytest.mark.parametrize("exchange_name", EXCHANGES)
-def test_get_trades_for_order(default_conf, mocker, exchange_name, trading_mode, amount):
+@pytest.mark.parametrize(
+    "since",
+    [
+        datetime(2018, 5, 5),
+        datetime(2018, 5, 5, tzinfo=UTC),
+        datetime(2018, 5, 5, 8, tzinfo=timezone(timedelta(hours=8))),
+        datetime(2018, 5, 4, 20, tzinfo=timezone(timedelta(hours=-4))),
+    ],
+)
+def test_get_trades_for_order(default_conf, mocker, exchange_name, trading_mode, amount, since):
     order_id = "ABCD-ABCD"
-    since = datetime(2018, 5, 5, 0, 0, 0)
     default_conf["dry_run"] = False
     default_conf["trading_mode"] = trading_mode
     default_conf["margin_mode"] = "isolated"
@@ -4678,15 +4717,20 @@ def test_get_trades_for_order(default_conf, mocker, exchange_name, trading_mode,
     assert orders[0]["price"] == 165
     assert pytest.approx(orders[0]["amount"]) == amount
     assert api_mock.fetch_my_trades.call_count == 1
-    # since argument should be
-    assert isinstance(api_mock.fetch_my_trades.call_args[0][1], int)
     assert api_mock.fetch_my_trades.call_args[0][0] == "ETH/USDT:USDT"
-    # Same test twice, hardcoded number and doing the same calculation
-    assert api_mock.fetch_my_trades.call_args[0][1] == 1525478395000
-    assert (
-        api_mock.fetch_my_trades.call_args[0][1]
-        == int(since.replace(tzinfo=UTC).timestamp() - 5) * 1000
-    )
+    if exchange_name == "binance" and trading_mode == "futures":
+        assert api_mock.fetch_my_trades.call_args[0][1] is None
+        assert api_mock.fetch_my_trades.call_args.kwargs["params"] == {
+            "orderId": order_id,
+            "limit": 1000,
+        }
+    else:
+        assert api_mock.fetch_my_trades.call_args[0][1] == 1525478395000
+        assert (
+            api_mock.fetch_my_trades.call_args[0][1]
+            == int((since.replace(tzinfo=UTC) if since.tzinfo is None else since).timestamp() - 5)
+            * 1000
+        )
 
     ccxt_exceptionhandlers(
         mocker,

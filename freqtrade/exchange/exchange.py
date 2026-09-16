@@ -152,6 +152,7 @@ class Exchange:
         "trades_pagination": "time",  # Possible are "time" or "id"
         "trades_pagination_arg": "since",
         "trades_has_history": False,
+        "fetch_my_trades_by_order_id": False,
         "l2_limit_range": None,
         "l2_limit_range_required": True,  # Allow Empty L2 limit (kucoin)
         "l2_limit_upper": None,  # Upper limit for L2 limit
@@ -1909,7 +1910,18 @@ class Exchange:
         :param amount: Amount to use for fake response
         :return: Result from either cancel_order if usable, or fetch_order
         """
-        corder = self.cancel_stoploss_order(order_id, pair)
+        try:
+            corder = self.cancel_stoploss_order(order_id, pair)
+        except InvalidOrderException:
+            try:
+                order = self.fetch_stoploss_order(order_id, pair)
+            except InvalidOrderException:
+                logger.warning(f"Could not fetch cancelled stoploss order {order_id}.")
+                order = None
+            if isinstance(order, dict) and order.get("status") in NON_OPEN_EXCHANGE_STATES:
+                return order
+            raise
+
         if self.is_cancel_order_result_suitable(corder):
             return corder
         try:
@@ -2448,15 +2460,9 @@ class Exchange:
     ) -> list:
         """
         Fetch Orders using the "fetch_my_trades" endpoint and filter them by order-id.
-        The "since" argument passed in is coming from the database and is in UTC,
-        as timezone-native datetime object.
-        From the python documentation:
-            > Naive datetime instances are assumed to represent local time
-        Therefore, calling "since.timestamp()" will get the UTC timestamp, after applying the
-        transformation from local timezone to UTC.
-        This works for timezones UTC+ since then the result will contain trades from a few hours
-        instead of from the last 5 seconds, however fails for UTC- timezones,
-        since we're then asking for trades with a "since" argument in the future.
+        Naive database datetimes are interpreted as UTC, not the host's local timezone.
+        Aware datetimes are converted to UTC while preserving the instant.
+        Exchanges supporting an exact order-id filter can omit the time range entirely.
 
         :param order_id order_id: Order-id as given when creating the order
         :param pair: Pair the order is for
@@ -2469,10 +2475,19 @@ class Exchange:
         try:
             # Allow 5s offset to catch slight time offsets (discovered in #1185)
             # since needs to be int in milliseconds
-            _params = params if params else {}
+            _params = dict(params or {})
+            since_utc = since.replace(tzinfo=UTC) if since.tzinfo is None else since.astimezone(UTC)
+            since_ms: int | None = int((since_utc.timestamp() - 5) * 1000)
+            if self._ft_has["fetch_my_trades_by_order_id"]:
+                # Binance futures supports an exact order filter. Avoid time-filter rejection
+                # (-4181) and unrelated account fills consuming the response limit.
+                since_ms = None
+                for key in ("startTime", "endTime", "until", "fromId"):
+                    _params.pop(key, None)
+                _params.update(orderId=order_id, limit=1000)
             my_trades = self._api.fetch_my_trades(
                 pair,
-                int((since.replace(tzinfo=UTC).timestamp() - 5) * 1000),
+                since_ms,
                 params=_params,
             )
             matched_trades = [trade for trade in my_trades if trade["order"] == order_id]

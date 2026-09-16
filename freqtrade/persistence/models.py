@@ -8,7 +8,7 @@ import threading
 from contextvars import ContextVar
 from typing import Any, Final
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.exc import NoSuchModuleError
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -45,6 +45,18 @@ def get_request_or_thread_id() -> str | None:
 _SQL_DOCS_URL = "http://docs.sqlalchemy.org/en/latest/core/engines.html#database-urls"
 
 
+def _set_postgres_timezone(dbapi_connection, connection_record) -> None:
+    """Persist UTC naive timestamps even when the PostgreSQL server uses a local timezone."""
+    previous_autocommit = dbapi_connection.autocommit
+    try:
+        # Outside a transaction, so a pool rollback cannot undo the session setting.
+        dbapi_connection.autocommit = True
+        with dbapi_connection.cursor() as cursor:
+            cursor.execute("SET SESSION TIME ZONE 'UTC'")
+    finally:
+        dbapi_connection.autocommit = previous_autocommit
+
+
 def init_db(db_url: str) -> None:
     """
     Initializes this module with the given config,
@@ -79,6 +91,9 @@ def init_db(db_url: str) -> None:
         raise OperationalException(
             f"Given value for db_url: '{db_url}' is no valid database URL! (See {_SQL_DOCS_URL})"
         )
+
+    if engine.dialect.name == "postgresql":
+        event.listen(engine, "connect", _set_postgres_timezone)
 
     # https://docs.sqlalchemy.org/en/13/orm/contextual.html#thread-local-scope
     # Scoped sessions proxy requests to the appropriate thread-local session.

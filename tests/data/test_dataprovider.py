@@ -405,12 +405,29 @@ def test_current_whitelist(mocker, default_conf, tickers):
     pairlist.refresh_pairlist()
 
     assert dp.current_whitelist() == pairlist._whitelist
+    assert dp.current_selection_whitelist() == pairlist._selection_whitelist
     # The identity of the 2 lists should not be identical, but a copy
     assert dp.current_whitelist() is not pairlist._whitelist
+    assert dp.current_selection_whitelist() is not pairlist._selection_whitelist
+
+    # Simulate the active whitelist being extended with an open trade.
+    pairlist._whitelist.append("HELD/BTC")
+    assert "HELD/BTC" in dp.current_whitelist()
+    assert "HELD/BTC" not in dp.current_selection_whitelist()
+
+    active_whitelist = dp.current_whitelist()
+    active_whitelist.append("CALLER/BTC")
+    selection_whitelist = dp.current_selection_whitelist()
+    selection_whitelist.append("CALLER/BTC")
+    assert "CALLER/BTC" not in dp.current_whitelist()
+    assert "CALLER/BTC" not in dp.current_selection_whitelist()
 
     with pytest.raises(OperationalException):
         dp = DataProvider(default_conf, exchange)
         dp.current_whitelist()
+
+    with pytest.raises(OperationalException):
+        dp.current_selection_whitelist()
 
 
 def test_get_analyzed_dataframe(mocker, default_conf, ohlcv_history):

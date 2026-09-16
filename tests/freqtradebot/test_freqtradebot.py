@@ -4243,6 +4243,8 @@ def test_get_real_amount_wrong_amount(
     # Amount does not change
     with pytest.raises(DependencyException, match=r"Half bought\? Amounts don't match"):
         freqtrade.get_real_amount(trade, limit_buy_order_usdt, order_obj)
+    assert trade.fee_open_cost is None
+    assert trade.fee_open_currency is None
 
 
 def test_get_real_amount_wrong_amount_rounding(

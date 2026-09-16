@@ -5,6 +5,11 @@ config*.json
 *.sqlite-wal
 logfile.txt
 user_data/*
+!user_data/strategies/
+user_data/strategies/*
+!user_data/strategies/leader_squeeze*.py
+!user_data/strategies/leader_squeeze*.md
+!user_data/strategies/leader_squeeze*.sql
 !user_data/strategy/sample_strategy.py
 !user_data/notebooks
 !user_data/models

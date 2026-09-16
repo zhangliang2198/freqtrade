@@ -351,6 +351,64 @@ def test_sync_wallet_futures_live(mocker, default_conf):
     assert "ETH/USDT:USDT" not in freqtrade.wallets._positions
 
 
+def test_sync_wallet_futures_live_cross_zero_collateral_uses_initial_margin(
+    mocker, default_conf_usdt
+):
+    default_conf_usdt["dry_run"] = False
+    default_conf_usdt["trading_mode"] = "futures"
+    default_conf_usdt["margin_mode"] = "cross"
+    mock_result = [
+        {
+            "symbol": "ETH/USDT:USDT",
+            "initialMargin": 82.64,
+            "collateral": 0.0,
+            "leverage": 5.0,
+            "unrealizedPnl": 0.0,
+            "contracts": 100.0,
+            "contractSize": 1,
+            "side": "long",
+        }
+    ]
+    mocker.patch.multiple(
+        EXMS,
+        get_balances=MagicMock(return_value={"USDT": {"free": 900, "used": 100, "total": 1000}}),
+        fetch_positions=MagicMock(return_value=mock_result),
+    )
+
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+
+    position = freqtrade.wallets._positions["ETH/USDT:USDT"]
+    assert position.position > 0
+    assert position.collateral == 82.64
+
+
+def test_sync_wallet_futures_live_filters_zero_contract_positions(mocker, default_conf_usdt):
+    default_conf_usdt["dry_run"] = False
+    default_conf_usdt["trading_mode"] = "futures"
+    default_conf_usdt["margin_mode"] = "cross"
+    mock_result = [
+        {
+            "symbol": "ETH/USDT:USDT",
+            "initialMargin": 82.64,
+            "collateral": 82.64,
+            "leverage": 5.0,
+            "unrealizedPnl": 0.0,
+            "contracts": 0.0,
+            "contractSize": 1,
+            "side": "long",
+        }
+    ]
+    mocker.patch.multiple(
+        EXMS,
+        get_balances=MagicMock(return_value={"USDT": {"free": 1000, "used": 0, "total": 1000}}),
+        fetch_positions=MagicMock(return_value=mock_result),
+    )
+
+    freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+
+    assert freqtrade.wallets._positions == {}
+
+
 @pytest.mark.parametrize("includes_upnl", [True, False])
 def test_sync_wallet_futures_live_unrealized_pnl(mocker, default_conf_usdt, includes_upnl):
 

@@ -1,8 +1,11 @@
 import logging
 import re
 import sys
+from io import StringIO
 
 import pytest
+from rich.console import Console
+from rich.table import Table
 
 from freqtrade.exceptions import OperationalException
 from freqtrade.loggers import (
@@ -15,6 +18,73 @@ from freqtrade.loggers.set_log_levels import (
     reduce_verbosity_for_bias_tester,
     restore_verbosity_for_bias_tester,
 )
+
+
+def test_rich_handler_strategy_log_style(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    terminal_output = StringIO()
+    handler = FtRichHandler(
+        Console(force_terminal=True, color_system="standard", file=terminal_output)
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+
+    styled_record = logging.LogRecord("test", logging.INFO, __file__, 1, "styled message", (), None)
+    styled_record.strategy_log_style = "red"
+    handler.emit(styled_record)
+    assert "\x1b[31mstyled message\x1b[0m" in terminal_output.getvalue()
+
+    dynamic_record = logging.LogRecord(
+        "test", logging.INFO, __file__, 1, "literal [red]dynamic[/red]", (), None
+    )
+    plain_output = StringIO()
+    plain_handler = logging.StreamHandler(plain_output)
+    plain_handler.setFormatter(logging.Formatter("%(message)s"))
+    plain_handler.handle(styled_record)
+    plain_handler.handle(dynamic_record)
+    assert plain_output.getvalue() == "styled message\nliteral [red]dynamic[/red]\n"
+    assert "\x1b[" not in plain_output.getvalue()
+
+    handler.emit(dynamic_record)
+    dynamic_output = terminal_output.getvalue()
+    assert "literal [red]dynamic[/red]" in dynamic_output
+    assert "\x1b[31mliteral" not in dynamic_output
+
+    ordinary_record = logging.LogRecord("test", logging.INFO, __file__, 1, "ordinary", (), None)
+    handler.emit(ordinary_record)
+    assert terminal_output.getvalue().endswith("ordinary\n")
+
+
+def test_rich_handler_strategy_log_table():
+    terminal_output = StringIO()
+    handler = FtRichHandler(Console(width=80, file=terminal_output))
+    handler.setFormatter(logging.Formatter("%(message)s"))
+
+    table = Table()
+    table.add_column("指标")
+    table.add_column("值")
+    table.add_row("中文状态", "运行中")
+    record = logging.LogRecord(
+        "strategy",
+        logging.INFO,
+        __file__,
+        1,
+        "%s\n%s",
+        ("策略状态", "PLAIN_TABLE_COPY"),
+        None,
+    )
+    record.strategy_log_table = table
+
+    handler.emit(record)
+
+    output = terminal_output.getvalue()
+    lines = output.splitlines()
+    assert lines[0].endswith("策略状态")
+    assert output.count("中文状态") == 1
+    assert "运行中" in output
+    assert "PLAIN_TABLE_COPY" not in output
+    assert all(len(line) <= 80 for line in lines)
+    assert table.expand is False
 
 
 @pytest.mark.usefixtures("keep_log_config_loggers")
@@ -246,3 +316,22 @@ def test_reduce_verbosity():
     assert logging.getLogger("freqtrade.strategy.hyper").getEffectiveLevel() == prior_level
     assert logging.getLogger("freqtrade").getEffectiveLevel() == prior_level
     # base level wasn't changed
+
+
+def test_rich_table_title_does_not_request_plain_text():
+    class PlainTextMustNotRender:
+        def __str__(self):
+            raise AssertionError("Rich handler requested duplicate plain text")
+
+    output = StringIO()
+    handler = FtRichHandler(Console(width=80, file=output))
+    table = Table("Rule")
+    table.add_row("hourly break")
+    record = logging.LogRecord(
+        "strategy", logging.INFO, __file__, 1, PlainTextMustNotRender(), (), None
+    )
+    record.strategy_log_table = table
+    record.strategy_log_title = "Exit rules"
+    handler.emit(record)
+    assert "Exit rules" in output.getvalue()
+    assert "hourly break" in output.getvalue()

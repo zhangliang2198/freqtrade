@@ -17,6 +17,35 @@ from tests.conftest import EXMS, get_patched_exchange
 from tests.exchange.test_exchange import ccxt_exceptionhandlers
 
 
+@pytest.mark.parametrize("margin_mode", [MarginMode.CROSS, MarginMode.ISOLATED])
+def test_get_trades_for_order_without_start_time(default_conf, mocker, margin_mode):
+    """Reproduce Binance rejecting time-filtered fee queries after an order filled."""
+    default_conf.update(dry_run=False, trading_mode=TradingMode.FUTURES, margin_mode=margin_mode)
+    api_mock = MagicMock()
+    fills = [
+        {"order": "123", "amount": 0.1, "cost": 10.0},
+        {"order": "123", "amount": 0.2, "cost": 20.0},
+        {"order": "456", "amount": 1.0, "cost": 100.0},
+    ]
+
+    def fetch(pair, since, params):
+        if since is not None or "startTime" in params:
+            raise ccxt.ExchangeError('binance {"code":-4181,"msg":"Invalid start time."}')
+        assert pair == "ETH/USDT:USDT"
+        assert params == {"orderId": "123", "limit": 1000, "recvWindow": 5000}
+        return fills
+
+    api_mock.fetch_my_trades.side_effect = fetch
+    exchange = get_patched_exchange(mocker, default_conf, api_mock, exchange="binance")
+    mocker.patch.object(exchange, "exchange_has", return_value=True)
+    mocker.patch.object(exchange, "_trades_contracts_to_amount", side_effect=lambda trades: trades)
+    params = {"recvWindow": 5000}
+    result = exchange.get_trades_for_order("123", "ETH/USDT:USDT", dt_utc(2026, 9, 16), params)
+    assert result == fills[:2]
+    assert params == {"recvWindow": 5000}
+    api_mock.fetch_my_trades.assert_called_once()
+
+
 @pytest.mark.parametrize(
     "side,order_type,time_in_force,expected",
     [
@@ -33,7 +62,14 @@ def test__get_params_binance(default_conf, mocker, side, order_type, time_in_for
     assert exchange._get_params(side, order_type, 1, False, time_in_force) == expected
 
 
-@pytest.mark.parametrize("trademode", [TradingMode.FUTURES, TradingMode.SPOT])
+@pytest.mark.parametrize(
+    "trademode,stoploss_type,expected_order_type",
+    [
+        (TradingMode.FUTURES, "limit", "stop"),
+        (TradingMode.FUTURES, "market", "stop_market"),
+        (TradingMode.SPOT, "limit", "stop_loss_limit"),
+    ],
+)
 @pytest.mark.parametrize(
     "limitratio,expected,side",
     [
@@ -45,10 +81,11 @@ def test__get_params_binance(default_conf, mocker, side, order_type, time_in_for
         (0.98, 220 * 1.02, "buy"),
     ],
 )
-def test_create_stoploss_order_binance(default_conf, mocker, limitratio, expected, side, trademode):
+def test_create_stoploss_order_binance(
+    default_conf, mocker, limitratio, expected, side, trademode, stoploss_type, expected_order_type
+):
     api_mock = MagicMock()
     order_id = f"test_prod_buy_{randint(0, 10**6)}"
-    order_type = "stop_loss_limit" if trademode == TradingMode.SPOT else "stop"
 
     api_mock.create_order = MagicMock(return_value={"id": order_id, "info": {"foo": "bar"}})
     default_conf["dry_run"] = False
@@ -70,7 +107,7 @@ def test_create_stoploss_order_binance(default_conf, mocker, limitratio, expecte
         )
 
     api_mock.create_order.reset_mock()
-    order_types = {"stoploss": "limit", "stoploss_price_type": "mark"}
+    order_types = {"stoploss": stoploss_type, "stoploss_price_type": "mark"}
     if limitratio is not None:
         order_types.update({"stoploss_on_exchange_limit_ratio": limitratio})
 
@@ -82,11 +119,14 @@ def test_create_stoploss_order_binance(default_conf, mocker, limitratio, expecte
     assert "info" in order
     assert order["id"] == order_id
     assert api_mock.create_order.call_args_list[0][1]["symbol"] == "ETH/BTC"
-    assert api_mock.create_order.call_args_list[0][1]["type"] == order_type
+    assert api_mock.create_order.call_args_list[0][1]["type"] == expected_order_type
     assert api_mock.create_order.call_args_list[0][1]["side"] == side
     assert api_mock.create_order.call_args_list[0][1]["amount"] == 1
     # Price should be 1% below stopprice
-    assert api_mock.create_order.call_args_list[0][1]["price"] == expected
+    if stoploss_type == "limit":
+        assert api_mock.create_order.call_args_list[0][1]["price"] == expected
+    else:
+        assert api_mock.create_order.call_args_list[0][1]["price"] is None
     if trademode == TradingMode.SPOT:
         params_dict = {"stopPrice": 220}
     else:

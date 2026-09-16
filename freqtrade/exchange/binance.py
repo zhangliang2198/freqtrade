@@ -52,6 +52,7 @@ class Binance(Exchange):
         "supports_demo_trading": False,
     }
     _ft_has_futures: FtHas = {
+        "fetch_my_trades_by_order_id": True,
         "ohlcv_candle_limit": 499,
         "funding_fee_candle_limit": 1000,
         "open_interest_candle_limit": 500,

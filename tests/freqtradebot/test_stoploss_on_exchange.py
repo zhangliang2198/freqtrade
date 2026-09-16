@@ -82,6 +82,7 @@ def test_handle_stoploss_on_exchange(
         create_stoploss=stoploss,
     )
     freqtrade = FreqtradeBot(default_conf_usdt)
+    freqtrade.strategy.order_types["stoploss_on_exchange"] = True
     patch_get_signal(freqtrade, enter_short=is_short, enter_long=not is_short)
 
     # First case: when stoploss is not yet set but the order is open
@@ -213,6 +214,7 @@ def test_handle_stoploss_on_exchange_emergency(
         create_stoploss=stoploss,
     )
     freqtrade = FreqtradeBot(default_conf_usdt)
+    freqtrade.strategy.order_types["stoploss_on_exchange"] = True
     patch_get_signal(freqtrade, enter_short=is_short, enter_long=not is_short)
 
     freqtrade.enter_positions(1)
@@ -291,6 +293,7 @@ def test_handle_stoploss_on_exchange_partial(
         create_stoploss=stoploss,
     )
     freqtrade = FreqtradeBot(default_conf_usdt)
+    freqtrade.strategy.order_types["stoploss_on_exchange"] = True
     patch_get_signal(freqtrade, enter_short=is_short, enter_long=not is_short)
 
     freqtrade.enter_positions(1)
@@ -351,6 +354,7 @@ def test_handle_stoploss_on_exchange_partial_cancel_here(
         create_stoploss=stoploss,
     )
     freqtrade = FreqtradeBot(default_conf_usdt)
+    freqtrade.strategy.order_types["stoploss_on_exchange"] = True
     patch_get_signal(freqtrade, enter_short=is_short, enter_long=not is_short)
 
     freqtrade.enter_positions(1)
@@ -421,6 +425,7 @@ def test_handle_sle_cancel_cant_recreate(
         get_fee=fee,
     )
     freqtrade = FreqtradeBot(default_conf_usdt)
+    freqtrade.strategy.order_types["stoploss_on_exchange"] = True
     mocker.patch.multiple(
         freqtrade.exchange,
         create_order=MagicMock(
@@ -1081,7 +1086,7 @@ def test_execute_trade_exit_sloe_cancel_exception(
     mocker, default_conf_usdt, ticker_usdt, fee, caplog
 ) -> None:
     freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
-    mocker.patch.object(
+    cancel_stoploss_order_mock = mocker.patch.object(
         freqtrade.exchange, "cancel_stoploss_order", side_effect=InvalidOrderException()
     )
     mocker.patch("freqtrade.wallets.Wallets.get_free", MagicMock(return_value=300))
@@ -1100,6 +1105,11 @@ def test_execute_trade_exit_sloe_cancel_exception(
         fetch_order=MagicMock(
             return_value={"id": "12345554", "side": "buy", "status": "canceled", "filled": 0.0}
         ),
+    )
+    fetch_stoploss_order_mock = mocker.patch.object(
+        freqtrade.exchange,
+        "fetch_stoploss_order",
+        return_value={"id": "abcd", "status": "canceled", "filled": 0.0},
     )
 
     freqtrade.strategy.order_types["stoploss_on_exchange"] = True
@@ -1126,7 +1136,9 @@ def test_execute_trade_exit_sloe_cancel_exception(
         trade=trade, limit=1234, exit_check=ExitCheckTuple(exit_type=ExitType.STOP_LOSS)
     )
     assert create_order_mock.call_count == 2
-    assert log_has("Could not cancel stoploss order abcd for pair ETH/USDT", caplog)
+    cancel_stoploss_order_mock.assert_called_once_with("abcd", trade.pair)
+    fetch_stoploss_order_mock.assert_called_once_with("abcd", trade.pair)
+    assert not log_has("Could not cancel stoploss order abcd for pair ETH/USDT", caplog)
 
 
 @pytest.mark.parametrize("is_short", [False, True])

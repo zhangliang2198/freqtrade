@@ -20,10 +20,10 @@
     },
     {
       "method": "PercentChangePairList",
-      "number_assets": 10,
-      "lookback_timeframe": "5m",
-      "lookback_period": 12,
-      "refresh_period": 300,
+      "number_assets": 30,
+      "lookback_timeframe": "15m",
+      "lookback_period": 4,
+      "refresh_period": 900,
       "sort_direction": "desc"
     }
   ]

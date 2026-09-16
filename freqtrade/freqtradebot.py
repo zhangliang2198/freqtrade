@@ -1500,8 +1500,9 @@ class FreqtradeBot(LoggingMixin):
 
             try:
                 try:
-                    if self.strategy.order_types.get(
-                        "stoploss_on_exchange"
+                    if (
+                        self.strategy.order_types.get("stoploss_on_exchange")
+                        or trade.has_open_sl_orders
                     ) and self.handle_stoploss_on_exchange(trade):
                         trades_closed += 1
                         Trade.commit()
@@ -1670,6 +1671,11 @@ class FreqtradeBot(LoggingMixin):
             or (trade.has_open_orders and self.exchange.get_option("stoploss_blocks_assets", True))
         ):
             # The trade can be closed already (sell-order fill confirmation came in this iteration)
+            return False
+
+        # Disabling new exchange stops must not abandon already submitted stop orders.
+        # Their fills were reconciled above; do not create, replace or trail them now.
+        if not self.strategy.order_types.get("stoploss_on_exchange"):
             return False
 
         # If enter order is fulfilled but there is no stoploss, we add a stoploss on exchange
@@ -2778,6 +2784,11 @@ class FreqtradeBot(LoggingMixin):
                 # only applies if fee is in quote currency!
                 if trade_base_currency == fee_currency:
                     fee_abs += fee_cost_
+        if not isclose(amount, order_amount, abs_tol=constants.MATH_CLOSE_PREC):
+            # * Leverage could be a cause for this warning
+            logger.warning(f"Amount {amount} does not match amount {trade.amount}")
+            raise DependencyException("Half bought? Amounts don't match")
+
         # Ensure at least one trade was found:
         if fee_currency:
             # fee_rate should use mean
@@ -2789,11 +2800,6 @@ class FreqtradeBot(LoggingMixin):
                 logger.warning(
                     f"Not updating {order.get('side', '')}-fee - rate: {fee_rate}, {fee_currency}."
                 )
-
-        if not isclose(amount, order_amount, abs_tol=constants.MATH_CLOSE_PREC):
-            # * Leverage could be a cause for this warning
-            logger.warning(f"Amount {amount} does not match amount {trade.amount}")
-            raise DependencyException("Half bought? Amounts don't match")
 
         if fee_abs != 0:
             return self.apply_fee_conditional(

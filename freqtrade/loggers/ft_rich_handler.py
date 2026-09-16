@@ -2,7 +2,7 @@ from datetime import datetime
 from logging import Handler
 
 from rich._null_file import NullFile
-from rich.console import Console
+from rich.console import Console, Group
 from rich.text import Text
 
 
@@ -18,7 +18,16 @@ class FtRichHandler(Handler):
 
     def emit(self, record):
         try:
-            msg = self.format(record)
+            strategy_log_table = getattr(record, "strategy_log_table", None)
+            msg = Text(
+                (
+                    getattr(record, "strategy_log_title", None)
+                    or record.getMessage().split("\n", 1)[0]
+                    if strategy_log_table is not None
+                    else self.format(record)
+                ),
+                style=getattr(record, "strategy_log_style", ""),
+            )
             # Format log message
             log_time = Text(
                 datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]  # noqa: DTZ006
@@ -36,9 +45,11 @@ class FtRichHandler(Handler):
                 self.handleError(record)
                 return
 
-            self._console.print(
-                Text() + log_time + gray_sep + name + gray_sep + log_level + gray_sep + msg
-            )
+            log_header = Text() + log_time + gray_sep + name + gray_sep + log_level + gray_sep + msg
+            if strategy_log_table is not None:
+                self._console.print(Group(log_header, strategy_log_table))
+            else:
+                self._console.print(log_header)
 
         except RecursionError:
             raise
