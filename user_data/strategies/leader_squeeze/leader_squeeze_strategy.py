@@ -222,11 +222,12 @@ class LeaderSqueezeStrategy(
         )
         logger.info(
             "🔒 盈利保护 | 棘轮=%s 峰值达%.2fR武装 跟踪距离=%.2fR "
-            "费用缓冲=%.2f%% 最小改单=%.2fR | 无进展退出=%s "
-            "%s根%s未推进%.2fR且趋势走弱/收益低于%.2fR",
+            "回吐比例=%.0f%% 费用缓冲=%.2f%% 最小改单=%.2fR | 无进展退出=%s "
+            "%s根%s未推进%.2fR且窗口内近期走弱/收益低于%.2fR",
             "开启" if self.settings["profit_lock_enabled"] else "关闭",
             self.settings["profit_lock_arm_r"],
             self.settings["profit_lock_trail_r"],
+            100 * self.settings["profit_lock_giveback_frac"],
             100 * self.settings["profit_lock_fee_buffer"],
             self.settings["profit_lock_min_step_r"],
             "开启" if self.settings["profit_no_progress_enabled"] else "关闭",
@@ -507,7 +508,11 @@ class LeaderSqueezeStrategy(
         after_fill: bool,
         **kwargs,
     ) -> float | None:
-        """盈利棘轮: 峰值达 1R 后保本, 随后按峰值减 1.5R 单调跟踪。
+        """盈利棘轮: 峰值达 1R 后保本, 按双重回吐上限单调跟踪。
+
+        回吐额度取 ``profit_lock_trail_r * R`` 与
+        ``profit_lock_giveback_frac * (峰值价格 - 入场价格)`` 中的较小值,
+        再与费用地板比较, 避免只按固定的峰值减 1.5R 跟踪。
 
         由 ``leader_squeeze.profit_lock_enabled`` 门控, 关闭时恒返回 None, 框架
         回退到配置的 ``stoploss``, 行为与未接入前完全一致。返回值为保证金口径, 由

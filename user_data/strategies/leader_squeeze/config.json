@@ -5,7 +5,7 @@
     "exit": "market",
     "stoploss": "market",
     "stoploss_on_exchange": true,
-    "stoploss_on_exchange_interval": 60,
+    "stoploss_on_exchange_interval": 30,
     "stoploss_price_type": "mark",
     "emergency_exit": "market"
   },
@@ -147,6 +147,7 @@
     "profit_lock_arm_r": 1.0,
     "profit_lock_fee_buffer": 0.0025,
     "profit_lock_trail_r": 1.5,
+    "profit_lock_giveback_frac": 0.5,
     "profit_lock_min_step_r": 0.1,
     "profit_no_progress_enabled": true,
     "profit_no_progress_candles": 8,

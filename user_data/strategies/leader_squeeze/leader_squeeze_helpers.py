@@ -228,6 +228,9 @@ class LeaderMixinContext:
     _stop_event: Any
     _trend_context: Any
     _trend_candles: Any
+    _trend_history_count: Any
+    _trend_state_frame: Any
+    _wilder_atr: Any
     _trend_reversed: Any
     _update_market_state: Any
     _warn_data_unavailable: Any
@@ -708,6 +711,7 @@ REQUIRED_SETTINGS = frozenset(
         "profit_lock_arm_r",
         "profit_lock_fee_buffer",
         "profit_lock_trail_r",
+        "profit_lock_giveback_frac",
         "profit_lock_min_step_r",
         "profit_no_progress_enabled",
         "profit_no_progress_candles",
@@ -957,11 +961,14 @@ def _validate_profit_protection_settings(settings: dict) -> None:
     for key in (
         "profit_lock_fee_buffer",
         "profit_lock_trail_r",
+        "profit_lock_giveback_frac",
         "profit_lock_min_step_r",
     ):
         value = settings[key]
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
             raise ValueError(f"leader_squeeze.{key} must be non-negative and finite")
+    if settings["profit_lock_giveback_frac"] >= 1.0:
+        raise ValueError("leader_squeeze.profit_lock_giveback_frac must stay below 1.0")
     if settings["profit_lock_fee_buffer"] >= 0.1:
         raise ValueError("leader_squeeze.profit_lock_fee_buffer must stay below 0.1")
     min_pct, max_pct = settings["profit_r_min_pct"], settings["profit_r_max_pct"]
@@ -2886,6 +2893,37 @@ class LeaderStorageMixin(LeaderMixinContext):
 
 
 class LeaderTrendMixin(LeaderMixinContext):
+    def _trend_history_count(self) -> int:
+        """返回一次趋势判定所需的最少完整 K 线数量。"""
+        return max(
+            int(self.settings["trend_ema_candles"]) + int(self.settings["trend_slope_candles"]),
+            int(self.settings["atr_period"]) + 2,
+        )
+
+    def _trend_state_frame(self, frame: DataFrame) -> DataFrame:
+        """集中计算逐根趋势状态, 供实时判定和历史回放共用。"""
+        slope = int(self.settings["trend_slope_candles"])
+        close, high, low = frame["close"], frame["high"], frame["low"]
+        ema = close.ewm(span=int(self.settings["trend_ema_candles"]), adjust=False).mean()
+        below = close < ema
+        falling = ema < ema.shift(slope)
+        lower_structure = (high < high.shift(1)) & (low < low.shift(1)) & (close < close.shift(1))
+        weakening = below & (falling | lower_structure)
+        rising = (close > ema) & ~falling
+        state = pd.Series("consolidating", index=frame.index)
+        state[rising] = "up"
+        state[weakening] = "weakening"
+        return DataFrame(
+            {
+                "state": state,
+                "ema": ema,
+                "below": below,
+                "falling": falling,
+                "lower_structure": lower_structure,
+            },
+            index=frame.index,
+        )
+
     def _trend_candles(
         self,
         pair: str,
@@ -2926,43 +2964,27 @@ class LeaderTrendMixin(LeaderMixinContext):
 
     @report_cached
     def _trend_context(self, pair: str, timeframe: str) -> dict:
-        slope = self.settings["trend_slope_candles"]
-        frame = self._trend_candles(
-            pair,
-            timeframe,
-            max(self.settings["trend_ema_candles"] + slope, self.settings["atr_period"] + 2),
-        )
+        slope = int(self.settings["trend_slope_candles"])
+        frame = self._trend_candles(pair, timeframe, self._trend_history_count())
         if frame is None:
             return {"timeframe": timeframe, "available": False, "state": "unknown"}
+        trend = self._trend_state_frame(frame)
         close = frame["close"]
-        ema = close.ewm(span=self.settings["trend_ema_candles"], adjust=False).mean()
         atr = self._wilder_atr(frame.iloc[:-1])
         if not math.isfinite(atr) or atr <= 0:
             return {"timeframe": timeframe, "available": False, "state": "unknown"}
-        lower_structure = bool(
-            frame["high"].iloc[-1] < frame["high"].iloc[-2]
-            and frame["low"].iloc[-1] < frame["low"].iloc[-2]
-            and close.iloc[-1] < close.iloc[-2]
-        )
-        below = bool(close.iloc[-1] < ema.iloc[-1])
-        falling = bool(ema.iloc[-1] < ema.iloc[-slope - 1])
-        weakening = below and (falling or lower_structure)
-        state = (
-            "weakening"
-            if weakening
-            else ("up" if close.iloc[-1] > ema.iloc[-1] and not falling else "consolidating")
-        )
+        latest = trend.iloc[-1]
         return {
             "timeframe": timeframe,
             "available": True,
-            "state": state,
+            "state": str(latest["state"]),
             "last_closed_candle": frame.iloc[-1].to_dict(),
-            "ema": float(ema.iloc[-1]),
-            "reference_ema": float(ema.iloc[-slope - 1]),
+            "ema": float(latest["ema"]),
+            "reference_ema": float(trend["ema"].iloc[-slope - 1]),
             "atr": atr,
-            "below_ema": below,
-            "ema_falling": falling,
-            "lower_high_low": lower_structure,
+            "below_ema": bool(latest["below"]),
+            "ema_falling": bool(latest["falling"]),
+            "lower_high_low": bool(latest["lower_structure"]),
             "pullback_atr": float((close.iloc[-slope - 1 : -1].max() - close.iloc[-1]) / atr),
         }
 
@@ -3328,18 +3350,34 @@ class LeaderProfitMixin(LeaderMixinContext):
         if shadow is None:
             return
         record = shadow.get(trade.pair)
-        if (
+        same_trade = (
             record is not None
             and record.get("trade_id") == trade.id
             and self._valid_profit_record(trade.pair, record)
-        ):
+        )
+        if same_trade and not self._profit_record_rebuildable(record):
             return
-        if self._valid_profit_record(trade.pair, record):
+        if not same_trade and self._valid_profit_record(trade.pair, record):
+            # 同一 pair 的上一笔先归档, 不丢反事实样本。
             self._queue_profit_archive(record)
+        # 入场单挂出后 trade 即出现在 get_open_trades(), 早于本回调, 因此影子账本
+        # 通常已按 reconstructed 建好同 trade_id 的记录。此刻才拿到真实成交时刻,
+        # 用它重建入场上下文, 让无进展时钟从入场后第一根完整 K 线起算, 并把
+        # context_source 修正为 entry_fill, 使该样本能进入反事实汇总。
         shadow[trade.pair] = self._new_profit_record(
             trade, self._profit_entry_atr(trade.pair), context_source="entry_fill"
         )
         self._profit_shadow = shadow
+
+    @staticmethod
+    def _profit_record_rebuildable(record: dict[str, Any]) -> bool:
+        """记录尚未做出任何决策时才能安全重建, 否则会丢掉已武装的棘轮状态。"""
+        return (
+            record.get("context_source") == "reconstructed"
+            and record.get("execution_lock_armed_at") is None
+            and record.get("shadow_lock_armed_at") is None
+            and record.get("shadow_exit_price") is None
+        )
 
     def _profit_entry_atr(self, pair: str) -> float | None:
         try:
@@ -3417,6 +3455,8 @@ class LeaderProfitMixin(LeaderMixinContext):
             "last_scan_bucket": None,
             "bars_seen": 0,
             "bars_since_new_high": 0,
+            "max_bars_since_new_high": 0,
+            "bars_since_weakening": None,
             "execution_lock_armed_at": None,
             "execution_lock_stop_price": None,
             "shadow_lock_armed_at": None,
@@ -3475,6 +3515,23 @@ class LeaderProfitMixin(LeaderMixinContext):
                 record["no_progress"] = False
             else:
                 record["progress_tracking_from_ts"] = float(cast(int | float, tracking_from))
+        if (
+            record.get("version") == self._PROFIT_RECORD_VERSION
+            and "bars_since_weakening" not in record
+        ):
+            # 旧记录没有保存最近一次走弱距今多久; 从“未观测到”开始, 避免在真正
+            # 出现走弱 K 线前凭空获得退出豁免。
+            record["bars_since_weakening"] = None
+        if (
+            record.get("version") == self._PROFIT_RECORD_VERSION
+            and "max_bars_since_new_high" not in record
+        ):
+            # 记录该交易曾经离动量闸门多近; 否则归档只有最终快照, 无法判断赢家
+            # 是否曾在持仓中途停滞 8 根以上。
+            bars_since_new_high = record.get("bars_since_new_high", 0)
+            if type(bars_since_new_high) is not int or bars_since_new_high < 0:
+                return None
+            record["max_bars_since_new_high"] = bars_since_new_high
         return record
 
     @staticmethod
@@ -3526,6 +3583,8 @@ class LeaderProfitMixin(LeaderMixinContext):
             "shadow_lock_stop_price",
             "progress_high_price",
             "progress_tracking_from_ts",
+            "bars_since_weakening",
+            "max_bars_since_new_high",
             "no_progress_setup",
             "no_progress",
             "shadow_stop_price",
@@ -3569,10 +3628,17 @@ class LeaderProfitMixin(LeaderMixinContext):
             return False
         if float(record["progress_tracking_from_ts"]) < float(record["tracking_from_ts"]):
             return False
-        return self._valid_profit_optional_numbers(record) and all(
-            type(record.get(key)) is int and record[key] >= 0
-            for key in ("bars_seen", "bars_since_new_high")
-        )
+        counters = ("bars_seen", "bars_since_new_high", "max_bars_since_new_high")
+        if not all(type(record.get(key)) is int and record[key] >= 0 for key in counters):
+            return False
+        bars_since_weakening = record.get("bars_since_weakening")
+        if bars_since_weakening is not None and (
+            type(bars_since_weakening) is not int or bars_since_weakening < 0
+        ):
+            return False
+        if record["max_bars_since_new_high"] < record["bars_since_new_high"]:
+            return False
+        return self._valid_profit_optional_numbers(record)
 
     @staticmethod
     def _profit_r_of(record: dict[str, Any], price: float) -> float | None:
@@ -3593,15 +3659,29 @@ class LeaderProfitMixin(LeaderMixinContext):
         return (float(price) - entry_value) / r_value
 
     def _profit_lock_target(self, record: dict[str, Any], peak: float) -> float | None:
-        """Return the monotonic lock target once the persisted peak has armed it."""
+        """持久峰值武装后, 返回只升不降的锁盈目标。
+
+        回吐额度取两个上限中更紧的一个:
+        * 波动口径 ``trail_r * R``: 让大行情按波动缩放地跟随, 不截断右尾;
+        * 涨幅口径 ``giveback_frac * (峰值 - 入场)``: 让中等行情不必把浮盈全部吐回。
+
+        峰值超过 ``trail_r / giveback_frac`` 倍 R 之后只剩波动口径生效, 因此右尾
+        (策略赖以盈利的少数大赢家) 的行为与纯 R 跟踪完全一致。
+        """
         peak_r = self._profit_r_of(record, peak)
         if peak_r is None or peak_r < float(self.settings["profit_lock_arm_r"]):
             return None
         entry = float(record["entry_price"])
         target = entry * (1.0 + float(self.settings["profit_lock_fee_buffer"]))
+        allowance = math.inf
         trail_r = float(self.settings["profit_lock_trail_r"])
         if trail_r > 0:
-            target = max(target, peak - trail_r * float(record["r_price"]))
+            allowance = trail_r * float(record["r_price"])
+        giveback_frac = float(self.settings["profit_lock_giveback_frac"])
+        if giveback_frac > 0:
+            allowance = min(allowance, giveback_frac * max(peak - entry, 0.0))
+        if math.isfinite(allowance):
+            target = max(target, peak - allowance)
         return target
 
     # ------------------------------------------------------------------ 影子账本
@@ -3685,11 +3765,14 @@ class LeaderProfitMixin(LeaderMixinContext):
             return
         entry = float(record["entry_price"])
         atr = record.get("entry_atr")
-        # 动量条件描述的是"当前"状态而非历史每根 K 线的状态, 因此只在最新一根上判定;
-        # 止损是价格水平, 必须逐根回放才能还原真实的盘中触发顺序。
-        trend_state = self._profit_no_progress_trend(record["pair"])
+        # 止损是价格水平, 必须逐根回放才能还原真实的盘中触发顺序; 动量闸门同样需要
+        # 每根 K 线"当时"的状态, 否则一次重放多根(重建记录/停机追赶)时只有最后一根
+        # 参与判定, 交易就可能带着一个从未更新过的旧结论一路跌到灾难止损。
+        states = self._profit_trend_states(
+            frame, start_ts=float(pending["date"].iloc[0].timestamp())
+        )
         rows = list(pending.itertuples(index=False))
-        for index, row in enumerate(rows):
+        for row in rows:
             record["last_bar_ts"] = row.date.timestamp()
             record["bars_seen"] = int(record.get("bars_seen", 0)) + 1
             high, low, close = float(row.high), float(row.low), float(row.close)
@@ -3701,7 +3784,7 @@ class LeaderProfitMixin(LeaderMixinContext):
                 close,
                 entry,
                 atr,
-                trend_state if index == len(rows) - 1 else None,
+                None if states is None else states.get(row.date.timestamp()),
             )
         record["peak_profit_ratio"] = self._profit_ratio_at(trade, float(record["peak_price"]))
         record["last_profit_ratio"] = self._profit_ratio_at(
@@ -3753,8 +3836,15 @@ class LeaderProfitMixin(LeaderMixinContext):
             if high >= progress_high + meaningful_advance:
                 record["progress_high_price"] = high
                 record["bars_since_new_high"] = 0
+                # 创新高否定了"动量失效"的论点, 此前的走弱观测随之作废。
+                record["bars_since_weakening"] = None
             else:
                 record["bars_since_new_high"] = int(record.get("bars_since_new_high", 0)) + 1
+            record["max_bars_since_new_high"] = max(
+                int(record.get("max_bars_since_new_high", 0)),
+                int(record["bars_since_new_high"]),
+            )
+            self._track_weakening_recency(record, trend_state)
         target = self._profit_lock_target(record, peak)
         if not already_exited and target is not None:
             current = record.get("shadow_lock_stop_price")
@@ -3768,9 +3858,7 @@ class LeaderProfitMixin(LeaderMixinContext):
             )
         record["current_price"] = close
         record["last_profit_r"] = self._profit_r_of(record, close)
-        if trend_state is None:
-            return
-        record["no_progress_setup"] = self._profit_no_progress_setup(record, trend_state)
+        record["no_progress_setup"] = self._profit_no_progress_setup(record)
         record["no_progress"] = self._profit_no_progress_at_price(record, close)
         if record["no_progress"] and not already_exited:
             self._record_shadow_exit(record, trade, close, "no_progress")
@@ -3787,12 +3875,11 @@ class LeaderProfitMixin(LeaderMixinContext):
     def _profit_trend_frame(self, pair: str) -> DataFrame | None:
         """Read the closed holding-timeframe bars used by the shadow replay."""
         settings = self.settings
-        count = max(
-            int(settings["trend_ema_candles"]) + int(settings["trend_slope_candles"]),
-            int(settings["atr_period"]) + 2,
-        )
         return self._trend_candles(
-            pair, settings["holding_timeframe"], count, columns=("high", "low", "close")
+            pair,
+            settings["holding_timeframe"],
+            self._trend_history_count(),
+            columns=("high", "low", "close"),
         )
 
     def _profit_no_progress_trend(self, pair: str) -> str | None:
@@ -3802,13 +3889,62 @@ class LeaderProfitMixin(LeaderMixinContext):
             return None
         return str(context.get("state"))
 
-    def _profit_no_progress_setup(self, record: dict[str, Any], trend_state: str) -> bool:
-        """Require N complete post-entry bars since the most recent new high."""
-        if record.get("r_price") is None or trend_state != "weakening":
+    def _profit_trend_states(
+        self, frame: DataFrame | None, *, start_ts: float = -math.inf
+    ) -> dict[float, str] | None:
+        """为每根已收盘的持仓周期 K 线重算当时的趋势状态。
+
+        ``_trend_context`` 只描述最新一根; 重建记录或停机追赶时一次扫描会回放多根,
+        因此动量闸门必须使用每根 K 线当时的状态。分类规则与实时趋势判定共用同一
+        实现; 历史不足或 ATR 无效的早期 K 线不生成状态。
+        """
+        required = {"date", "high", "low", "close"}
+        if frame is None or frame.empty or not required.issubset(frame.columns):
+            return None
+        history_count = self._trend_history_count()
+        if len(frame) < history_count:
+            return None
+        trend = self._trend_state_frame(frame)
+        states: dict[float, str] = {}
+        for index in range(history_count - 1, len(frame)):
+            date = frame["date"].iloc[index]
+            timestamp = float(date.timestamp())
+            if timestamp < start_ts:
+                continue
+            atr = self._wilder_atr(frame.iloc[:index])
+            if math.isfinite(atr) and atr > 0:
+                states[timestamp] = str(trend["state"].iloc[index])
+        return states
+
+    @staticmethod
+    def _track_weakening_recency(record: dict[str, Any], trend_state: str | None) -> None:
+        """把“最近一次趋势走弱距今多久”的时钟推进一根。
+
+        ``None`` 表示最近一次有效新高后尚未观测到走弱。未知趋势仍会让已有观测
+        变旧, 避免一次陈旧读数永久打开闸门。
+        """
+        if trend_state == "weakening":
+            record["bars_since_weakening"] = 0
+            return
+        previous = record.get("bars_since_weakening")
+        if previous is not None:
+            record["bars_since_weakening"] = int(previous) + 1
+
+    def _profit_no_progress_setup(self, record: dict[str, Any]) -> bool:
+        """要求最近一次有效新高后经过 N 根完整 K 线。
+
+        旧趋势条件只看最新一根快照, 只要该根碰巧不弱, 交易就可能扛过整段下跌。
+        现在改为近期窗口: 在动量时钟使用的同一个 N 根窗口内曾走弱即可。
+        """
+        if record.get("r_price") is None:
             return False
-        return int(record.get("bars_since_new_high", 0)) >= int(
-            self.settings["profit_no_progress_candles"]
-        )
+        window = int(self.settings["profit_no_progress_candles"])
+        if int(record.get("bars_since_new_high", 0)) < window:
+            return False
+        since_weakening = record.get("bars_since_weakening")
+        if since_weakening is None:
+            return False
+        return int(since_weakening) <= window
 
     def _profit_no_progress_at_price(self, record: dict[str, Any], price: float) -> bool:
         if not record.get("no_progress_setup"):
