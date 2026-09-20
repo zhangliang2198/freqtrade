@@ -147,8 +147,16 @@
     "profit_lock_enabled": true,
     "profit_lock_arm_r": 1.0,
     "profit_lock_fee_buffer": 0.0025,
-    "profit_lock_trail_r": 1.5,
-    "profit_lock_giveback_frac": 0.5,
+    "profit_lock_regimes": {
+      "strong": {"giveback_frac": 0.5, "trail_r": 1.5, "atr_multiple": 2.25},
+      "normal": {"giveback_frac": 0.4, "trail_r": 1.0, "atr_multiple": 1.5},
+      "fading": {"giveback_frac": 0.25, "trail_r": 0.5, "atr_multiple": 0.75}
+    },
+    "profit_lock_strong_rank_ratio": 0.2,
+    "profit_lock_fading_rank_ratio": 0.5,
+    "profit_lock_strong_max_bars": 2,
+    "profit_lock_fading_min_bars": 6,
+    "profit_lock_state_confirm_bars": 2,
     "profit_lock_min_step_r": 0.1,
     "profit_no_progress_enabled": true,
     "profit_no_progress_candles": 8,

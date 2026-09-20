@@ -136,9 +136,244 @@ def _ratchet_record(strategy, trade, *, r_price=2.0, peak_price=ENTRY):
         progress_high_price=peak_price,
         current_price=peak_price,
         shadow_stop_price=ENTRY * 0.8,
+        leader_regime="strong",
+        leader_regime_reason="test fixture",
     )
     strategy._profit_shadow = {PAIR: record}
     return record
+
+
+def test_leader_regime_uses_rank_trends_and_stall_boundaries(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    record = _ratchet_record(strategy, _Trade(), r_price=2.0)
+
+    record["bars_since_new_high"] = 2
+    assert strategy._profit_regime_candidate(record, "up", "up", 0.20, False)[0] == "strong"
+    assert strategy._profit_regime_candidate(record, "up", "up", 0.21, False)[0] == "normal"
+    record["bars_since_new_high"] = 3
+    assert strategy._profit_regime_candidate(record, "consolidating", "up", 0.50, False)[0] == (
+        "normal"
+    )
+    assert strategy._profit_regime_candidate(record, "consolidating", "up", 0.51, False)[0] == (
+        "fading"
+    )
+    record["bars_since_new_high"] = 6
+    assert strategy._profit_regime_candidate(record, "up", "up", 0.20, False) == (
+        "fading",
+        "6根未有效新高",
+        True,
+    )
+    record["bars_since_new_high"] = 0
+    assert strategy._profit_regime_candidate(record, "weakening", "up", 0.20, False)[0] == (
+        "fading"
+    )
+
+
+def test_leader_regime_confirms_ordinary_changes_but_applies_risk_events_immediately(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    record = _ratchet_record(strategy, _Trade(), r_price=2.0)
+    record["leader_regime"] = "strong"
+
+    strategy._update_profit_regime(record, "up", "up", 0.30, False)
+    assert record["leader_regime"] == "strong"
+    assert record["leader_regime_candidate_bars"] == 1
+    strategy._update_profit_regime(record, "up", "up", 0.30, False)
+    assert record["leader_regime"] == "normal"
+
+    strategy._update_profit_regime(record, "weakening", "up", 0.30, False)
+    assert record["leader_regime"] == "fading"
+
+
+def test_missing_regime_inputs_keep_the_confirmed_state(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    record = _ratchet_record(strategy, _Trade(), r_price=2.0)
+    record["leader_regime"] = "strong"
+
+    strategy._update_profit_regime(record, None, "up", None, False)
+
+    assert record["leader_regime"] == "strong"
+    assert record["leader_regime_candidate"] is None
+
+
+def test_new_profit_record_starts_in_normal_until_strong_is_confirmed(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+
+    record = strategy._new_profit_record(_Trade(), 1.0)
+
+    assert record["leader_regime"] == "normal"
+
+
+def test_valid_market_down_downgrades_one_level_without_repeated_decay(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    record = _ratchet_record(strategy, _Trade(), r_price=2.0)
+    record["leader_regime"] = "strong"
+
+    strategy._update_profit_regime(record, "up", "up", 0.10, True)
+    assert record["leader_regime"] == "normal"
+
+
+def test_market_down_tightens_immediately_inside_the_current_holding_bucket(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    trade = _Trade()
+    record = _ratchet_record(strategy, trade, r_price=2.0)
+    record.update(
+        leader_regime="strong",
+        holding_trend_state="up",
+        background_trend_state="up",
+        leader_rank_ratio=0.1,
+        last_scan_bucket=math.floor(
+            (NOW.timestamp() - strategy.settings["score_candle_close_delay_seconds"])
+            / HOUR.total_seconds()
+        ),
+    )
+    strategy._market_down = True
+    strategy._market_data_healthy = True
+    strategy._market_valid_until = NOW.timestamp() + 60
+    strategy._profit_trend_frame = Mock()
+
+    strategy._advance_profit_record(record, trade, NOW.timestamp())
+
+    assert record["leader_regime"] == "normal"
+    strategy._profit_trend_frame.assert_not_called()
+
+    strategy._update_profit_regime(record, None, None, None, True)
+    assert record["leader_regime"] == "normal"
+    strategy._update_profit_regime(record, "up", "up", 0.10, True)
+    assert record["leader_regime"] == "normal"
+
+
+def test_profit_rank_ratio_uses_only_fresh_scores(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    pairs = [f"P{index}/USDT:USDT" for index in range(1, 7)]
+    strategy._scores = dict(zip(pairs, [60.0, 50.0, 40.0, 30.0, 20.0, 100.0], strict=True))
+    strategy._metrics = {
+        pair: {
+            "_exit_valid_until": NOW.timestamp() + 60,
+            "_score_valid_until": NOW.timestamp() + 60,
+        }
+        for pair in pairs[:-1]
+    }
+
+    assert strategy._profit_rank_ratio(pairs[0], NOW.timestamp()) == pytest.approx(0.2)
+    assert strategy._profit_rank_ratio(pairs[2], NOW.timestamp()) == pytest.approx(0.6)
+    assert strategy._profit_rank_ratio(pairs[-1], NOW.timestamp()) is None
+
+
+def test_profit_rank_ratio_is_unknown_when_the_fresh_pool_is_too_small(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    pairs = [f"P{index}/USDT:USDT" for index in range(1, 5)]
+    strategy._scores = dict(zip(pairs, [40.0, 30.0, 20.0, 10.0], strict=True))
+    strategy._metrics = {
+        pair: {
+            "_exit_valid_until": NOW.timestamp() + 60,
+            "_score_valid_until": NOW.timestamp() + 60,
+        }
+        for pair in pairs
+    }
+
+    assert strategy._profit_rank_ratio(pairs[0], NOW.timestamp()) is None
+
+
+@pytest.mark.parametrize(
+    ("regime", "expected_target"),
+    [
+        ("strong", 107.0),
+        ("normal", 108.0),
+        ("fading", 109.0),
+    ],
+)
+def test_profit_lock_uses_the_confirmed_regime_profile(tmp_path, regime, expected_target):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    record = _ratchet_record(strategy, _Trade(), r_price=2.0, peak_price=110.0)
+    record["leader_regime"] = regime
+    record["current_atr"] = record["entry_atr"]
+
+    assert strategy._profit_lock_target(record, 110.0) == pytest.approx(expected_target)
+
+
+def test_profit_lock_current_atr_can_tighten_but_invalid_atr_falls_back(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    record = _ratchet_record(strategy, _Trade(), r_price=2.0, peak_price=110.0)
+    record["leader_regime"] = "strong"
+    record["current_atr"] = 0.2
+    assert strategy._profit_lock_target(record, 110.0) == pytest.approx(109.55)
+
+    record["current_atr"] = math.nan
+    assert strategy._profit_lock_target(record, 110.0) == pytest.approx(107.0)
+
+
+def test_closed_bar_replay_uses_each_bars_prior_atr_without_lookahead(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    trade = _Trade(open_hours_ago=30)
+    record = _ratchet_record(strategy, trade, r_price=2.0)
+    dates = pd.date_range(end=NOW - HOUR, periods=25, freq="1h")
+    frame = pd.DataFrame({"date": dates, "high": 101.0, "low": 99.0, "close": 100.0})
+    record["tracking_from_ts"] = 0.0
+    record["progress_tracking_from_ts"] = 0.0
+    record["last_bar_ts"] = float(dates[-3].timestamp())
+    strategy._profit_trend_frame = Mock(return_value=frame)
+    strategy._profit_trend_states = Mock(
+        return_value={float(value.timestamp()): "up" for value in dates}
+    )
+    strategy._trend_context = Mock(return_value={"available": True, "state": "up"})
+    strategy._profit_rank_ratio = Mock(return_value=0.1)
+    strategy._wilder_atr = Mock(side_effect=lambda history: len(history) / 10)
+
+    strategy._advance_profit_record(record, trade, NOW.timestamp())
+
+    assert record["current_atr"] == pytest.approx((len(frame) - 1) / 10)
+    assert max(len(call.args[0]) for call in strategy._wilder_atr.call_args_list) == len(frame) - 1
+
+
+def test_historical_replay_does_not_replace_the_live_confirmed_regime(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    trade = _Trade(open_hours_ago=30)
+    record = _ratchet_record(strategy, trade, r_price=2.0)
+    record["leader_regime"] = "strong"
+    dates = pd.date_range(end=NOW - HOUR, periods=25, freq="1h")
+    frame = pd.DataFrame({"date": dates, "high": 101.0, "low": 99.0, "close": 100.0})
+    record["tracking_from_ts"] = 0.0
+    record["progress_tracking_from_ts"] = 0.0
+    record["last_bar_ts"] = float(dates[-3].timestamp())
+    states = {float(value.timestamp()): "up" for value in dates}
+    states[float(dates[-2].timestamp())] = "weakening"
+    strategy._profit_trend_frame = Mock(return_value=frame)
+    strategy._profit_trend_states = Mock(return_value=states)
+    strategy._trend_context = Mock(return_value={"available": True, "state": "up"})
+    strategy._profit_rank_ratio = Mock(return_value=0.1)
+
+    strategy._advance_profit_record(record, trade, NOW.timestamp())
+
+    assert record["leader_regime"] == "strong"
+    assert record["leader_regime_candidate"] is None
+
+
+def test_historical_replay_breaks_an_unverifiable_confirmation_chain(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    trade = _Trade(open_hours_ago=30)
+    record = _ratchet_record(strategy, trade, r_price=2.0)
+    record.update(
+        leader_regime="normal",
+        leader_regime_candidate="strong",
+        leader_regime_candidate_bars=1,
+    )
+    dates = pd.date_range(end=NOW - HOUR, periods=25, freq="1h")
+    frame = pd.DataFrame({"date": dates, "high": 101.0, "low": 99.0, "close": 100.0})
+    record["tracking_from_ts"] = 0.0
+    record["progress_tracking_from_ts"] = 0.0
+    record["last_bar_ts"] = float(dates[-3].timestamp())
+    strategy._profit_trend_frame = Mock(return_value=frame)
+    strategy._profit_trend_states = Mock(
+        return_value={float(value.timestamp()): "up" for value in dates}
+    )
+    strategy._trend_context = Mock(return_value={"available": True, "state": "up"})
+    strategy._profit_rank_ratio = Mock(return_value=0.1)
+
+    strategy._advance_profit_record(record, trade, NOW.timestamp())
+
+    assert record["leader_regime"] == "normal"
+    assert record["leader_regime_candidate"] == "strong"
+    assert record["leader_regime_candidate_bars"] == 1
 
 
 # ------------------------------------------------------------------ R 单位
@@ -299,12 +534,13 @@ def test_giveback_cap_bounds_mid_size_winners_and_spares_the_tail(tmp_path):
     r_price = record["r_price"]
 
     def target_at(peak_r, giveback_frac):
-        previous = strategy.settings["profit_lock_giveback_frac"]
-        strategy.settings["profit_lock_giveback_frac"] = giveback_frac
+        profile = strategy.settings["profit_lock_regimes"]["strong"]
+        previous = profile["giveback_frac"]
+        profile["giveback_frac"] = giveback_frac
         try:
             return strategy._profit_lock_target(record, ENTRY + peak_r * r_price)
         finally:
-            strategy.settings["profit_lock_giveback_frac"] = previous
+            profile["giveback_frac"] = previous
 
     # 中等赢家: 比例上限把锁定位抬到保本地板之上。
     assert target_at(1.2, 0.5) == pytest.approx(ENTRY + 0.6 * r_price)
@@ -472,6 +708,8 @@ def test_corrupt_current_version_record_is_rebuilt_instead_of_raising(tmp_path):
         ("bars_since_weakening", "1"),
         ("max_bars_since_new_high", -1),
         ("max_bars_since_new_high", "9"),
+        ("leader_rank_ratio", 0.0),
+        ("leader_rank_ratio", 1.01),
     ],
 )
 def test_semantically_invalid_profit_record_is_rejected(tmp_path, key, value):
@@ -509,6 +747,26 @@ def test_version_two_record_migrates_without_reusing_the_old_progress_clock(tmp_
     assert record["bars_since_new_high"] == 0
     assert record["no_progress_setup"] is False
     assert record["no_progress"] is False
+
+
+def test_version_four_record_discards_an_untrusted_regime_but_keeps_latched_stops(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    record = strategy._new_profit_record(_Trade(), 1.0)
+    record.update(
+        version=4,
+        leader_regime="fading",
+        leader_regime_candidate="strong",
+        leader_regime_candidate_bars=1,
+        execution_lock_stop_price=102.0,
+        shadow_lock_stop_price=101.5,
+    )
+
+    assert strategy._valid_profit_record(PAIR, record) is True
+    assert record["version"] == strategy._PROFIT_RECORD_VERSION
+    assert record["leader_regime"] == "normal"
+    assert record["leader_regime_candidate"] is None
+    assert record["execution_lock_stop_price"] == pytest.approx(102.0)
+    assert record["shadow_lock_stop_price"] == pytest.approx(101.5)
 
 
 def test_reopened_pair_keeps_the_closed_trade_pending_until_profit_is_verified(tmp_path):
@@ -645,6 +903,19 @@ def test_custom_stoploss_uses_the_r_based_peak_trail(tmp_path):
     assert record["peak_profit_r"] == pytest.approx(5.0)
 
 
+def test_regime_recovery_never_lowers_an_already_latched_stop(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path, profit_lock_enabled=True)
+    trade = _Trade(max_rate=ENTRY + 10.0)
+    record = _ratchet_record(strategy, trade, r_price=2.0)
+    record["leader_regime"] = "fading"
+    assert strategy.custom_stoploss(PAIR, trade, NOW, ENTRY + 10.0, 0.0, False) is not None
+    assert record["execution_lock_stop_price"] == pytest.approx(ENTRY + 9.0)
+
+    record["leader_regime"] = "strong"
+    assert strategy.custom_stoploss(PAIR, trade, NOW, ENTRY + 10.0, 0.0, False) is not None
+    assert record["execution_lock_stop_price"] == pytest.approx(ENTRY + 9.0)
+
+
 def test_custom_stoploss_skips_updates_below_the_minimum_step(tmp_path):
     strategy = _strategy(_frame([FLAT] * 40), tmp_path, profit_lock_enabled=True)
     # 目标102, 当前止损101.9, 小于0.1R(=0.2)的改单步长 -> 不改单。
@@ -665,6 +936,28 @@ def test_custom_stoploss_ignores_a_target_above_the_current_rate(tmp_path):
     assert strategy.custom_stoploss(PAIR, trade, NOW, ENTRY + 3.0, 0.0, False) is not None
 
 
+def test_confirmed_fading_leader_exits_when_already_below_its_tightened_target(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path, profit_lock_enabled=True)
+    trade = _Trade(max_rate=ENTRY + 4.0)
+    record = _ratchet_record(strategy, trade, r_price=2.0, peak_price=ENTRY + 4.0)
+    record["leader_regime"] = "fading"
+    strategy._market_exit_required = Mock(return_value=False)
+    strategy._rotation_exit_allowed = Mock(return_value=False)
+    strategy._trend_reversed = Mock(return_value=False)
+    strategy._profit_no_progress_exit = Mock(return_value=False)
+
+    assert strategy.custom_exit(PAIR, trade, NOW, ENTRY + 2.5, 0.0) == "fading_profit_lock"
+
+
+def test_strong_leader_waits_for_price_recovery_when_target_is_above_market(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path, profit_lock_enabled=True)
+    trade = _Trade(max_rate=ENTRY + 4.0)
+    record = _ratchet_record(strategy, trade, r_price=2.0, peak_price=ENTRY + 4.0)
+    record["leader_regime"] = "strong"
+
+    assert strategy._fading_profit_lock_exit(PAIR, trade, ENTRY) is False
+
+
 def test_custom_stoploss_ignores_untracked_pairs(tmp_path):
     strategy, _ = _armed_strategy(tmp_path, profit_lock_enabled=True)
     other = _Trade(pair="ETH/USDT:USDT")
@@ -680,7 +973,8 @@ def test_custom_stoploss_swallows_errors_and_counts_them(tmp_path):
 
 def test_profit_position_table_shows_each_live_protection_state(tmp_path):
     strategy = _strategy(_frame([FLAT] * 40), tmp_path)
-    trade = _Trade(max_rate=110.0)
+    trade = _Trade(max_rate=110.0, stop_loss=107.0)
+    trade.calc_profit_ratio = Mock(return_value=0.99)
     record = _ratchet_record(strategy, trade, r_price=2.0, peak_price=110.0)
     record["execution_lock_stop_price"] = 107.0
     record["bars_since_new_high"] = 3
@@ -697,10 +991,72 @@ def test_profit_position_table_shows_each_live_protection_state(tmp_path):
     assert log_table.call_args.args[0] == "🛡️ 盈利保护状态"
     row = log_table.call_args.args[2][0]
     assert row[0] == PAIR
-    assert row[4] == "已武装"
-    assert row[5] == "107"
+    assert row[1] == "2/2.00%价/10.0%保证金"
+    assert row[3] == "+4.00R/+40.0%"
+    assert row[4] == "框架已采用"
+    assert row[5] == "107 (+7.00%价/+35.0%保证金)"
     assert row[7] == "3/8"
-    assert row[8] == "weakening"
+    assert row[8] == "强/—/weakening"
+    assert log_table.call_args.args[1][4:6] == ["执行状态", "止损(框架→目标)"]
+
+
+def test_profit_position_table_exposes_a_new_target_before_the_stoploss_callback(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    trade = _Trade(stop_loss=114.93, max_rate=133.84)
+    record = _ratchet_record(strategy, trade, r_price=12.0, peak_price=130.78)
+    record["execution_lock_stop_price"] = 115.39
+    strategy._position_details = {PAIR: {"markPrice": "126.16"}}
+    strategy._profit_no_progress_trend = Mock(return_value="up")
+
+    _, row, _ = strategy._profit_position_row(NOW.timestamp(), PAIR, trade, record)
+
+    assert row[2] == "+2.82R"
+    assert row[4] == "待框架更新"
+    assert row[5] == "114.93→116.92 (+16.92%价/+84.6%保证金)"
+
+
+def test_profit_position_table_explains_when_a_target_is_below_the_minimum_step(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    trade = _Trade(stop_loss=114.93, max_rate=130.78)
+    record = _ratchet_record(strategy, trade, r_price=12.0, peak_price=130.78)
+    record["execution_lock_stop_price"] = 115.39
+    strategy._position_details = {PAIR: {"markPrice": "126.16"}}
+    strategy._profit_no_progress_trend = Mock(return_value="up")
+
+    _, row, _ = strategy._profit_position_row(NOW.timestamp(), PAIR, trade, record)
+
+    assert row[4] == "等待0.1R"
+    assert row[5] == "114.93→115.39 (+15.39%价/+76.9%保证金)"
+
+
+def test_profit_position_table_marks_fallback_prices_as_stale(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    strategy._position_data_healthy = False
+    trade = _Trade(stop_loss=107.0, max_rate=110.0)
+    record = _ratchet_record(strategy, trade, r_price=2.0, peak_price=110.0)
+    record["execution_lock_stop_price"] = 107.0
+    record["current_price"] = 108.0
+    strategy._position_details = {}
+    strategy._profit_no_progress_trend = Mock(return_value="up")
+
+    _, row, _ = strategy._profit_position_row(NOW.timestamp(), PAIR, trade, record)
+
+    assert row[3] == "+4.00R/+40.0%(旧)"
+    assert row[6] == "+0.93%(旧)"
+
+
+def test_profit_position_table_shows_the_current_stop_when_ratchet_is_disabled(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path, profit_lock_enabled=False)
+    trade = _Trade(stop_loss=98.0, max_rate=110.0)
+    record = _ratchet_record(strategy, trade, r_price=2.0, peak_price=110.0)
+    record["execution_lock_stop_price"] = 107.0
+    strategy._position_details = {PAIR: {"markPrice": "108"}}
+    strategy._profit_no_progress_trend = Mock(return_value="up")
+
+    _, row, _ = strategy._profit_position_row(NOW.timestamp(), PAIR, trade, record)
+
+    assert row[4] == "已关闭"
+    assert row[5] == "98 (-2.00%价/-10.0%保证金)"
 
 
 def test_profit_no_progress_trend_reads_the_latest_closed_bar(tmp_path):
@@ -737,7 +1093,7 @@ def test_profit_position_table_uses_the_real_trend_helper(tmp_path):
     row = log_table.call_args.args[2][0]
     assert row[0] == PAIR
     assert row[7] == "3/8"
-    assert row[8] in {"up", "weakening", "consolidating"}
+    assert row[8] in {"强/—/up", "强/—/weakening", "强/—/consolidating"}
 
 
 # ------------------------------------------------------------------ 动量止损
@@ -1020,9 +1376,6 @@ def test_no_progress_exit_ignores_pairs_without_a_shadow_record(tmp_path):
         ("profit_lock_arm_r", 0.0),
         ("profit_lock_fee_buffer", -0.001),
         ("profit_lock_fee_buffer", 0.2),
-        ("profit_lock_trail_r", -1.0),
-        ("profit_lock_giveback_frac", -0.1),
-        ("profit_lock_giveback_frac", 1.0),
         ("profit_lock_min_step_r", -1.0),
         ("profit_no_progress_new_high_r", 0.0),
         ("profit_no_progress_new_high_r", -1.0),
@@ -1049,6 +1402,14 @@ def test_profit_protection_requires_the_shadow_ledger(tmp_path):
         MODULE.validate_runtime_settings(strategy)
 
 
+def test_invalid_profit_lock_regime_profile_is_rejected(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    strategy.settings["profit_lock_regimes"]["normal"]["giveback_frac"] = 1.0
+
+    with pytest.raises(ValueError, match="giveback_frac"):
+        MODULE.validate_runtime_settings(strategy)
+
+
 def test_production_config_enables_profit_protection(tmp_path):
     """生产配置开启影子账本及两道盈利保护执行闸门。"""
     settings = configured_settings()
@@ -1058,8 +1419,11 @@ def test_production_config_enables_profit_protection(tmp_path):
     assert settings["profit_shadow_enabled"] is True
     assert settings["profit_lock_enabled"] is True
     assert settings["profit_no_progress_enabled"] is True
-    assert settings["profit_lock_trail_r"] == pytest.approx(1.5)
-    assert settings["profit_lock_giveback_frac"] == pytest.approx(0.5)
+    assert settings["profit_lock_regimes"] == {
+        "strong": {"giveback_frac": 0.5, "trail_r": 1.5, "atr_multiple": 2.25},
+        "normal": {"giveback_frac": 0.4, "trail_r": 1.0, "atr_multiple": 1.5},
+        "fading": {"giveback_frac": 0.25, "trail_r": 0.5, "atr_multiple": 0.75},
+    }
     assert settings["profit_lock_min_step_r"] == pytest.approx(0.1)
     assert settings["profit_no_progress_candles"] == 8
     assert settings["profit_no_progress_new_high_r"] == pytest.approx(0.25)

@@ -49,6 +49,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from websockets.sync.client import connect
 
 from freqtrade.exchange import Exchange, timeframe_to_seconds
+from freqtrade.exchange_accounting import ExchangeAccounting
 from freqtrade.persistence import ExchangeLedger, Trade
 from freqtrade.strategy import stoploss_from_absolute
 from freqtrade.wallets import Wallets
@@ -162,6 +163,137 @@ def _log_table(
     )
 
 
+def _finite_float(value: Any) -> float | None:
+    """Return a finite float, otherwise None."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _positive_float(value: Any) -> float | None:
+    """Return a finite positive float, otherwise None."""
+    parsed = _finite_float(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _trade_accounting_signature(trade: Any) -> list[Any]:
+    """Return the canonical exchange-accounting signature.
+
+    :param trade: Trade-like object whose order state should be signed.
+    :return: Signature stored in the exchange-ledger checkpoint.
+    """
+    return ExchangeAccounting._signature(trade)
+
+
+def _funding_fee_label(trade: Any, checkpoint: dict[str, Any] | None) -> str:
+    """Format cumulative funding without applying leverage again.
+
+    :param trade: Trade-like object providing estimated funding and stake.
+    :param checkpoint: Latest persisted exchange-accounting checkpoint, if available.
+    :return: Funding cash and stake percentage with an actual/estimated marker.
+    """
+    reconciled = (
+        checkpoint is not None
+        and checkpoint.get("status") in {"open_reconciled", "verified"}
+        and checkpoint.get("signature") == _trade_accounting_signature(trade)
+    )
+    value = (
+        _finite_float(checkpoint.get("actual_funding"))
+        if reconciled and checkpoint is not None
+        else None
+    )
+    source = "实"
+    if value is None:
+        value = _finite_float(getattr(trade, "funding_fees", None))
+        source = "估"
+    if value is None:
+        return "未知"
+    principal = _positive_float(getattr(trade, "stake_amount", None))
+    ratio = f"/{100 * value / principal:+.2f}%" if principal is not None else ""
+    return f"{source}{value:+.4f}{ratio}"
+
+
+def _price_level_label(level: Any, entry_price: Any, leverage: Any, side: Any) -> str:
+    """Format a price level with price and leveraged margin returns.
+
+    :param level: Stop or target price.
+    :param entry_price: Position entry price.
+    :param leverage: Position leverage multiplier.
+    :param side: Position side, ``long`` or ``short``.
+    :return: Human-readable price and return context, or ``未知``.
+    """
+    price = _positive_float(level)
+    entry = _positive_float(entry_price)
+    multiplier = _positive_float(leverage)
+    if side not in {"long", "short"} or price is None or entry is None or multiplier is None:
+        return "未知"
+    price_return = price / entry - 1
+    if side == "short":
+        price_return = -price_return
+    margin_return = price_return * multiplier
+    return f"{price:.8g} ({100 * price_return:+.2f}%价/{100 * margin_return:+.1f}%保证金)"
+
+
+def _profit_stop_status(
+    *,
+    enabled: bool,
+    current_price: float,
+    current_stop: float | None,
+    target: float | None,
+    r_price: float | None,
+    min_step_r: float,
+) -> str:
+    """Describe whether the framework can adopt a profit-lock target.
+
+    :param enabled: Whether executable profit locking is enabled.
+    :param current_price: Latest usable position price.
+    :param current_stop: Stop currently stored by the framework.
+    :param target: Latest calculated profit-lock target.
+    :param r_price: Frozen price distance represented by one R.
+    :param min_step_r: Minimum stop amendment expressed in R.
+    :return: Compact status text for the position table.
+    """
+    if not enabled:
+        return "已关闭"
+    if target is None:
+        return "R待补" if r_price is None else "未武装"
+    if current_stop is None:
+        return "待框架更新"
+    if target <= current_stop:
+        return "框架已采用"
+    if current_price <= target:
+        return "等待价格恢复"
+    if r_price is not None and min_step_r > 0 and target < current_stop + min_step_r * r_price:
+        return f"等待{min_step_r:g}R"
+    return "待框架更新"
+
+
+def _stop_target_label(
+    current_stop: float | None,
+    target: float | None,
+    entry: float,
+    leverage: float | None,
+    side: str,
+) -> str:
+    """Format the current stop and any tighter pending target.
+
+    :param current_stop: Stop currently stored by the framework.
+    :param target: Latest calculated profit-lock target.
+    :param entry: Position entry price.
+    :param leverage: Position leverage multiplier.
+    :param side: Position side, ``long`` or ``short``.
+    :return: Stop text that does not claim live exchange confirmation.
+    """
+    target_label = _price_level_label(target, entry, leverage, side) if target is not None else "—"
+    if target is not None and current_stop is not None and target > current_stop:
+        return f"{current_stop:.8g}→{target_label}"
+    if current_stop is not None:
+        return _price_level_label(current_stop, entry, leverage, side)
+    return target_label
+
+
 class LeaderMixinContext:
     """Shared attributes supplied by the composed strategy at runtime.
 
@@ -201,6 +333,7 @@ class LeaderMixinContext:
     _market_data_healthy: Any
     _market_down: Any
     _market_exit_required: Any
+    _metrics_current: Any
     _multi_timeframe_snapshot: Any
     _next_score_refresh: Any
     _opening_score_label: Any
@@ -978,8 +1111,12 @@ REQUIRED_SETTINGS = frozenset(
         "profit_lock_enabled",
         "profit_lock_arm_r",
         "profit_lock_fee_buffer",
-        "profit_lock_trail_r",
-        "profit_lock_giveback_frac",
+        "profit_lock_regimes",
+        "profit_lock_strong_rank_ratio",
+        "profit_lock_fading_rank_ratio",
+        "profit_lock_strong_max_bars",
+        "profit_lock_fading_min_bars",
+        "profit_lock_state_confirm_bars",
         "profit_lock_min_step_r",
         "profit_no_progress_enabled",
         "profit_no_progress_candles",
@@ -1138,6 +1275,9 @@ def validate_runtime_settings(strategy) -> None:
         "reversal_emergency_memory_candles",
         "exit_evaluation_failure_limit",
         "profit_no_progress_candles",
+        "profit_lock_strong_max_bars",
+        "profit_lock_fading_min_bars",
+        "profit_lock_state_confirm_bars",
     )
     for key in integer_keys:
         if type(settings[key]) is not int or settings[key] <= 0:
@@ -1219,6 +1359,54 @@ def _validate_execution_safety_settings(settings: dict) -> None:
         raise ValueError("invalid taker window or rotation recovery limits")
 
 
+def _validate_profit_lock_regimes(settings: dict) -> None:
+    """Validate the three leader-state trailing profiles."""
+    regimes = settings["profit_lock_regimes"]
+    if not isinstance(regimes, dict) or set(regimes) != {"strong", "normal", "fading"}:
+        raise ValueError("leader_squeeze.profit_lock_regimes must define strong, normal and fading")
+    for name, profile in regimes.items():
+        if not isinstance(profile, dict) or set(profile) != {
+            "giveback_frac",
+            "trail_r",
+            "atr_multiple",
+        }:
+            raise ValueError(f"leader_squeeze.profit_lock_regimes.{name} has invalid keys")
+        for key in ("giveback_frac", "trail_r", "atr_multiple"):
+            value = profile[key]
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(
+                    f"leader_squeeze.profit_lock_regimes.{name}.{key} must be positive and finite"
+                )
+        if profile["giveback_frac"] >= 1:
+            raise ValueError(
+                f"leader_squeeze.profit_lock_regimes.{name}.giveback_frac must stay below 1"
+            )
+    if not (
+        regimes["strong"]["giveback_frac"]
+        >= regimes["normal"]["giveback_frac"]
+        >= regimes["fading"]["giveback_frac"]
+        and regimes["strong"]["trail_r"]
+        >= regimes["normal"]["trail_r"]
+        >= regimes["fading"]["trail_r"]
+        and regimes["strong"]["atr_multiple"]
+        >= regimes["normal"]["atr_multiple"]
+        >= regimes["fading"]["atr_multiple"]
+    ):
+        raise ValueError("profit lock regimes must tighten from strong to normal to fading")
+    strong_rank = settings["profit_lock_strong_rank_ratio"]
+    fading_rank = settings["profit_lock_fading_rank_ratio"]
+    if not (
+        type(strong_rank) in (int, float)
+        and type(fading_rank) in (int, float)
+        and math.isfinite(strong_rank)
+        and math.isfinite(fading_rank)
+        and 0 < strong_rank < fading_rank <= 1
+    ):
+        raise ValueError("profit lock rank ratios must satisfy 0 < strong < fading <= 1")
+    if settings["profit_lock_strong_max_bars"] >= settings["profit_lock_fading_min_bars"]:
+        raise ValueError("profit lock stall thresholds must satisfy strong < fading")
+
+
 def _validate_profit_protection_settings(settings: dict) -> None:
     """盈利保护参数: R 区间、棘轮步长与影子账本开关的一致性。"""
     for key in (
@@ -1231,15 +1419,12 @@ def _validate_profit_protection_settings(settings: dict) -> None:
             raise ValueError(f"leader_squeeze.{key} must be positive and finite")
     for key in (
         "profit_lock_fee_buffer",
-        "profit_lock_trail_r",
-        "profit_lock_giveback_frac",
         "profit_lock_min_step_r",
     ):
         value = settings[key]
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
             raise ValueError(f"leader_squeeze.{key} must be non-negative and finite")
-    if settings["profit_lock_giveback_frac"] >= 1.0:
-        raise ValueError("leader_squeeze.profit_lock_giveback_frac must stay below 1.0")
+    _validate_profit_lock_regimes(settings)
     if settings["profit_lock_fee_buffer"] >= 0.1:
         raise ValueError("leader_squeeze.profit_lock_fee_buffer must stay below 0.1")
     min_pct, max_pct = settings["profit_r_min_pct"], settings["profit_r_max_pct"]
@@ -2394,6 +2579,31 @@ class LeaderReportingMixin(LeaderMixinContext):
             return "未知"
         return f"{principal:.2f}" if math.isfinite(principal) and principal > 0 else "未知"
 
+    def _funding_checkpoints(self, trades: dict[str, Trade]) -> dict[int, dict[str, Any]]:
+        """Load the latest already-persisted funding checkpoints without exchange requests."""
+        if not self.config.get("exchange_accounting", {}).get("enabled") or self.config.get(
+            "dry_run", True
+        ):
+            return {}
+        trade_ids = [
+            trade_id
+            for trade in trades.values()
+            if (trade_id := getattr(trade, "id", None)) is not None
+        ]
+        if not trade_ids:
+            return {}
+        try:
+            rows = Trade.session.scalars(
+                select(ExchangeLedger).where(
+                    ExchangeLedger.trade_id.in_(trade_ids),
+                    ExchangeLedger.record_type == "checkpoint",
+                )
+            ).all()
+            return {row.trade_id: dict(row.data) for row in rows}
+        except Exception:
+            logger.exception("🚨 资金费检查点读取失败, 本轮改用框架估算", extra=LOG_ERROR)
+            return {}
+
     @staticmethod
     def _holding_duration_label(opened: object, now: float) -> str:
         if not isinstance(opened, datetime):
@@ -2525,6 +2735,7 @@ class LeaderReportingMixin(LeaderMixinContext):
             )
         positions = self._wallets.get_all_positions()
         db_trades = {trade.pair: trade for trade in Trade.get_open_trades()}
+        funding_checkpoints = self._funding_checkpoints(db_trades)
         db_pairs = set(db_trades)
         logger.info(
             "📦 仓位状态 | 已占用=%s 常规上限=%s 轮换临时上限=%s | 数据库持仓数=%s | "
@@ -2577,6 +2788,15 @@ class LeaderReportingMixin(LeaderMixinContext):
                 else self._external_sync_label(pair)
             )
             heat_return, heat_discount = heat_cells(pair)
+            trade_id = getattr(trade, "id", None) if trade else None
+            funding_label = (
+                _funding_fee_label(
+                    trade,
+                    funding_checkpoints.get(trade_id) if isinstance(trade_id, int) else None,
+                )
+                if trade
+                else "待导入"
+            )
             if position is None:
                 holding_rows.append(
                     [
@@ -2596,6 +2816,7 @@ class LeaderReportingMixin(LeaderMixinContext):
                         "—",
                         "—",
                         "—",
+                        funding_label,
                         "—",
                         entry_score,
                         heat_discount,
@@ -2636,7 +2857,15 @@ class LeaderReportingMixin(LeaderMixinContext):
                         stale=snapshot_stale,
                     ),
                     f"{position.unrealized_pnl:+.2f}",
-                    str(trade.stoploss_or_liquidation) if trade else "等待框架导入",
+                    funding_label,
+                    _price_level_label(
+                        trade.stoploss_or_liquidation,
+                        entry_price,
+                        leverage,
+                        position.side,
+                    )
+                    if trade
+                    else "等待框架导入",
                     entry_score,
                     heat_discount,
                     heat_return,
@@ -2660,13 +2889,14 @@ class LeaderReportingMixin(LeaderMixinContext):
                 "开仓价",
                 "当前价(标记)",
                 f"本金({self.config['stake_currency']})",
-                "当前涨幅(含杠杆)",
-                f"未实现盈亏({self.config['stake_currency']})",
-                "策略止损价",
+                "涨幅",
+                f"盈亏({self.config['stake_currency']})",
+                "资金费",
+                "框架保护价",
                 "开仓分数",
                 "热度折扣",
                 "15日涨幅",
-                "交易所止损记录",
+                "止损单",
                 "框架对账",
                 f"{self.settings['holding_timeframe']}趋势",
                 f"{self.settings['background_timeframe']}背景",
@@ -2679,7 +2909,11 @@ class LeaderReportingMixin(LeaderMixinContext):
             "按未实现盈亏从高到低排序, 缺失盈亏的仓位排在最后; "
             "当前价使用最近同步标记价, (旧)表示同步失效; 当前涨幅按开仓价至标记价的"
             "方向收益乘杠杆计算, "
-            "未扣手续费和资金费; 热度折扣仅供新买入参考; "
+            "未扣手续费和资金费; 资金费显示累计USDT/本金占比, 正数为收到、负数为支付, "
+            "实=交易所账单对账, 估=框架估算; 框架保护价取策略止损与强平保护中更早触发者, "
+            "括号内依次为相对开仓价格幅度/价格幅度乘杠杆, 不含费用、资金费与滑点; "
+            "止损单仅表示数据库最近缓存状态, 不是交易所实时确认; "
+            "热度折扣仅供新买入参考; "
             "开仓分数取下单复核记录, (标签)为历史信号分, 旧版可能未扣热度",
         )
         self._log_profit_position_table(now, db_trades)
@@ -3625,7 +3859,7 @@ class LeaderProfitMixin(LeaderMixinContext):
     # Closed-candle replay is throttled to once per holding-timeframe bucket.
     # ------------------------------------------------------------------ 入场上下文
 
-    _PROFIT_RECORD_VERSION = 3
+    _PROFIT_RECORD_VERSION = 5
 
     def _capture_profit_entry_context(self, trade: Trade) -> None:
         """首次入场成交时冻结该笔的 ATR1h, 作为 R 单位与棘轮步长基准。"""
@@ -3742,6 +3976,14 @@ class LeaderProfitMixin(LeaderMixinContext):
             "bars_since_new_high": 0,
             "max_bars_since_new_high": 0,
             "bars_since_weakening": None,
+            "leader_regime": "normal",
+            "leader_regime_candidate": None,
+            "leader_regime_candidate_bars": 0,
+            "leader_regime_reason": "入场后等待龙头确认",
+            "leader_rank_ratio": None,
+            "holding_trend_state": None,
+            "background_trend_state": None,
+            "current_atr": atr,
             "execution_lock_armed_at": None,
             "execution_lock_stop_price": None,
             "shadow_lock_armed_at": None,
@@ -3769,7 +4011,7 @@ class LeaderProfitMixin(LeaderMixinContext):
             entry, peak = record.get("entry_price"), record.get("peak_price")
             if type(entry) not in (int, float) or type(peak) not in (int, float):
                 return None
-            record["version"] = self._PROFIT_RECORD_VERSION
+            record["version"] = 3
             record["progress_high_price"] = max(
                 float(cast(int | float, entry)), float(cast(int | float, peak))
             )
@@ -3780,6 +4022,28 @@ class LeaderProfitMixin(LeaderMixinContext):
             record["bars_since_new_high"] = 0
             record["no_progress_setup"] = False
             record["no_progress"] = False
+        if record.get("version") == 3:
+            record["version"] = 4
+            record["context_source"] = "reconstructed"
+            record["leader_regime"] = "normal"
+            record["leader_regime_candidate"] = None
+            record["leader_regime_candidate_bars"] = 0
+            record["leader_regime_reason"] = "策略升级待确认"
+            record["leader_rank_ratio"] = None
+            record["holding_trend_state"] = None
+            record["background_trend_state"] = None
+            record["current_atr"] = record.get("entry_atr")
+        if record.get("version") == 4:
+            # Version 4 let historical catch-up bars mutate the live regime.  Keep
+            # every latched price, but require current closed-bar evidence again.
+            record["version"] = self._PROFIT_RECORD_VERSION
+            record["leader_regime"] = "normal"
+            record["leader_regime_candidate"] = None
+            record["leader_regime_candidate_bars"] = 0
+            record["leader_regime_reason"] = "状态机修复后待确认"
+            record["leader_rank_ratio"] = None
+            record["holding_trend_state"] = None
+            record["background_trend_state"] = None
         if (
             record.get("version") == self._PROFIT_RECORD_VERSION
             and "progress_tracking_from_ts" not in record
@@ -3823,6 +4087,8 @@ class LeaderProfitMixin(LeaderMixinContext):
     def _valid_profit_optional_numbers(record: dict[str, Any]) -> bool:
         optional_numbers = (
             "entry_atr",
+            "current_atr",
+            "leader_rank_ratio",
             "r_price",
             "last_scan_bucket",
             "execution_lock_armed_at",
@@ -3842,8 +4108,12 @@ class LeaderProfitMixin(LeaderMixinContext):
             if (value := record.get(key)) is not None
         ):
             return False
+        rank_ratio = record.get("leader_rank_ratio")
+        if rank_ratio is not None and not 0 < float(rank_ratio) <= 1:
+            return False
         positive_numbers = (
             "entry_atr",
+            "current_atr",
             "r_price",
             "execution_lock_stop_price",
             "shadow_lock_stop_price",
@@ -3870,6 +4140,14 @@ class LeaderProfitMixin(LeaderMixinContext):
             "progress_tracking_from_ts",
             "bars_since_weakening",
             "max_bars_since_new_high",
+            "leader_regime",
+            "leader_regime_candidate",
+            "leader_regime_candidate_bars",
+            "leader_regime_reason",
+            "leader_rank_ratio",
+            "holding_trend_state",
+            "background_trend_state",
+            "current_atr",
             "no_progress_setup",
             "no_progress",
             "shadow_stop_price",
@@ -3889,6 +4167,31 @@ class LeaderProfitMixin(LeaderMixinContext):
             or record.get("context_source") not in {"entry_fill", "reconstructed"}
             or type(record.get("no_progress_setup")) is not bool
             or type(record.get("no_progress")) is not bool
+            or record.get("leader_regime") not in {"strong", "normal", "fading"}
+            or record.get("leader_regime_candidate")
+            not in {
+                None,
+                "strong",
+                "normal",
+                "fading",
+            }
+            or type(record.get("leader_regime_candidate_bars")) is not int
+            or record["leader_regime_candidate_bars"] < 0
+            or type(record.get("leader_regime_reason")) is not str
+            or record.get("holding_trend_state")
+            not in {
+                None,
+                "up",
+                "weakening",
+                "consolidating",
+            }
+            or record.get("background_trend_state")
+            not in {
+                None,
+                "up",
+                "weakening",
+                "consolidating",
+            }
         ):
             return False
         required_numbers = {
@@ -3943,15 +4246,114 @@ class LeaderProfitMixin(LeaderMixinContext):
             return None
         return (float(price) - entry_value) / r_value
 
+    def _profit_rank_ratio(self, pair: str, now: float) -> float | None:
+        """Return the pair's fresh cross-sectional strength rank without network access."""
+        ranked: list[tuple[str, float]] = []
+        metrics = getattr(self, "_metrics", {})
+        for name in getattr(self, "_scores", {}):
+            if not self._metrics_current(metrics.get(name, {}), now):
+                continue
+            score = _finite_float(self._current_score(name, now))
+            if score is not None:
+                ranked.append((name, score))
+        own_score = next((score for name, score in ranked if name == pair), None)
+        minimum_size = math.ceil(1 / float(self.settings["profit_lock_strong_rank_ratio"]))
+        if own_score is None or len(ranked) < minimum_size:
+            return None
+        return (1 + sum(score > own_score for _, score in ranked)) / len(ranked)
+
+    def _profit_regime_candidate(
+        self,
+        record: dict[str, Any],
+        holding_state: str | None,
+        background_state: str | None,
+        rank_ratio: float | None,
+        market_down: bool,
+    ) -> tuple[str, str, bool]:
+        """Classify leader strength from closed-bar data; return state, reason and urgency."""
+        previous = str(record.get("leader_regime", "normal"))
+        bars = int(record.get("bars_since_new_high", 0))
+        fading_bars = int(self.settings["profit_lock_fading_min_bars"])
+        strong_bars = int(self.settings["profit_lock_strong_max_bars"])
+        if holding_state == "weakening":
+            return "fading", "1h趋势走弱", True
+        if background_state == "weakening":
+            return "fading", "4h背景走弱", True
+        if bars >= fading_bars:
+            return "fading", f"{bars}根未有效新高", True
+
+        rank = _finite_float(rank_ratio)
+        if holding_state is None or background_state is None or rank is None:
+            return previous, "数据不足保持已确认状态", False
+        elif (
+            holding_state == "up"
+            and background_state == "up"
+            and bars <= strong_bars
+            and rank <= float(self.settings["profit_lock_strong_rank_ratio"])
+        ):
+            candidate, reason = "strong", f"前{100 * rank:.0f}%且多周期上涨"
+        elif rank > float(self.settings["profit_lock_fading_rank_ratio"]) and (
+            holding_state != "up" or bars > strong_bars
+        ):
+            candidate, reason = "fading", f"排名降至前{100 * rank:.0f}%且动量放缓"
+        else:
+            candidate, reason = "normal", "龙头强度正常"
+
+        if market_down:
+            candidate = "normal" if candidate == "strong" else "fading"
+            return candidate, "有效市场普跌, 统一降一级", True
+        return candidate, reason, False
+
+    def _update_profit_regime(
+        self,
+        record: dict[str, Any],
+        holding_state: str | None,
+        background_state: str | None,
+        rank_ratio: float | None,
+        market_down: bool,
+    ) -> None:
+        """Persist a confirmed regime; ordinary changes need consecutive closed bars."""
+        candidate, reason, immediate = self._profit_regime_candidate(
+            record,
+            holding_state,
+            background_state,
+            rank_ratio,
+            market_down,
+        )
+        record["holding_trend_state"] = holding_state
+        record["background_trend_state"] = background_state
+        record["leader_rank_ratio"] = rank_ratio
+        if candidate == record.get("leader_regime"):
+            record["leader_regime_candidate"] = None
+            record["leader_regime_candidate_bars"] = 0
+            record["leader_regime_reason"] = reason
+            return
+        if immediate:
+            record["leader_regime"] = candidate
+            record["leader_regime_candidate"] = None
+            record["leader_regime_candidate_bars"] = 0
+            record["leader_regime_reason"] = reason
+            return
+        if record.get("leader_regime_candidate") == candidate:
+            record["leader_regime_candidate_bars"] = (
+                int(record.get("leader_regime_candidate_bars", 0)) + 1
+            )
+        else:
+            record["leader_regime_candidate"] = candidate
+            record["leader_regime_candidate_bars"] = 1
+        if record["leader_regime_candidate_bars"] >= int(
+            self.settings["profit_lock_state_confirm_bars"]
+        ):
+            record["leader_regime"] = candidate
+            record["leader_regime_candidate"] = None
+            record["leader_regime_candidate_bars"] = 0
+            record["leader_regime_reason"] = reason
+
     def _profit_lock_target(self, record: dict[str, Any], peak: float) -> float | None:
         """持久峰值武装后, 返回只升不降的锁盈目标。
 
-        回吐额度取两个上限中更紧的一个:
-        * 波动口径 ``trail_r * R``: 让大行情按波动缩放地跟随, 不截断右尾;
-        * 涨幅口径 ``giveback_frac * (峰值 - 入场)``: 让中等行情不必把浮盈全部吐回。
-
-        峰值超过 ``trail_r / giveback_frac`` 倍 R 之后只剩波动口径生效, 因此右尾
-        (策略赖以盈利的少数大赢家) 的行为与纯 R 跟踪完全一致。
+        已确认的强/常/退档位分别控制比例回吐、冻结 R 上限和当前 ATR 距离;
+        三者取更紧者。止损锁存仍只升不降, 因此状态恢复或波动扩大不会放宽保护。
         """
         peak_r = self._profit_r_of(record, peak)
         if peak_r is None or peak_r < float(self.settings["profit_lock_arm_r"]):
@@ -3959,12 +4361,19 @@ class LeaderProfitMixin(LeaderMixinContext):
         entry = float(record["entry_price"])
         target = entry * (1.0 + float(self.settings["profit_lock_fee_buffer"]))
         allowance = math.inf
-        trail_r = float(self.settings["profit_lock_trail_r"])
+        regime = str(record.get("leader_regime", "strong"))
+        profile = self.settings["profit_lock_regimes"].get(
+            regime, self.settings["profit_lock_regimes"]["normal"]
+        )
+        trail_r = float(profile["trail_r"])
         if trail_r > 0:
             allowance = trail_r * float(record["r_price"])
-        giveback_frac = float(self.settings["profit_lock_giveback_frac"])
+        giveback_frac = float(profile["giveback_frac"])
         if giveback_frac > 0:
             allowance = min(allowance, giveback_frac * max(peak - entry, 0.0))
+        atr = _positive_float(record.get("current_atr")) or _positive_float(record.get("entry_atr"))
+        if atr is not None:
+            allowance = min(allowance, float(profile["atr_multiple"]) * atr)
         if math.isfinite(allowance):
             target = max(target, peak - allowance)
         return target
@@ -4032,7 +4441,20 @@ class LeaderProfitMixin(LeaderMixinContext):
         period = timeframe_to_seconds(self.settings["holding_timeframe"])
         delay = float(self.settings["score_candle_close_delay_seconds"])
         scan_bucket = math.floor((now - delay) / period)
+        market_down = bool(
+            getattr(self, "_market_down", False)
+            and getattr(self, "_market_data_healthy", False)
+            and now <= float(getattr(self, "_market_valid_until", 0.0))
+        )
         if record.get("last_scan_bucket") == scan_bucket:
+            if market_down:
+                self._update_profit_regime(
+                    record,
+                    record.get("holding_trend_state"),
+                    record.get("background_trend_state"),
+                    record.get("leader_rank_ratio"),
+                    True,
+                )
             return
         frame = self._profit_trend_frame(record["pair"])
         record["updated_at"] = now
@@ -4049,18 +4471,33 @@ class LeaderProfitMixin(LeaderMixinContext):
         if pending.empty:
             return
         entry = float(record["entry_price"])
-        atr = record.get("entry_atr")
-        # 止损是价格水平, 必须逐根回放才能还原真实的盘中触发顺序; 动量闸门同样需要
-        # 每根 K 线"当时"的状态, 否则一次重放多根(重建记录/停机追赶)时只有最后一根
-        # 参与判定, 交易就可能带着一个从未更新过的旧结论一路跌到灾难止损。
+        # Price stops and no-progress clocks require chronological replay.  The live
+        # leader regime does not: historical bars lack matching 4h/rank snapshots and
+        # must not overwrite the latest closed-bar decision after a restart.
         states = self._profit_trend_states(
             frame, start_ts=float(pending["date"].iloc[0].timestamp())
         )
+        latest_ts = float(frame["date"].iloc[-1].timestamp())
+        background = self._trend_context(record["pair"], self.settings["background_timeframe"])
+        background_state = str(background["state"]) if background.get("available") else None
+        rank_ratio = self._profit_rank_ratio(record["pair"], now)
+        frame_positions = {
+            float(value.timestamp()): index for index, value in enumerate(frame["date"])
+        }
         rows = list(pending.itertuples(index=False))
+        if len(rows) > 1:
+            # A missed bar has no matching historical rank/4h snapshot, so a
+            # pre-downtime candidate cannot prove consecutive confirmation.
+            record["leader_regime_candidate"] = None
+            record["leader_regime_candidate_bars"] = 0
         for row in rows:
-            record["last_bar_ts"] = row.date.timestamp()
+            row_ts = float(row.date.timestamp())
+            record["last_bar_ts"] = row_ts
             record["bars_seen"] = int(record.get("bars_seen", 0)) + 1
             high, low, close = float(row.high), float(row.low), float(row.close)
+            row_index = frame_positions[row_ts]
+            current_atr = self._wilder_atr(frame.iloc[:row_index])
+            is_latest = row_ts == latest_ts
             self._simulate_profit_bar(
                 record,
                 trade,
@@ -4068,8 +4505,12 @@ class LeaderProfitMixin(LeaderMixinContext):
                 low,
                 close,
                 entry,
-                atr,
-                None if states is None else states.get(row.date.timestamp()),
+                current_atr,
+                None if states is None else states.get(row_ts),
+                background_state if is_latest else None,
+                rank_ratio if is_latest else None,
+                market_down if is_latest else False,
+                update_regime=is_latest,
             )
         record["peak_profit_ratio"] = self._profit_ratio_at(trade, float(record["peak_price"]))
         record["last_profit_ratio"] = self._profit_ratio_at(
@@ -4097,8 +4538,13 @@ class LeaderProfitMixin(LeaderMixinContext):
         low: float,
         close: float,
         entry: float,
-        _atr: float | None,
+        current_atr: float | None,
         trend_state: str | None,
+        background_state: str | None = None,
+        rank_ratio: float | None = None,
+        market_down: bool = False,
+        *,
+        update_regime: bool = True,
     ) -> None:
         """保守盘中模拟: 先用本根开盘前的止损判断是否被打到, 再用本根高点抬升止损。"""
         already_exited = record.get("shadow_exit_price") is not None
@@ -4130,6 +4576,16 @@ class LeaderProfitMixin(LeaderMixinContext):
                 int(record["bars_since_new_high"]),
             )
             self._track_weakening_recency(record, trend_state)
+        if _positive_float(current_atr) is not None:
+            record["current_atr"] = float(cast(float, current_atr))
+        if update_regime:
+            self._update_profit_regime(
+                record,
+                trend_state,
+                background_state,
+                rank_ratio,
+                market_down,
+            )
         target = self._profit_lock_target(record, peak)
         if not already_exited and target is not None:
             current = record.get("shadow_lock_stop_price")
@@ -4180,7 +4636,7 @@ class LeaderProfitMixin(LeaderMixinContext):
         """为每根已收盘的持仓周期 K 线重算当时的趋势状态。
 
         ``_trend_context`` 只描述最新一根; 重建记录或停机追赶时一次扫描会回放多根,
-        因此动量闸门必须使用每根 K 线当时的状态。分类规则与实时趋势判定共用同一
+        因此无进展时钟必须使用每根 K 线当时的状态。分类规则与实时趋势判定共用同一
         实现; 历史不足或 ATR 无效的早期 K 线不生成状态。
         """
         required = {"date", "high", "low", "close"}
@@ -4260,21 +4716,9 @@ class LeaderProfitMixin(LeaderMixinContext):
                     )
                 ).first()
                 state = checkpoint.data if checkpoint is not None else {}
-                signature = [
-                    trade.is_open,
-                    trade.leverage,
-                    [
-                        [
-                            order.order_id,
-                            order.ft_order_side,
-                            order.safe_filled,
-                            order.safe_price,
-                            order.ft_is_open,
-                        ]
-                        for order in trade.orders
-                    ],
-                ]
-                if state.get("status") != "verified" or state.get("signature") != signature:
+                if state.get("status") != "verified" or state.get(
+                    "signature"
+                ) != _trade_accounting_signature(trade):
                     return None
                 ratio = state.get("profit_ratio")
                 source = "exchange_ledger"
@@ -4439,6 +4883,11 @@ class LeaderProfitMixin(LeaderMixinContext):
         if not rows:
             return
         rows.sort(key=lambda item: item[0], reverse=True)
+        regimes = self.settings["profit_lock_regimes"]
+        profile_summary = "/".join(
+            f"{100 * regimes[state]['giveback_frac']:.0f}%回吐、{regimes[state]['trail_r']:g}R"
+            for state in ("strong", "normal", "fading")
+        )
         _log_table(
             "🛡️ 盈利保护状态",
             [
@@ -4446,19 +4895,23 @@ class LeaderProfitMixin(LeaderMixinContext):
                 "1R价幅/占比",
                 "峰值",
                 "当前(R/含杠杆)",
-                "真实棘轮",
-                "目标止损价",
+                "执行状态",
+                "止损(框架→目标)",
                 "现价距目标",
                 "停滞根数",
-                f"{self.settings['holding_timeframe']}趋势",
+                f"龙头/排名/{self.settings['holding_timeframe']}",
                 "无进展退出",
                 "影子退出",
             ],
             [row for _, row, _ in rows],
             style="magenta",
             row_styles=[style for _, _, style in rows],
-            caption="与持仓明细同周期打印; R在入场时冻结; 峰值恢复使用trade.max_rate; "
-            "停滞只统计完整持仓周期K线; 现价距目标为正表示仍在止损价上方",
+            caption="与持仓明细同周期打印; R在入场时冻结; "
+            "峰值取账本、trade.max_rate与最新标记价最大值; "
+            "止损列显示框架当前值→最新计算目标, 无箭头表示框架已采用; "
+            f"龙头状态强/常/退分别使用{profile_summary}上限; "
+            "1R及目标止损同时显示价格幅度/杠杆后保证金收益率, 不含费用和资金费; "
+            "停滞只统计完整持仓周期K线; 现价距目标为纯价格距离, 正数表示仍在止损价上方",
         )
 
     def _profit_position_row(
@@ -4482,20 +4935,44 @@ class LeaderProfitMixin(LeaderMixinContext):
             return None
         entry = float(record["entry_price"])
         r_price = record.get("r_price")
-        peak = float(record["peak_price"])
+        trade_peak = _positive_float(getattr(trade, "max_rate", None)) or entry
+        peak = max(
+            float(record["peak_price"]),
+            trade_peak,
+            current_value,
+        )
         peak_r = self._profit_r_of(record, peak)
         current_r = self._profit_r_of(record, current_value)
-        current_ratio = self._profit_ratio_at(trade, current_value)
-        candidate = self._profit_lock_target(record, peak)
-        target = record.get("execution_lock_stop_price") or candidate
-        lock_status = (
-            "已武装"
-            if record.get("execution_lock_stop_price") is not None
-            else "待本轮执行"
-            if candidate is not None
-            else "R待补"
-            if r_price is None
-            else "未武装"
+        leverage = _positive_float(trade.leverage)
+        direction = -1.0 if trade.is_short else 1.0
+        current_ratio = (
+            direction * (current_value / entry - 1.0) * leverage if leverage is not None else None
+        )
+        profit_lock_enabled = bool(self.settings["profit_lock_enabled"])
+        candidate = self._profit_lock_target(record, peak) if profit_lock_enabled else None
+        latched = (
+            _positive_float(record.get("execution_lock_stop_price"))
+            if profit_lock_enabled
+            else None
+        )
+        targets = [value for value in (latched, candidate) if value is not None]
+        target = max(targets) if targets else None
+        current_stop = _positive_float(getattr(trade, "stop_loss", None))
+        r_value = _positive_float(r_price)
+        lock_status = _profit_stop_status(
+            enabled=profit_lock_enabled,
+            current_price=current_value,
+            current_stop=current_stop,
+            target=target,
+            r_price=r_value,
+            min_step_r=float(self.settings["profit_lock_min_step_r"]),
+        )
+        stop_target_label = _stop_target_label(
+            current_stop,
+            target,
+            entry,
+            leverage,
+            "short" if trade.is_short else "long",
         )
         distance = (
             f"{100 * (current_value / float(target) - 1):+.2f}%"
@@ -4503,6 +4980,13 @@ class LeaderProfitMixin(LeaderMixinContext):
             else "—"
         )
         trend = self._profit_no_progress_trend(pair) or "未知"
+        regime = {"strong": "强", "normal": "常", "fading": "退"}.get(
+            str(record.get("leader_regime")), "未知"
+        )
+        rank = _finite_float(record.get("leader_rank_ratio"))
+        regime_label = (
+            f"{regime}/{100 * rank:.0f}%/{trend}" if rank is not None else f"{regime}/—/{trend}"
+        )
         no_progress = (
             "已满足"
             if self._profit_no_progress_at_price(record, current_value)
@@ -4516,8 +5000,9 @@ class LeaderProfitMixin(LeaderMixinContext):
             "stoploss": "原止损",
         }.get(str(record.get("shadow_exit_reason")), "—")
         r_label = (
-            f"{float(r_price):.8g}/{100 * float(r_price) / entry:.2f}%"
-            if r_price is not None
+            f"{r_value:.8g}/{100 * r_value / entry:.2f}%价/"
+            f"{100 * r_value / entry * leverage:.1f}%保证金"
+            if r_value is not None and leverage is not None
             else "待补"
         )
         peak_label = f"{peak_r:+.2f}R" if peak_r is not None else f"{peak:.8g}"
@@ -4526,11 +5011,15 @@ class LeaderProfitMixin(LeaderMixinContext):
             if current_r is not None and current_ratio is not None
             else "未知"
         )
+        if not mark_fresh and current_label != "未知":
+            current_label += "(旧)"
+        if not mark_fresh and distance != "—":
+            distance += "(旧)"
         style = (
             "red"
             if no_progress == "已满足" or (target is not None and current_value <= float(target))
             else "green"
-            if lock_status == "已武装"
+            if target is not None
             else "yellow"
         )
         return (
@@ -4541,10 +5030,10 @@ class LeaderProfitMixin(LeaderMixinContext):
                 peak_label,
                 current_label,
                 lock_status,
-                f"{float(target):.8g}" if target is not None else "—",
+                stop_target_label,
                 distance,
                 f"{record['bars_since_new_high']}/{self.settings['profit_no_progress_candles']}",
-                trend,
+                regime_label,
                 no_progress,
                 shadow_reason,
             ],
@@ -4678,6 +5167,26 @@ class LeaderProfitMixin(LeaderMixinContext):
         if record is None or record.get("trade_id") != trade.id or not record.get("r_price"):
             return False
         return float(current_rate) <= float(record["entry_price"]) - float(record["r_price"])
+
+    def _fading_profit_lock_exit(self, pair: str, trade: Trade, current_rate: float) -> bool:
+        """Exit a confirmed fading leader that is already below its tightened target."""
+        if not self.settings["profit_lock_enabled"]:
+            return False
+        record = getattr(self, "_profit_shadow", {}).get(pair)
+        if (
+            record is None
+            or record.get("trade_id") != trade.id
+            or record.get("leader_regime") != "fading"
+        ):
+            return False
+        peak = max(
+            float(record["peak_price"]),
+            float(getattr(trade, "max_rate", None) or trade.open_rate),
+        )
+        candidate = self._profit_lock_target(record, peak)
+        latched = _positive_float(record.get("execution_lock_stop_price"))
+        targets = [target for target in (candidate, latched) if target is not None]
+        return bool(targets and float(current_rate) <= max(targets))
 
     def _profit_no_progress_exit(self, pair: str, trade: Trade, current_rate: float) -> bool:
         """custom_exit 侧读取影子账本已算好的动量结论, 不重复计算。"""

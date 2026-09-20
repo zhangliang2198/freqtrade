@@ -238,15 +238,21 @@ class LeaderSqueezeStrategy(
             else "关闭",
             extra=LOG_INFO,
         )
+        lock_regimes = self.settings["profit_lock_regimes"]
         logger.info(
-            "🔒 风险/盈利保护 | 初始1R止损=%s | 棘轮=%s 峰值达%.2fR武装 跟踪距离=%.2fR "
-            "回吐比例=%.0f%% 费用缓冲=%.2f%% 最小改单=%.2fR | 无进展退出=%s "
+            "🔒 风险/盈利保护 | 初始1R止损=%s | 棘轮=%s 峰值达%.2fR武装 | "
+            "强/常/退回吐=%.0f%%/%.0f%%/%.0f%% 上限=%.2fR/%.2fR/%.2fR | "
+            "费用缓冲=%.2f%% 最小改单=%.2fR | 无进展退出=%s "
             "%s根%s未推进%.2fR且窗口内近期走弱/收益低于%.2fR",
             "开启" if self.settings["entry_risk_initial_stop_enabled"] else "关闭",
             "开启" if self.settings["profit_lock_enabled"] else "关闭",
             self.settings["profit_lock_arm_r"],
-            self.settings["profit_lock_trail_r"],
-            100 * self.settings["profit_lock_giveback_frac"],
+            100 * lock_regimes["strong"]["giveback_frac"],
+            100 * lock_regimes["normal"]["giveback_frac"],
+            100 * lock_regimes["fading"]["giveback_frac"],
+            lock_regimes["strong"]["trail_r"],
+            lock_regimes["normal"]["trail_r"],
+            lock_regimes["fading"]["trail_r"],
             100 * self.settings["profit_lock_fee_buffer"],
             self.settings["profit_lock_min_step_r"],
             "开启" if self.settings["profit_no_progress_enabled"] else "关闭",
@@ -556,9 +562,8 @@ class LeaderSqueezeStrategy(
     ) -> float | None:
         """风险止损与盈利棘轮: 先限制为 1R, 峰值达 1R 后单调跟踪。
 
-        回吐额度取 ``profit_lock_trail_r * R`` 与
-        ``profit_lock_giveback_frac * (峰值价格 - 入场价格)`` 中的较小值,
-        再与费用地板比较, 避免只按固定的峰值减 1.5R 跟踪。
+        回吐额度按已确认的强/常/退龙头档位, 取比例回吐、R 上限与当前 ATR
+        距离中的最小值, 再与费用地板比较; 状态与 ATR 只使用已收盘 K 线。
 
         初始止损由 ``entry_risk_initial_stop_enabled`` 门控, 盈利棘轮由
         ``profit_lock_enabled`` 门控。返回值为保证金口径, 由
@@ -612,6 +617,8 @@ class LeaderSqueezeStrategy(
                 reason = "leader_rotation"
             elif self._trend_reversed(pair):
                 reason = "trend_reversal"
+            elif self._fading_profit_lock_exit(pair, trade, current_rate):
+                reason = "fading_profit_lock"
             elif self._profit_no_progress_exit(pair, trade, current_rate):
                 reason = "leader_no_progress"
             else:
@@ -648,6 +655,7 @@ class LeaderSqueezeStrategy(
                 "leader_rotation": "龙头轮换",
                 "trend_reversal": "持仓趋势反转 | "
                 + getattr(self, "_trend_exit_details", {}).get(pair, "多周期趋势退出"),
+                "fading_profit_lock": "龙头退潮且现价已跌破动态盈利保护目标",
                 "leader_no_progress": "动量论点失效 | "
                 f"{self.settings['profit_no_progress_candles']}根"
                 f"{self.settings['holding_timeframe']}未推进"
