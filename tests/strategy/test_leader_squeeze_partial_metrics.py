@@ -124,7 +124,7 @@ def test_score_refresh_does_not_request_adl_and_can_score_the_result() -> None:
     assert not REMOVED_SHORT_RATIO_PATHS.intersection(session.paths)
     assert "short_share" not in metric
     assert metric["oi_change"] == pytest.approx(98 / 101 - 1)
-    assert strategy._scores[PAIR] > float(strategy.settings["entry_slot_score_thresholds"][0])
+    assert strategy._scores[PAIR] > float(strategy.settings["entry_risk_base_score"])
 
 
 @pytest.mark.parametrize("failed_path", ["takerlongshortRatio", "openInterestHist"])

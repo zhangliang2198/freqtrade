@@ -11,6 +11,7 @@ import logging
 import math
 import threading
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta, timezone
@@ -287,6 +288,192 @@ Index(
 )
 
 
+def entry_risk_concentration(
+    correlations: Sequence[float],
+    *,
+    full_weight: float,
+    unknown: float,
+) -> float:
+    """Collapse candidate-to-holding correlations into a [0, 1] concentration score.
+
+    Correlation is the risk driver a slot ordinal cannot see: a candidate that
+    moves with the existing book adds far more portfolio risk than an
+    independent one. Negative correlation never earns a discount below zero
+    (the floor already rewards independence by staying at its base), and
+    unusable data falls back to ``unknown`` so missing history is never read as
+    diversification.
+
+    :param correlations: Candidate correlations against every holding.
+    :param full_weight: Correlation treated as fully concentrated.
+    :param unknown: Effective correlation for each unusable observation.
+    :return: Concentration score clamped to the inclusive range [0, 1].
+    """
+    if not correlations:
+        # An empty book has nothing to be concentrated with.
+        return 0.0
+    effective = [value if math.isfinite(value) else float(unknown) for value in correlations]
+    mean = sum(effective) / len(effective)
+    scale = float(full_weight)
+    if not math.isfinite(scale) or scale <= 0:
+        return 1.0
+    return min(1.0, max(0.0, mean) / scale)
+
+
+def entry_risk_utilization(
+    position_count: int,
+    max_positions: int,
+    concentration: float,
+    *,
+    correlation_weight: float,
+) -> float:
+    """Share of the correlation-adjusted risk budget a prospective entry consumes.
+
+    ``position_count`` is the count *after* the prospective entry, so the first
+    position consumes nothing and the last consumes the full slot budget.
+    Correlation scales that budget: a book of clones is more used than a book
+    of independent names at the same position count.
+
+    :param position_count: Position count after the prospective entry.
+    :param max_positions: Normal strategy position limit.
+    :param concentration: Correlation concentration in [0, 1].
+    :param correlation_weight: Relative weight of correlation concentration.
+    :return: Correlation-adjusted risk utilization in [0, 1].
+    """
+    if max_positions <= 1:
+        slot = 1.0
+    else:
+        slot = (position_count - 1) / (max_positions - 1)
+    slot = min(1.0, max(0.0, slot))
+    weight = max(0.0, float(correlation_weight))
+    if not math.isfinite(weight):
+        weight = 0.0
+    adjusted = slot * (1.0 + weight * min(1.0, max(0.0, concentration)))
+    return min(1.0, adjusted / (1.0 + weight))
+
+
+def entry_risk_score_floor(
+    *,
+    base_score: float,
+    premium: float,
+    utilization: float,
+) -> float:
+    """Strength score required at a given share of the risk budget.
+
+    :param base_score: Minimum score charged to the first position.
+    :param premium: Maximum score increment for risk utilization.
+    :param utilization: Correlation-adjusted risk utilization.
+    :return: Required entry strength score.
+    """
+    return float(base_score) + float(premium) * min(1.0, max(0.0, utilization))
+
+
+def entry_risk_stake_amount(
+    *,
+    capital: float,
+    max_stake_ratio: float,
+    risk_ratio: float,
+    stop_fraction: float,
+    leverage: float,
+) -> float:
+    """Size margin from a fixed account-risk budget and a price stop distance.
+
+    :param capital: Current tradable account capital.
+    :param max_stake_ratio: Maximum margin allocation for one position.
+    :param risk_ratio: Maximum account loss budget for one position.
+    :param stop_fraction: Entry-to-stop price distance as a positive ratio.
+    :param leverage: Actual leverage selected for the entry.
+    :return: Required margin, capped by the per-position allocation limit.
+    """
+    risk_sized = float(capital) * float(risk_ratio) / (float(stop_fraction) * float(leverage))
+    return min(float(capital) * float(max_stake_ratio), risk_sized)
+
+
+def entry_risk_cluster_size(correlations: Sequence[float], *, threshold: float) -> int:
+    """Size of the correlated cluster a candidate would join, counting itself.
+
+    :param correlations: Effective candidate-to-holding correlations.
+    :param threshold: Minimum correlation included in the cluster.
+    :return: Cluster size including the prospective entry.
+    """
+    return 1 + sum(
+        1 for value in correlations if math.isfinite(value) and value >= float(threshold)
+    )
+
+
+def entry_risk_correlation(
+    left: Sequence[float],
+    right: Sequence[float],
+    *,
+    min_overlap: int,
+) -> float:
+    """Pearson correlation of simple returns over the overlapping tail.
+
+    Returns NaN when the overlap is too short or either series is flat, so the
+    caller can apply its own conservative fallback instead of inventing zero
+    correlation (which would read as free diversification).
+
+    :param left: Time-aligned close prices for the candidate.
+    :param right: Time-aligned close prices for a holding.
+    :param min_overlap: Minimum number of overlapping returns.
+    :return: Pearson return correlation, or NaN when it is unavailable.
+    """
+    count = min(len(left), len(right))
+    if count < max(2, int(min_overlap) + 1):
+        return math.nan
+    left_tail = [float(value) for value in list(left)[-count:]]
+    right_tail = [float(value) for value in list(right)[-count:]]
+    if any(not math.isfinite(value) or value <= 0 for value in left_tail + right_tail):
+        return math.nan
+    left_returns = [current / previous - 1.0 for previous, current in pairwise(left_tail)]
+    right_returns = [current / previous - 1.0 for previous, current in pairwise(right_tail)]
+    left_mean = sum(left_returns) / len(left_returns)
+    right_mean = sum(right_returns) / len(right_returns)
+    covariance = sum(
+        (a - left_mean) * (b - right_mean) for a, b in zip(left_returns, right_returns, strict=True)
+    )
+    left_variance = sum((a - left_mean) ** 2 for a in left_returns)
+    right_variance = sum((b - right_mean) ** 2 for b in right_returns)
+    denominator = math.sqrt(left_variance * right_variance)
+    if not math.isfinite(denominator) or denominator <= 0:
+        return math.nan
+    return max(-1.0, min(1.0, covariance / denominator))
+
+
+def entry_risk_exposure_reason(
+    *,
+    capital: float,
+    open_margin: float,
+    open_gross: float,
+    pending_margin: float,
+    pending_gross: float,
+    max_gross_ratio: float,
+    max_margin_ratio: float,
+) -> str:
+    """Hard ceiling on aggregate exposure, independent of the soft score floor.
+
+    :param capital: Current tradable account capital used as the ratio denominator.
+    :param open_margin: Actual margin committed to open positions.
+    :param open_gross: Actual notional exposure of open positions.
+    :param pending_margin: Conservative margin reserved for prospective entries.
+    :param pending_gross: Conservative notional reserved for prospective entries.
+    :param max_gross_ratio: Maximum aggregate notional-to-equity ratio.
+    :param max_margin_ratio: Maximum aggregate margin-to-equity ratio.
+    :return: A rejection reason, or an empty string within both ceilings.
+    """
+    values = (capital, open_margin, open_gross, pending_margin, pending_gross)
+    if any(not math.isfinite(float(value)) or float(value) < 0 for value in values):
+        return "总敞口数据无效"
+    if float(capital) <= 0:
+        return "账户资金不可用, 无法核对总敞口"
+    margin_ratio = (float(open_margin) + float(pending_margin)) / float(capital)
+    gross_ratio = (float(open_gross) + float(pending_gross)) / float(capital)
+    if gross_ratio > float(max_gross_ratio) + 1e-9:
+        return f"总名义敞口 {gross_ratio:.2f}x > 上限 {float(max_gross_ratio):.2f}x"
+    if margin_ratio > float(max_margin_ratio) + 1e-9:
+        return f"总保证金占用 {margin_ratio:.1%} > 上限 {float(max_margin_ratio):.1%}"
+    return ""
+
+
 def json_safe(value: Any) -> Any:
     """JSONB rejects NaN; missing metrics must remain null, never invented zeroes."""
     if value is None or isinstance(value, (str, bool, int)):
@@ -392,20 +579,88 @@ class RotationJournal:
 
 
 class LeaderConfigMixin(LeaderMixinContext):
-    def _validate_entry_pipeline_settings(self, max_positions: int) -> None:
-        thresholds = self.settings["entry_slot_score_thresholds"]
-        if not isinstance(thresholds, list) or len(thresholds) != max_positions:
+    def _validate_entry_risk_floor_settings(self) -> None:
+        base_score = self.settings["entry_risk_base_score"]
+        premium = self.settings["entry_risk_premium"]
+        for key in ("entry_risk_base_score", "entry_risk_premium"):
+            value = self.settings[key]
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"leader_squeeze {key} must be finite and non-negative")
+        if base_score + premium > 100:
+            raise ValueError("entry_risk_base_score + entry_risk_premium must not exceed 100")
+        weight = self.settings["entry_risk_correlation_weight"]
+        if type(weight) not in (int, float) or not math.isfinite(weight) or weight < 0:
+            raise ValueError("entry_risk_correlation_weight must be finite and non-negative")
+        full_weight = self.settings["entry_risk_correlation_full_weight"]
+        if (
+            type(full_weight) not in (int, float)
+            or not math.isfinite(full_weight)
+            or not 0 < full_weight <= 1
+        ):
+            raise ValueError("entry_risk_correlation_full_weight must be within (0, 1]")
+        unknown = self.settings["entry_risk_correlation_unknown"]
+        if type(unknown) not in (int, float) or not math.isfinite(unknown) or not 0 <= unknown <= 1:
+            raise ValueError("entry_risk_correlation_unknown must be within [0, 1]")
+        window = self.settings["entry_risk_correlation_window"]
+        overlap = self.settings["entry_risk_correlation_min_overlap"]
+        if type(window) is not int or window < 8:
+            raise ValueError("entry_risk_correlation_window must be an integer >= 8")
+        if type(overlap) is not int or not 2 <= overlap < window:
             raise ValueError(
-                "entry_slot_score_thresholds must contain one value per max_positions slot"
+                "entry_risk_correlation_min_overlap must be an integer within [2, window)"
             )
-        if any(
-            type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 100
-            for value in thresholds
-        ) or any(left >= right for left, right in pairwise(thresholds)):
-            raise ValueError(
-                "entry_slot_score_thresholds must be finite, within [0, 100], "
-                "and strictly increasing"
-            )
+        if window + 1 > self.startup_candle_count:
+            raise ValueError("entry_risk_correlation_window exceeds startup_candle_count")
+
+    def _validate_entry_risk_cap_settings(self) -> None:
+        for key in ("entry_risk_max_gross_ratio", "entry_risk_max_margin_ratio"):
+            value = self.settings[key]
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"leader_squeeze {key} must be positive and finite")
+        if float(self.settings["entry_risk_max_margin_ratio"]) > 1:
+            raise ValueError("entry_risk_max_margin_ratio must not exceed 1")
+        threshold = self.settings["entry_risk_cluster_correlation"]
+        if (
+            type(threshold) not in (int, float)
+            or not math.isfinite(threshold)
+            or not 0 <= threshold <= 1
+        ):
+            raise ValueError("entry_risk_cluster_correlation must be within [0, 1]")
+        cluster_limit = self.settings["entry_risk_cluster_max_positions"]
+        if type(cluster_limit) is not int or cluster_limit < 1:
+            raise ValueError("entry_risk_cluster_max_positions must be a positive integer")
+
+    def _validate_entry_risk_settings(self) -> None:
+        """Validate the correlation-adjusted entry risk budget.
+
+        The score floor is derived, not enumerated: ``base_score`` is charged to
+        the first position and ``premium`` is added in full only when the book
+        is both full and fully correlated. Nothing here is a per-slot ladder, so
+        the checks are about ranges and about the window being usable at all.
+        """
+        self._validate_entry_risk_floor_settings()
+        self._validate_entry_risk_cap_settings()
+        risk_ratio = self.settings["entry_risk_per_trade"]
+        if (
+            type(risk_ratio) not in (int, float)
+            or not math.isfinite(risk_ratio)
+            or not 0 < risk_ratio <= 0.05
+        ):
+            raise ValueError("entry_risk_per_trade must be within (0, 0.05]")
+        if type(self.settings["entry_risk_initial_stop_enabled"]) is not bool:
+            raise ValueError("entry_risk_initial_stop_enabled must be boolean")
+
+    def _validate_entry_risk_capacity(self, stake_ratio: float) -> None:
+        """The hard ceilings must still be able to fund one equal-sized position."""
+        unit_margin = float(stake_ratio)
+        unit_gross = unit_margin * float(self.settings["leverage"])
+        if unit_gross > float(self.settings["entry_risk_max_gross_ratio"]) + 1e-9:
+            raise ValueError("entry_risk_max_gross_ratio cannot fund even one position")
+        if unit_margin > float(self.settings["entry_risk_max_margin_ratio"]) + 1e-9:
+            raise ValueError("entry_risk_max_margin_ratio cannot fund even one position")
+
+    def _validate_entry_pipeline_settings(self) -> None:
+        self._validate_entry_risk_settings()
         setup_score = self.settings["entry_setup_min_score"]
         setup_ratio = self.settings["entry_setup_shortlist_ratio"]
         setup_count = self.settings["entry_setup_min_candidates"]
@@ -469,7 +724,7 @@ class LeaderConfigMixin(LeaderMixinContext):
         max_positions = self.settings["max_positions"]
         if type(max_positions) is not int or max_positions < 1:
             raise ValueError("leader_squeeze max_positions must be a positive integer")
-        self._validate_entry_pipeline_settings(max_positions)
+        self._validate_entry_pipeline_settings()
         stake_ratio = self.settings["stake_ratio"]
         if (
             type(stake_ratio) not in (int, float)
@@ -477,6 +732,7 @@ class LeaderConfigMixin(LeaderMixinContext):
             or not 0 < stake_ratio <= 1 / (max_positions + 1)
         ):
             raise ValueError("stake_ratio must be positive and leave one buy-first rotation slot")
+        self._validate_entry_risk_capacity(stake_ratio)
         framework_limit = self.config.get("max_open_trades", 0)
         if type(framework_limit) not in (int, float) or not (
             framework_limit in (-1, math.inf)
@@ -653,7 +909,19 @@ REQUIRED_SETTINGS = frozenset(
         "leverage",
         "stake_ratio",
         "max_positions",
-        "entry_slot_score_thresholds",
+        "entry_risk_base_score",
+        "entry_risk_premium",
+        "entry_risk_per_trade",
+        "entry_risk_initial_stop_enabled",
+        "entry_risk_correlation_weight",
+        "entry_risk_correlation_full_weight",
+        "entry_risk_correlation_unknown",
+        "entry_risk_correlation_window",
+        "entry_risk_correlation_min_overlap",
+        "entry_risk_max_gross_ratio",
+        "entry_risk_max_margin_ratio",
+        "entry_risk_cluster_correlation",
+        "entry_risk_cluster_max_positions",
         "entry_setup_enabled",
         "entry_setup_score_points",
         "entry_setup_min_score",
@@ -890,6 +1158,7 @@ def validate_runtime_settings(strategy) -> None:
         "profit_shadow_enabled",
         "profit_lock_enabled",
         "profit_no_progress_enabled",
+        "entry_risk_initial_stop_enabled",
     ):
         if type(settings[key]) is not bool:
             raise ValueError(f"leader_squeeze.{key} must be boolean")
@@ -996,10 +1265,13 @@ def _validate_profit_protection_settings(settings: dict) -> None:
         value = settings[key]
         if type(value) is not str or not value.strip():
             raise ValueError(f"leader_squeeze.{key} must be a non-empty path")
-    # 棘轮与动量止损都读取影子账本算出的状态, 因此必须先启用账本。
-    if (settings["profit_lock_enabled"] or settings["profit_no_progress_enabled"]) and not settings[
-        "profit_shadow_enabled"
-    ]:
+    # 初始止损、棘轮与动量止损都读取影子账本冻结的入场 R, 因此必须先启用账本。
+    protection_enabled = (
+        settings["entry_risk_initial_stop_enabled"]
+        or settings["profit_lock_enabled"]
+        or settings["profit_no_progress_enabled"]
+    )
+    if protection_enabled and not settings["profit_shadow_enabled"]:
         raise ValueError(
             "leader_squeeze.profit_shadow_enabled must be true when profit protection is enabled"
         )
@@ -1994,7 +2266,7 @@ class LeaderReportingMixin(LeaderMixinContext):
 
         def candidate_summary(row: list[str]) -> str:
             setup = "形态关闭" if row[2] == "关闭" else f"{row[2]} 形态{row[3]}"
-            return f"第{row[1]}仓 {setup} 强度{row[4]}/门槛{row[5]}"
+            return f"第{row[1]}仓 {setup} 强度{row[4]}/门槛{row[5]} 相关度{row[6]}"
 
         rows.extend(
             [
@@ -4342,7 +4614,7 @@ class LeaderProfitMixin(LeaderMixinContext):
     def _profit_lock_stoploss(
         self, pair: str, trade: Trade, current_rate: float, current_time: datetime
     ) -> float | None:
-        """返回 custom_stoploss 需要的止损值; None 表示本轮不改动。"""
+        """Return the initial 1R stop or a tighter armed profit stop."""
         record = getattr(self, "_profit_shadow", {}).get(pair)
         if record is None or record.get("trade_id") != trade.id:
             return None
@@ -4354,7 +4626,9 @@ class LeaderProfitMixin(LeaderMixinContext):
         record["peak_price"] = peak
         record["peak_profit_ratio"] = self._profit_ratio_at(trade, peak)
         record["peak_profit_r"] = self._profit_r_of(record, peak)
-        candidate = self._profit_lock_target(record, peak)
+        candidate = (
+            self._profit_lock_target(record, peak) if self.settings["profit_lock_enabled"] else None
+        )
         newly_armed = False
         if candidate is not None:
             previous = record.get("execution_lock_stop_price")
@@ -4365,6 +4639,9 @@ class LeaderProfitMixin(LeaderMixinContext):
                 record["execution_lock_armed_at"] = current_time.timestamp()
                 newly_armed = True
         target = record.get("execution_lock_stop_price")
+        r_price = record.get("r_price")
+        if target is None and self.settings["entry_risk_initial_stop_enabled"] and r_price:
+            target = float(record["entry_price"]) - float(r_price)
         if target is None:
             return None
         if float(target) >= float(current_rate):
@@ -4378,7 +4655,6 @@ class LeaderProfitMixin(LeaderMixinContext):
                     current_rate,
                 )
             return None
-        r_price = record.get("r_price")
         min_step = float(self.settings["profit_lock_min_step_r"])
         current_stop = float(trade.stop_loss or 0.0)
         if r_price and min_step > 0 and float(target) < current_stop + min_step * float(r_price):
@@ -4393,6 +4669,15 @@ class LeaderProfitMixin(LeaderMixinContext):
         if not value or not math.isfinite(float(value)):
             return None
         return float(value)
+
+    def _initial_risk_exit(self, pair: str, trade: Trade, current_rate: float) -> bool:
+        """Exit when price already crossed the frozen 1R stop before it could trigger."""
+        if not self.settings["entry_risk_initial_stop_enabled"]:
+            return False
+        record = getattr(self, "_profit_shadow", {}).get(pair)
+        if record is None or record.get("trade_id") != trade.id or not record.get("r_price"):
+            return False
+        return float(current_rate) <= float(record["entry_price"]) - float(record["r_price"])
 
     def _profit_no_progress_exit(self, pair: str, trade: Trade, current_rate: float) -> bool:
         """custom_exit 侧读取影子账本已算好的动量结论, 不重复计算。"""

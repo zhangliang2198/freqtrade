@@ -83,8 +83,20 @@ def test_all_public_settings_validate_and_weights_remain_unchanged():
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("entry_slot_score_thresholds", [40.0] * 10),
-        ("entry_slot_score_thresholds", list(range(9))),
+        ("entry_risk_base_score", -1),
+        ("entry_risk_premium", -1),
+        ("entry_risk_per_trade", 0),
+        ("entry_risk_per_trade", 0.06),
+        ("entry_risk_initial_stop_enabled", "true"),
+        ("entry_risk_correlation_weight", -1),
+        ("entry_risk_correlation_full_weight", 0),
+        ("entry_risk_correlation_unknown", 1.5),
+        ("entry_risk_correlation_window", 4),
+        ("entry_risk_correlation_min_overlap", 96),
+        ("entry_risk_max_gross_ratio", 0),
+        ("entry_risk_max_margin_ratio", 1.5),
+        ("entry_risk_cluster_correlation", 1.5),
+        ("entry_risk_cluster_max_positions", 0),
         ("entry_setup_min_score", 101),
         ("entry_setup_shortlist_ratio", 0),
         ("entry_setup_min_candidates", 0),
@@ -105,6 +117,15 @@ def test_all_public_settings_validate_and_weights_remain_unchanged():
 def test_invalid_entry_pipeline_configuration_is_rejected(key, value):
     strategy = _score_strategy()
     strategy.settings[key] = value
+    with pytest.raises(ValueError):
+        strategy._validate_score_settings()
+
+
+def test_exposure_ceiling_that_cannot_fund_one_position_is_rejected() -> None:
+    """A ceiling below a single equal-sized unit would silently stop all trading."""
+    strategy = _score_strategy()
+    strategy.settings["entry_risk_max_gross_ratio"] = 0.1
+
     with pytest.raises(ValueError):
         strategy._validate_score_settings()
 

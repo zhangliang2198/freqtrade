@@ -27,11 +27,18 @@ from leader_squeeze_helpers import (
     LeaderTrendMixin,
     configure_strategy,
     decision_snapshot,
+    entry_risk_cluster_size,
+    entry_risk_concentration,
+    entry_risk_correlation,
+    entry_risk_exposure_reason,
+    entry_risk_score_floor,
+    entry_risk_stake_amount,
+    entry_risk_utilization,
     logger,
     report_cached,
     validate_runtime_settings,
 )
-from pandas import DataFrame
+from pandas import DataFrame, Timestamp
 
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import timeframe_to_seconds
@@ -51,8 +58,7 @@ class LeaderSqueezeStrategy(
 ):
     INTERFACE_VERSION = 3
     can_short = False
-    # 盈利棘轮需要框架每轮回调本方法; 是否真正改动止损由 profit_lock_enabled 决定,
-    # 关闭时 custom_stoploss 恒返回 None, 行为与未接入前一致。
+    # 初始 1R 风险止损和盈利棘轮都需要框架每轮回调本方法; 两者由独立开关控制。
     use_custom_stoploss = True
 
     def __init__(self, config: dict) -> None:
@@ -111,7 +117,7 @@ class LeaderSqueezeStrategy(
         self._metrics: dict[str, dict[str, float]] = {}
         self._exit_metrics: dict[str, dict[str, float]] = {}
         self._entry_pairs: set[str] = set()
-        self._entry_slot_assignments: dict[str, int] = {}
+        self._entry_risk_floor_assignments: dict[str, float] = {}
         self._entry_setup_snapshot: dict[str, dict[str, Any]] = {}
         self._entry_funnel_rows: list[list[str]] = []
         self._entry_funnel_candidates: list[list[str]] = []
@@ -204,13 +210,21 @@ class LeaderSqueezeStrategy(
         self._last_rotation = float(self._risk_state.get("last_rotation", 0.0))
         self._sync_external_pairs()
         logger.info(
-            "🚀 策略初始化 | 模式=%s | 杠杆=%.1fx 单笔占交易总资金=%.1f%% 最大仓位=%s | "
-            "逐仓评分=%s | 状态日志间隔=%.0fs | 手动仓位框架对账=%s | 主动退出=%s",
+            "🚀 策略初始化 | 模式=%s | 杠杆=%.1fx 单笔风险=%.1f%% "
+            "保证金上限=%.1f%% 最大仓位=%s | "
+            "风险门槛=%.1f+%.1f*风险占用 相关性权重=%.2f | "
+            "敞口上限=%.2fx权益/%.1f%%保证金 | 状态日志间隔=%.0fs | "
+            "手动仓位框架对账=%s | 主动退出=%s",
             "模拟盘" if self.config.get("dry_run", True) else "实盘",
             self.settings["leverage"],
+            100 * float(self.settings["entry_risk_per_trade"]),
             100 * float(self.settings["stake_ratio"]),
             self.settings["max_positions"],
-            "/".join(f"{value:g}" for value in self.settings["entry_slot_score_thresholds"]),
+            float(self.settings["entry_risk_base_score"]),
+            float(self.settings["entry_risk_premium"]),
+            float(self.settings["entry_risk_correlation_weight"]),
+            float(self.settings["entry_risk_max_gross_ratio"]),
+            100 * float(self.settings["entry_risk_max_margin_ratio"]),
             self.settings["status_log_seconds"],
             "开启"
             if self.config.get("manual_position_sync", {}).get("enabled")
@@ -225,9 +239,10 @@ class LeaderSqueezeStrategy(
             extra=LOG_INFO,
         )
         logger.info(
-            "🔒 盈利保护 | 棘轮=%s 峰值达%.2fR武装 跟踪距离=%.2fR "
+            "🔒 风险/盈利保护 | 初始1R止损=%s | 棘轮=%s 峰值达%.2fR武装 跟踪距离=%.2fR "
             "回吐比例=%.0f%% 费用缓冲=%.2f%% 最小改单=%.2fR | 无进展退出=%s "
             "%s根%s未推进%.2fR且窗口内近期走弱/收益低于%.2fR",
+            "开启" if self.settings["entry_risk_initial_stop_enabled"] else "关闭",
             "开启" if self.settings["profit_lock_enabled"] else "关闭",
             self.settings["profit_lock_arm_r"],
             self.settings["profit_lock_trail_r"],
@@ -322,10 +337,34 @@ class LeaderSqueezeStrategy(
         side: str,
         **kwargs,
     ) -> float:
-        """同一交易资金基数按比例分仓, 不随已有仓位占用而逐笔递减。"""
+        """按入场 ATR 止损距离固定单笔账户风险, 并受保证金比例上限约束。
+
+        :param pair: 待开仓交易对。
+        :param current_time: 当前时间。
+        :param current_rate: 预计入场价格。
+        :param proposed_stake: 框架建议的保证金金额。
+        :param min_stake: 交易所允许的最小保证金金额。
+        :param max_stake: 当前允许的最大保证金金额。
+        :param leverage: 框架最终采用的杠杆倍数。
+        :param entry_tag: 入场信号标签。
+        :param side: 交易方向。
+        :param **kwargs: 兼容框架后续增加的回调参数。
+        :return: 风险预算内的保证金金额; 返回零表示跳过开仓。
+        """
         try:
             capital = float(self._wallets.get_total_stake_amount())
-            target = capital * float(self.settings["stake_ratio"])
+            atr = self._profit_entry_atr(pair)
+            risk_price = self._profit_r_price(float(current_rate), atr)
+            if risk_price is None:
+                raise ValueError("entry ATR risk is unavailable")
+            stop_fraction = risk_price / float(current_rate)
+            target = entry_risk_stake_amount(
+                capital=capital,
+                max_stake_ratio=float(self.settings["stake_ratio"]),
+                risk_ratio=float(self.settings["entry_risk_per_trade"]),
+                stop_fraction=stop_fraction,
+                leverage=float(leverage),
+            )
             if (
                 not math.isfinite(target)
                 or target <= 0
@@ -335,7 +374,7 @@ class LeaderSqueezeStrategy(
                 raise ValueError("invalid stake budget")
             if target > max_stake or (min_stake is not None and target < min_stake):
                 logger.warning(
-                    "⛔ 等额分仓 %s | 资金基准=%.2f 目标保证金=%.2f "
+                    "⛔ 风险分仓 %s | 资金基准=%.2f 目标保证金=%.2f "
                     "可下单上限=%.2f 最小保证金=%s | 金额不满足限制, 跳过",
                     pair,
                     capital,
@@ -346,11 +385,14 @@ class LeaderSqueezeStrategy(
                 )
                 return 0.0
             logger.info(
-                "💰 等额分仓 %s | 交易资金基准=%.2f 比例=%.1f%% 保证金=%.2f 杠杆=%.1fx",
+                "💰 风险分仓 %s | 资金基准=%.2f 单笔风险=%.2f%% "
+                "止损距离=%.2f%% 保证金=%.2f (上限%.1f%%) 杠杆=%.1fx",
                 pair,
                 capital,
-                100 * float(self.settings["stake_ratio"]),
+                100 * float(self.settings["entry_risk_per_trade"]),
+                100 * stop_fraction,
                 target,
+                100 * float(self.settings["stake_ratio"]),
                 leverage,
                 extra=LOG_INFO,
             )
@@ -512,17 +554,28 @@ class LeaderSqueezeStrategy(
         after_fill: bool,
         **kwargs,
     ) -> float | None:
-        """盈利棘轮: 峰值达 1R 后保本, 按双重回吐上限单调跟踪。
+        """风险止损与盈利棘轮: 先限制为 1R, 峰值达 1R 后单调跟踪。
 
         回吐额度取 ``profit_lock_trail_r * R`` 与
         ``profit_lock_giveback_frac * (峰值价格 - 入场价格)`` 中的较小值,
         再与费用地板比较, 避免只按固定的峰值减 1.5R 跟踪。
 
-        由 ``leader_squeeze.profit_lock_enabled`` 门控, 关闭时恒返回 None, 框架
-        回退到配置的 ``stoploss``, 行为与未接入前完全一致。返回值为保证金口径, 由
+        初始止损由 ``entry_risk_initial_stop_enabled`` 门控, 盈利棘轮由
+        ``profit_lock_enabled`` 门控。返回值为保证金口径, 由
         ``_profit_lock_stoploss`` 用 ``stoploss_from_absolute`` 统一换算。
+
+        :param pair: 当前交易对。
+        :param trade: 当前持仓。
+        :param current_time: 当前时间。
+        :param current_rate: 当前价格。
+        :param current_profit: 当前保证金收益率。
+        :param after_fill: 是否在订单成交后调用。
+        :param **kwargs: 兼容框架后续增加的回调参数。
+        :return: 相对当前价格的止损比例; 无需调整时返回 ``None``。
         """
-        if not self.settings["profit_lock_enabled"]:
+        if not (
+            self.settings["entry_risk_initial_stop_enabled"] or self.settings["profit_lock_enabled"]
+        ):
             return None
         try:
             result = self._profit_lock_stoploss(pair, trade, current_rate, current_time)
@@ -553,6 +606,8 @@ class LeaderSqueezeStrategy(
         try:
             if self._market_exit_required():
                 reason = "market_emergency"
+            elif self._initial_risk_exit(pair, trade, current_rate):
+                reason = "initial_risk_stop"
             elif self._rotation_exit_allowed(pair):
                 reason = "leader_rotation"
             elif self._trend_reversed(pair):
@@ -589,6 +644,7 @@ class LeaderSqueezeStrategy(
         if reason and logged.get(pair) != log_key:
             descriptions = {
                 "market_emergency": "龙头市场严重普跌",
+                "initial_risk_stop": "价格已穿越入场1R风险止损",
                 "leader_rotation": "龙头轮换",
                 "trend_reversal": "持仓趋势反转 | "
                 + getattr(self, "_trend_exit_details", {}).get(pair, "多周期趋势退出"),
@@ -1031,9 +1087,201 @@ class LeaderSqueezeStrategy(
             reverse=True,
         )
 
-    def _entry_slot_score_floor(self, slot_index: int) -> float:
-        thresholds = self.settings["entry_slot_score_thresholds"]
-        return float(thresholds[min(max(0, slot_index), len(thresholds) - 1)])
+    def _entry_risk_max_score_floor(self) -> float:
+        """Strictest floor the model can charge, i.e. a fully concentrated book."""
+        return entry_risk_score_floor(
+            base_score=float(self.settings["entry_risk_base_score"]),
+            premium=float(self.settings["entry_risk_premium"]),
+            utilization=1.0,
+        )
+
+    def _entry_close_series(self, pair: str) -> dict[Timestamp, float] | None:
+        """Timestamped closed prices used only to measure co-movement."""
+        window = int(self.settings["entry_risk_correlation_window"])
+        frame = self._closed_candles(pair, self.timeframe, window, columns=("date", "close"))
+        if frame is None:
+            return None
+        tail = frame.tail(window)
+        return {
+            Timestamp(date): float(close)
+            for date, close in zip(tail["date"], tail["close"], strict=True)
+        }
+
+    def _entry_risk_correlations(
+        self,
+        pair: str,
+        book: list[str],
+        book_series: dict[str, dict[Timestamp, float]],
+    ) -> list[float]:
+        """Candidate-to-holding correlations; NaN means the overlap was unusable."""
+        if not book:
+            return []
+        candidate = self._entry_close_series(pair)
+        if candidate is None:
+            return [math.nan] * len(book)
+        min_overlap = int(self.settings["entry_risk_correlation_min_overlap"])
+        correlations: list[float] = []
+        for other in book:
+            holding = book_series.get(other, {})
+            overlap = sorted(candidate.keys() & holding.keys())
+            correlations.append(
+                entry_risk_correlation(
+                    [candidate[date] for date in overlap],
+                    [holding[date] for date in overlap],
+                    min_overlap=min_overlap,
+                )
+            )
+        return correlations
+
+    def _entry_risk_floor(
+        self,
+        pair: str,
+        position_count: int,
+        book: list[str],
+        book_series: dict[str, dict[Timestamp, float]],
+    ) -> tuple[float, float, list[float]]:
+        """Score floor, concentration and effective correlations for one entry."""
+        raw_correlations = self._entry_risk_correlations(pair, book, book_series)
+        unknown = float(self.settings["entry_risk_correlation_unknown"])
+        correlations = [value if math.isfinite(value) else unknown for value in raw_correlations]
+        concentration = entry_risk_concentration(
+            correlations,
+            full_weight=float(self.settings["entry_risk_correlation_full_weight"]),
+            unknown=unknown,
+        )
+        utilization = entry_risk_utilization(
+            position_count,
+            int(self.settings["max_positions"]),
+            concentration,
+            correlation_weight=float(self.settings["entry_risk_correlation_weight"]),
+        )
+        floor = entry_risk_score_floor(
+            base_score=float(self.settings["entry_risk_base_score"]),
+            premium=float(self.settings["entry_risk_premium"]),
+            utilization=utilization,
+        )
+        return floor, concentration, correlations
+
+    @staticmethod
+    def _positive_finite(*values: Any) -> float | None:
+        """Return the first positive finite numeric value."""
+        for value in values:
+            try:
+                number = abs(float(value))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number) and number > 0:
+                return number
+        return None
+
+    def _entry_risk_position_exposure(
+        self, position: Any, trade: Trade | None, detail: dict[str, Any]
+    ) -> tuple[float, float] | None:
+        """Resolve one position's margin and notional from the best available source."""
+        margin = self._positive_finite(
+            getattr(position, "collateral", None),
+            getattr(trade, "stake_amount", None),
+        )
+        notional = self._positive_finite(detail.get("notional"))
+        if notional is None and position is not None:
+            mark = self._positive_finite(
+                detail.get("markPrice"),
+                detail.get("entryPrice"),
+                getattr(trade, "open_rate", None),
+            )
+            amount = self._positive_finite(getattr(position, "position", None))
+            if mark is not None and amount is not None:
+                notional = amount * mark
+        if notional is None and trade is not None:
+            amount = self._positive_finite(getattr(trade, "amount", None))
+            rate = self._positive_finite(detail.get("markPrice"), getattr(trade, "open_rate", None))
+            if amount is not None and rate is not None:
+                notional = amount * rate
+        leverage = self._positive_finite(
+            getattr(trade, "leverage", None), getattr(position, "leverage", None)
+        )
+        if notional is None and margin is not None and leverage is not None:
+            notional = margin * leverage
+        if margin is None and notional is not None and leverage is not None:
+            margin = notional / leverage
+        return (margin, notional) if margin is not None and notional is not None else None
+
+    def _entry_risk_open_exposure(self, occupied: set[str]) -> tuple[float, float, float] | None:
+        """Return capital, actual open margin and actual open notional.
+
+        Exchange wallet/position data is preferred because it also covers manual
+        positions. Framework trades provide the dry-run and temporary-sync
+        fallback. If a real position cannot be valued, entry fails closed.
+        """
+        if not occupied:
+            # Ratios for a candidate-only book reduce to the configured pending
+            # allocation, so no wallet read is needed at this stage.
+            return 1.0, 0.0, 0.0
+        wallets = getattr(self, "wallets", None)
+        if wallets is None:
+            logger.error("🚨 钱包状态不可用, 拒绝新开仓", extra=LOG_ERROR)
+            return None
+        try:
+            capital = float(wallets.get_total_stake_amount())
+            positions = wallets.get_all_positions()
+            positions = positions if isinstance(positions, dict) else {}
+            trades = {trade.pair: trade for trade in Trade.get_open_trades()}
+        except Exception:
+            logger.exception("🚨 持仓敞口读取失败, 拒绝新开仓", extra=LOG_ERROR)
+            return None
+        if not math.isfinite(capital) or capital <= 0:
+            return None
+        margin_total = 0.0
+        gross_total = 0.0
+        details = getattr(self, "_position_details", {})
+        for pair in occupied:
+            position = positions.get(pair)
+            trade = trades.get(pair)
+            raw_detail = details.get(pair, {}) if isinstance(details, dict) else {}
+            detail = raw_detail if isinstance(raw_detail, dict) else {}
+            resolved = self._entry_risk_position_exposure(position, trade, detail)
+            if resolved is None:
+                logger.error("🚨 持仓敞口无法确认 %s, 拒绝新开仓", pair, extra=LOG_ERROR)
+                return None
+            margin, notional = resolved
+            margin_total += margin
+            gross_total += notional
+        return capital, margin_total, gross_total
+
+    def _entry_risk_cap_reason(
+        self,
+        exposure: tuple[float, float, float] | None,
+        pending_count: int,
+        correlations: list[float],
+    ) -> str:
+        """Hard ceilings that no score can override, checked before the soft floor."""
+        if exposure is None:
+            return "持仓敞口无法可靠计算"
+        capital, open_margin, open_gross = exposure
+        # A pending order may receive up to the configured per-position margin
+        # cap. Reserving that maximum keeps simultaneous selections conservative.
+        unit_margin = capital * float(self.settings["stake_ratio"])
+        pending_margin = pending_count * unit_margin
+        pending_gross = pending_margin * float(self.settings["leverage"])
+        reason = entry_risk_exposure_reason(
+            capital=capital,
+            open_margin=open_margin,
+            open_gross=open_gross,
+            pending_margin=pending_margin,
+            pending_gross=pending_gross,
+            max_gross_ratio=float(self.settings["entry_risk_max_gross_ratio"]),
+            max_margin_ratio=float(self.settings["entry_risk_max_margin_ratio"]),
+        )
+        if reason:
+            return reason
+        size = entry_risk_cluster_size(
+            correlations,
+            threshold=float(self.settings["entry_risk_cluster_correlation"]),
+        )
+        limit = int(self.settings["entry_risk_cluster_max_positions"])
+        if size > limit:
+            return f"相关簇 {size} > 上限 {limit}"
+        return ""
 
     @staticmethod
     def _funnel_reason_summary(reasons: list[str], limit: int = 3) -> str:
@@ -1125,7 +1373,7 @@ class LeaderSqueezeStrategy(
         self,
         shortlisted: list[tuple[str, float, dict[str, float | str]]],
         *,
-        occupied_count: int,
+        occupied: set[str],
         capacity: int,
         rotation_target: str | None,
     ) -> set[str]:
@@ -1133,22 +1381,33 @@ class LeaderSqueezeStrategy(
         selected: list[str] = []
         score_passed = 0
         score_failed = 0
+        risk_failed = 0
         capacity_skipped = 0
         execution_reasons: list[str] = []
-        limit = int(self.settings["max_positions"])
+        book_series = {pair: self._entry_close_series(pair) or {} for pair in occupied}
+        exposure = self._entry_risk_open_exposure(occupied)
         for pair, score, setup in ranked:
             if len(selected) >= capacity:
                 self._entry_decisions[pair] = "本轮剩余名额已用完"
                 capacity_skipped += 1
                 continue
-            slot_index = min(occupied_count + len(selected), limit - 1)
-            score_floor = self._entry_slot_score_floor(slot_index)
+            position_count = len(occupied) + len(selected) + 1
+            book = sorted(occupied | set(selected))
+            score_floor, concentration, correlations = self._entry_risk_floor(
+                pair, position_count, book, book_series
+            )
             if pair == rotation_target:
                 channel = (getattr(self, "_rotation_state", None) or {}).get("channel", "normal")
                 score_floor = self._rotation_floor(channel)
+            cap_reason = self._entry_risk_cap_reason(exposure, len(selected) + 1, correlations)
+            if cap_reason:
+                self._entry_decisions[pair] = cap_reason
+                risk_failed += 1
+                continue
             if not math.isfinite(score) or score < score_floor:
                 self._entry_decisions[pair] = (
-                    f"强度评分 {score:.1f} < 第{slot_index + 1}仓门槛 {score_floor:.1f}"
+                    f"强度评分 {score:.1f} < 风险门槛 {score_floor:.1f} "
+                    f"(第{position_count}仓, 相关性{concentration:.2f})"
                 )
                 score_failed += 1
                 continue
@@ -1161,30 +1420,38 @@ class LeaderSqueezeStrategy(
                 execution_reasons.append(reason)
                 continue
             selected.append(pair)
-            self._entry_slot_assignments[pair] = slot_index
+            self._entry_risk_floor_assignments[pair] = score_floor
+            # Later candidates in this same round are measured against this one too.
+            book_series.setdefault(pair, self._entry_close_series(pair) or {})
             setup_enabled = self.settings["entry_setup_enabled"]
             setup_label = f"形态{float(setup['score']):.1f}" if setup_enabled else "形态关闭"
             self._entry_decisions[pair] = (
-                f"入选第{slot_index + 1}仓: {setup_label} 强度{score:.1f}>={score_floor:.1f}"
+                f"入选第{position_count}仓: {setup_label} 强度{score:.1f}>={score_floor:.1f} "
+                f"相关性{concentration:.2f}"
             )
             self._entry_funnel_candidates.append(
                 [
                     pair,
-                    str(slot_index + 1),
+                    str(position_count),
                     str(setup["stage"]) if setup_enabled else "关闭",
                     f"{float(setup['score']):.1f}" if setup_enabled else "—",
                     f"{score:.1f}",
                     f"{score_floor:.1f}",
+                    f"{concentration:.2f}",
                 ]
             )
         self._entry_funnel_rows.extend(
             [
                 [
-                    "4 强度/逐仓门槛",
-                    str(score_passed + score_failed),
+                    "4 风险门槛/上限",
+                    str(score_passed + score_failed + risk_failed),
                     str(score_passed),
-                    str(score_failed),
-                    f"{limit}级门槛逐仓递增",
+                    str(score_failed + risk_failed),
+                    (
+                        f"门槛={float(self.settings['entry_risk_base_score']):.0f}+"
+                        f"{float(self.settings['entry_risk_premium']):.0f}*风险占用, "
+                        f"硬上限淘汰{risk_failed}"
+                    ),
                 ],
                 [
                     "5 交易资格/盘口",
@@ -1206,7 +1473,7 @@ class LeaderSqueezeStrategy(
 
     def _select_entries(self) -> set[str]:
         self._entry_decisions = {}
-        self._entry_slot_assignments = {}
+        self._entry_risk_floor_assignments = {}
         self._entry_setup_snapshot = {}
         self._entry_funnel_rows = []
         self._entry_funnel_candidates = []
@@ -1237,7 +1504,7 @@ class LeaderSqueezeStrategy(
         shortlisted = self._entry_setup_shortlist(ranked, rotation_target)
         return self._select_strength_entries(
             shortlisted,
-            occupied_count=len(occupied),
+            occupied=occupied,
             capacity=capacity,
             rotation_target=rotation_target,
         )
@@ -1249,11 +1516,15 @@ class LeaderSqueezeStrategy(
             rotation = pair == getattr(self, "_rotation_target", None)
             if rotation and self._rotation_pair is None:
                 return "轮换旧仓缺失"
-            assigned = getattr(self, "_entry_slot_assignments", {}).get(pair, len(occupied))
-            floor = self._entry_slot_score_floor(max(len(occupied), assigned))
+            assigned = getattr(self, "_entry_risk_floor_assignments", {}).get(pair)
+            live_floor, cap_reason = self._recheck_entry_risk_floor(pair, occupied, assigned)
+            if cap_reason:
+                return cap_reason
             if rotation:
                 channel = (getattr(self, "_rotation_state", None) or {}).get("channel", "normal")
                 floor = self._rotation_floor(channel)
+            else:
+                floor = live_floor
             reason = self._entry_quality_reason(pair, floor)
             if reason:
                 return reason
@@ -1277,6 +1548,24 @@ class LeaderSqueezeStrategy(
         except Exception as exc:
             logger.warning("⚠️ 开仓质量/仓位复核异常 %s: %s", pair, exc, extra=LOG_WARN)
             return f"开仓质量/仓位复核异常 ({type(exc).__name__})"
+
+    def _recheck_entry_risk_floor(
+        self, pair: str, occupied: set[str], assigned: float | None
+    ) -> tuple[float, str]:
+        """Re-derive the floor against the live book and return any breached ceiling.
+
+        The stricter of the selection-time floor and the floor implied by the
+        book as it stands right now wins, so a fill that arrives after the book
+        grew (or grew more correlated) is re-priced rather than grandfathered.
+        """
+        book = sorted(occupied)
+        book_series = {other: self._entry_close_series(other) or {} for other in book}
+        position_count = len(occupied) + 1
+        floor, _, correlations = self._entry_risk_floor(pair, position_count, book, book_series)
+        if assigned is not None:
+            floor = max(floor, float(assigned))
+        exposure = self._entry_risk_open_exposure(occupied)
+        return floor, self._entry_risk_cap_reason(exposure, 1, correlations)
 
     def _entry_quality_reason(self, pair: str, score_floor: float) -> str:
         """选币、轮换和下单复核共用质量门槛, 全局风控仍独立硬拦截。"""
@@ -2220,7 +2509,7 @@ class LeaderSqueezeStrategy(
     def _rotation_floor(self, channel: str) -> float:
         prefix = "replacement_fast_" if channel == "fast" else "replacement_"
         return max(
-            self._entry_slot_score_floor(int(self.settings["max_positions"]) - 1),
+            self._entry_risk_max_score_floor(),
             self.settings[prefix + "entry_score"],
         )
 

@@ -177,6 +177,13 @@ def _entry_ready_strategy(
     strategy._market_data_healthy = True
     strategy._market_down = False
     strategy._entry_pairs = {"BTC/USDT:USDT"}
+    strategy.wallets = SimpleNamespace(
+        get_total_stake_amount=lambda: 1_000.0,
+        get_all_positions=lambda: {
+            trade.pair: SimpleNamespace(collateral=80.0, position=0.0, leverage=5.0)
+            for trade in MODULE.Trade.get_open_trades()
+        },
+    )
     return strategy
 
 
@@ -1121,13 +1128,13 @@ def test_select_entries_records_each_pair_decision_without_changing_selection() 
         "NO_TREND": "上涨条件不足: 1h涨幅=0.00%, 上涨连续性=0%",
         "UNSAFE": "盘口安全检查未通过",
         "LOW": "本轮剩余名额已用完",
-        "GOOD": "入选第2仓: 形态关闭 强度90.0>=41.0",
+        "GOOD": "入选第2仓: 形态关闭 强度90.0>=54.0 相关性1.00",
         "EXTRA": "本轮剩余名额已用完",
     }
     strategy._scores = {"LOW": 39.0}
     with patch.object(MODULE.Trade, "get_open_trades", return_value=[SimpleNamespace(pair="HELD")]):
         assert strategy._select_entries() == set()
-    assert strategy._entry_decisions["LOW"] == "强度评分 39.0 < 第2仓门槛 41.0"
+    assert strategy._entry_decisions["LOW"] == "强度评分 39.0 < 风险门槛 54.0 (第2仓, 相关性1.00)"
 
 
 def test_status_logging_reads_cached_holding_state_without_network_or_decision_changes(
@@ -1424,27 +1431,27 @@ def test_market_emergency_exits_an_existing_trade() -> None:
     )
 
 
-def test_progressive_slot_floors_accept_only_candidates_for_their_next_slot() -> None:
+@pytest.mark.parametrize(
+    ("held_count", "floor"),
+    [(0, 40.0), (1, 40 + 14 / 9), (2, 40 + 14 * 2 / 9), (9, 54.0)],
+)
+def test_entry_floor_rises_with_the_open_position_count(held_count: int, floor: float) -> None:
+    """Without usable correlation data the book is charged as fully concentrated.
+
+    The floor is derived from the share of the risk budget the entry would use,
+    so it rises with the open position count instead of stepping through a
+    hand-written per-slot table.
+    """
     now = time.time()
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.settings = configured_settings()
     strategy.settings["entry_heat_max_penalty"] = 0
     strategy.settings["entry_setup_enabled"] = False
+    strategy.settings["entry_risk_cluster_max_positions"] = 10
     strategy._entry_pair_available = Mock(return_value=True)
     strategy._candle_metrics = Mock(side_effect=lambda pair: strategy._metrics[pair])
     strategy._trend_reversed = Mock(return_value=False)
     strategy._higher_entry_reason = Mock(return_value="")
-    strategy._scores = {
-        "DOWN": 110.0,
-        "FADING": 105.0,
-        "A": 90.0,
-        "B": 60.0,
-        "C": 41.99,
-    }
-    strategy._metrics = {pair: _fresh_score_metric() for pair in strategy._scores}
-    strategy._score_leaders = list(strategy._scores)
-    strategy._metrics["DOWN"]["momentum"] = -0.01
-    strategy._metrics["FADING"]["trend_continuity"] = 1 / 3
     strategy._external_pairs = set()
     strategy._data_healthy = True
     strategy._last_good_data = now
@@ -1457,16 +1464,26 @@ def test_progressive_slot_floors_accept_only_candidates_for_their_next_slot() ->
     strategy._position_data_healthy = True
     strategy._last_position_sync = now
     strategy._execution_is_safe = lambda pair: True
+    strategy.wallets = SimpleNamespace(
+        get_total_stake_amount=lambda: 1_000.0,
+        get_all_positions=lambda: {
+            trade.pair: SimpleNamespace(collateral=80.0, position=0.0, leverage=5.0)
+            for trade in MODULE.Trade.get_open_trades()
+        },
+    )
+    held = [SimpleNamespace(pair=f"HELD-{index}") for index in range(held_count)]
 
-    with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
-        assert strategy._select_entries() == {"A", "B"}
-        strategy._scores["C"] = 42.0
-        assert strategy._select_entries() == {"A", "B", "C"}
+    def select(score: float) -> set[str]:
+        strategy._scores = {"CAND": score}
+        strategy._metrics = {"CAND": _fresh_score_metric()}
+        strategy._score_leaders = ["CAND"]
+        with patch.object(MODULE.Trade, "get_open_trades", return_value=held):
+            return strategy._select_entries()
 
-        strategy._scores = {"LOW": 39.0}
-        strategy._metrics = {"LOW": _fresh_score_metric()}
-        strategy._score_leaders = ["LOW"]
-        assert strategy._select_entries() == set()
+    assert select(floor) == {"CAND"}
+    assert strategy._entry_risk_floor_assignments["CAND"] == pytest.approx(floor)
+    assert select(floor - 0.01) == set()
+    assert "风险门槛" in strategy._entry_decisions["CAND"]
 
 
 def test_liquidation_worker_accepts_only_usdm_buy_and_uses_filled_quantity() -> None:
@@ -1841,6 +1858,13 @@ def test_rotation_target_requires_the_strictest_slot_score() -> None:
     strategy._position_data_healthy = True
     strategy._last_position_sync = now
     strategy._execution_is_safe = lambda pair: True
+    strategy.wallets = SimpleNamespace(
+        get_total_stake_amount=lambda: 1_000.0,
+        get_all_positions=lambda: {
+            trade.pair: SimpleNamespace(collateral=80.0, position=0.0, leverage=5.0)
+            for trade in MODULE.Trade.get_open_trades()
+        },
+    )
     open_trades = [SimpleNamespace(pair=f"HELD-{index}") for index in range(4)]
 
     with patch.object(MODULE.Trade, "get_open_trades", return_value=open_trades):

@@ -13,12 +13,13 @@ from tests.strategy.test_leader_squeeze_strategy import LeaderSqueezeStrategy
 
 
 def stake(strategy, maximum=990, minimum=5):
+    strategy._profit_entry_atr = Mock(return_value=2.0)
     return strategy.custom_stake_amount(
         "BTC/USDT:USDT", datetime.now(UTC), 100, 165, minimum, maximum, 5, None, "long"
     )
 
 
-def test_ten_entries_and_rotation_use_equal_total_capital_budget():
+def test_ten_entries_and_rotation_use_the_same_fixed_risk_budget():
     strategy = configured_strategy(LeaderSqueezeStrategy)
     wallets = Wallets.__new__(Wallets)
     wallets._config = {"tradable_balance_ratio": 0.99}
@@ -30,10 +31,12 @@ def test_ten_entries_and_rotation_use_equal_total_capital_budget():
         wallets.get_free = Mock(return_value=1000 - tied)
         with patch.object(Trade, "total_open_trades_stakes", return_value=tied):
             values.append(stake(strategy, maximum=990 - tied))
-    assert values == [pytest.approx(79.2)] * 11
+    # ATR risk is 1.5 * 2 = 3% of price. At 5x leverage, 66 margin risks 9.9,
+    # i.e. 1% of the 990 trading-capital base.
+    assert values == [pytest.approx(66.0)] * 11
 
 
-@pytest.mark.parametrize("maximum,minimum", [(79, 5), (990, 80), (0, 5), (float("nan"), 5)])
+@pytest.mark.parametrize("maximum,minimum", [(65, 5), (990, 67), (0, 5), (float("nan"), 5)])
 def test_invalid_or_insufficient_budget_skips_instead_of_small_or_oversized_entry(maximum, minimum):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.wallets = SimpleNamespace(get_total_stake_amount=lambda: 990)
@@ -46,6 +49,29 @@ def test_wallet_error_prevents_framework_fallback_to_proposed_stake():
         get_total_stake_amount=Mock(side_effect=RuntimeError("offline"))
     )
     assert stake(strategy) == 0
+
+
+def test_low_volatility_size_is_capped_by_the_margin_ratio():
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+    strategy.wallets = SimpleNamespace(get_total_stake_amount=lambda: 990)
+    strategy._profit_entry_atr = Mock(return_value=0.01)
+
+    assert strategy.custom_stake_amount(
+        "BTC/USDT:USDT", datetime.now(UTC), 100, 165, 5, 990, 5, None, "long"
+    ) == pytest.approx(79.2)
+
+
+def test_missing_entry_volatility_blocks_the_order():
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+    strategy.wallets = SimpleNamespace(get_total_stake_amount=lambda: 990)
+    strategy._profit_entry_atr = Mock(return_value=None)
+
+    assert (
+        strategy.custom_stake_amount(
+            "BTC/USDT:USDT", datetime.now(UTC), 100, 165, 5, 990, 5, None, "long"
+        )
+        == 0
+    )
 
 
 @pytest.mark.parametrize("ratio", [0, -0.1, float("nan"), True, 0.2])

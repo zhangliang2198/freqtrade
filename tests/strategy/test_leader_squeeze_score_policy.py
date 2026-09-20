@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import importlib
 import time
 from datetime import timedelta
 from types import SimpleNamespace
@@ -22,6 +23,9 @@ from tests.strategy.test_leader_squeeze_strategy import (
     _entry_ready_strategy,
     _eth_frame,
 )
+
+
+MODULE_ENTRY_RISK = importlib.import_module("leader_squeeze_helpers")
 
 
 PAIR = "PAIR/USDT:USDT"
@@ -161,7 +165,7 @@ def test_oi_squeeze_requires_positive_price_momentum() -> None:
     no_oi_score = _apply(strategy, {PAIR: _metric(momentum=0.0, oi_change=0.0)})[PAIR]
 
     assert weak_score == pytest.approx(no_oi_score)
-    assert weak_score < float(strategy.settings["entry_slot_score_thresholds"][0])
+    assert weak_score < float(strategy.settings["entry_risk_base_score"])
 
 
 def test_missing_funding_data_defaults_to_zero_and_does_not_block_entry() -> None:
@@ -182,6 +186,7 @@ def _entry_strategy(scores: dict[str, float]) -> LeaderSqueezeStrategy:
     strategy._entry_pair_available = Mock(return_value=True)
     strategy._execution_is_safe = Mock(return_value=True)
     strategy.settings["max_positions"] = 10
+    strategy.settings["entry_risk_cluster_max_positions"] = 11
     return strategy
 
 
@@ -200,22 +205,32 @@ def test_low_intensity_hard_gates_reject_even_a_100_point_candidate(override) ->
         assert strategy._select_entries() == set()
 
 
-@pytest.mark.parametrize("slot_index", range(10))
-def test_each_position_uses_its_configured_incremental_strength_floor(slot_index: int) -> None:
-    thresholds = configured_settings()["entry_slot_score_thresholds"]
-    floor = float(thresholds[slot_index])
-    pair = f"SLOT-{slot_index}"
-    held = [SimpleNamespace(pair=f"HELD-{index}") for index in range(slot_index)]
+@pytest.mark.parametrize("held_count", range(10))
+def test_each_position_uses_its_risk_budget_floor(held_count: int) -> None:
+    """With correlation data unavailable the book is charged as concentrated."""
+    settings = configured_settings()
+    floor = MODULE_ENTRY_RISK.entry_risk_score_floor(
+        base_score=float(settings["entry_risk_base_score"]),
+        premium=float(settings["entry_risk_premium"]),
+        utilization=MODULE_ENTRY_RISK.entry_risk_utilization(
+            held_count + 1,
+            int(settings["max_positions"]),
+            float(settings["entry_risk_correlation_unknown"]),
+            correlation_weight=float(settings["entry_risk_correlation_weight"]),
+        ),
+    )
+    pair = f"SLOT-{held_count}"
+    held = [SimpleNamespace(pair=f"HELD-{index}") for index in range(held_count)]
     strategy = _entry_strategy({pair: floor})
 
     with patch.object(MODULE.Trade, "get_open_trades", return_value=held):
         assert strategy._select_entries() == {pair}
-        assert strategy._entry_slot_assignments[pair] == slot_index
+        assert strategy._entry_risk_floor_assignments[pair] == pytest.approx(floor)
 
     strategy = _entry_strategy({pair: floor - 0.01})
     with patch.object(MODULE.Trade, "get_open_trades", return_value=held):
         assert strategy._select_entries() == set()
-    assert f"第{slot_index + 1}仓门槛" in strategy._entry_decisions[pair]
+    assert "风险门槛" in strategy._entry_decisions[pair]
 
 
 def _rotation_strategy(weak_score: float, target_score: float) -> LeaderSqueezeStrategy:
@@ -243,11 +258,12 @@ def _rotation_strategy(weak_score: float, target_score: float) -> LeaderSqueezeS
 
 @pytest.mark.parametrize(
     ("weak_score", "target_score", "qualifies"),
-    [(40.0, 49.0, False), (41.0, 50.0, False), (40.0, 50.0, True)],
+    [(40.0, 53.9, False), (44.0, 53.99, False), (44.0, 54.0, True)],
 )
-def test_rotation_target_uses_50_floor_and_10_point_score_gap(
+def test_rotation_target_uses_the_strictest_risk_floor_and_a_10_point_gap(
     weak_score: float, target_score: float, qualifies: bool
 ) -> None:
+    """Rotation is the most demanding entry, so it clears the fully-concentrated floor."""
     strategy = _rotation_strategy(weak_score, target_score)
     current_time = ETH_TEST_NOW
     weak_trade = SimpleNamespace(
@@ -383,7 +399,14 @@ def test_public_config_matches_strategy_policy_and_keeps_margin_and_risk_limits(
     strategy.settings = {**configured_settings(), **config["leader_squeeze"]}
     strategy._validate_score_settings()
     for key in (
-        "entry_slot_score_thresholds",
+        "entry_risk_base_score",
+        "entry_risk_premium",
+        "entry_risk_per_trade",
+        "entry_risk_initial_stop_enabled",
+        "entry_risk_correlation_weight",
+        "entry_risk_max_gross_ratio",
+        "entry_risk_max_margin_ratio",
+        "entry_risk_cluster_max_positions",
         "entry_setup_min_score",
         "min_trend_continuity",
         "momentum_full_score",

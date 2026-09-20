@@ -568,6 +568,7 @@ def test_non_finite_profit_ratio_is_rejected(tmp_path, outcome):
 def test_shadow_ledger_is_read_only_when_both_gates_are_off(tmp_path):
     strategy, trade = _armed_strategy(
         tmp_path,
+        entry_risk_initial_stop_enabled=False,
         profit_lock_enabled=False,
         profit_no_progress_enabled=False,
     )
@@ -591,11 +592,29 @@ def test_custom_stoploss_hook_is_enabled_on_the_strategy_class():
 # ------------------------------------------------------------------ 保本棘轮
 
 
-def test_custom_stoploss_returns_none_before_one_r(tmp_path):
+def test_custom_stoploss_places_the_initial_one_r_stop_before_profit_lock_arms(tmp_path):
     strategy = _strategy(_frame([FLAT] * 40), tmp_path, profit_lock_enabled=True)
     _update(strategy, [_Trade()])
-    assert strategy._profit_shadow[PAIR]["shadow_lock_stop_price"] is None
-    assert strategy.custom_stoploss(PAIR, _Trade(), NOW, 100.2, 0.01, False) is None
+    record = strategy._profit_shadow[PAIR]
+    assert record["shadow_lock_stop_price"] is None
+
+    value = strategy.custom_stoploss(PAIR, _Trade(), NOW, 100.2, 0.01, False)
+
+    assert value is not None
+    stop = 100.2 * (1 - abs(value) / LEVERAGE)
+    assert stop == pytest.approx(ENTRY - record["r_price"])
+
+
+def test_custom_exit_closes_a_gap_through_the_initial_risk_stop(tmp_path):
+    strategy = _strategy(_frame([FLAT] * 40), tmp_path)
+    trade = _Trade()
+    _ratchet_record(strategy, trade, r_price=2.0)
+    strategy._market_exit_required = Mock(return_value=False)
+    strategy._rotation_exit_allowed = Mock(return_value=False)
+    strategy._trend_reversed = Mock(return_value=False)
+    strategy._profit_no_progress_exit = Mock(return_value=False)
+
+    assert strategy.custom_exit(PAIR, trade, NOW, 97.9, -0.105) == "initial_risk_stop"
 
 
 def test_custom_stoploss_arms_from_persisted_peak_below_current_one_r(tmp_path):
@@ -1034,6 +1053,8 @@ def test_production_config_enables_profit_protection(tmp_path):
     """生产配置开启影子账本及两道盈利保护执行闸门。"""
     settings = configured_settings()
     assert PUBLIC_CONFIG["order_types"]["stoploss_on_exchange_interval"] == 30
+    assert settings["entry_risk_initial_stop_enabled"] is True
+    assert settings["entry_risk_per_trade"] == pytest.approx(0.01)
     assert settings["profit_shadow_enabled"] is True
     assert settings["profit_lock_enabled"] is True
     assert settings["profit_no_progress_enabled"] is True

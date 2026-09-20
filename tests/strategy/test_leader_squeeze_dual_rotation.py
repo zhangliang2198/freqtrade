@@ -50,6 +50,7 @@ def _rotation_strategy(
 
     strategy = _entry_ready_strategy(NOW.timestamp())
     strategy.settings["max_positions"] = held_count
+    strategy.settings["entry_risk_cluster_max_positions"] = held_count + 1
     strategy.settings.update(
         {
             "replacement_entry_score": 50.0,

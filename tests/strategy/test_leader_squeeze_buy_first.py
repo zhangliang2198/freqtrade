@@ -110,6 +110,13 @@ def _confirm_ready_strategy(state: dict) -> LeaderSqueezeStrategy:
     strategy.dp = SimpleNamespace(
         _exchange=SimpleNamespace(amount_to_contract_precision=lambda pair, amount: amount)
     )
+    strategy.wallets = SimpleNamespace(
+        get_total_stake_amount=lambda: 1_000.0,
+        get_all_positions=lambda: {
+            trade.pair: SimpleNamespace(collateral=80.0, position=0.0, leverage=5.0)
+            for trade in MODULE.Trade.get_open_trades()
+        },
+    )
     return strategy
 
 

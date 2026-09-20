@@ -24,10 +24,13 @@
 1. 硬条件：数据时效、趋势、流动性、交易资格、市场状态和末端过热检查；任何一项失败都淘汰。
 2. 形态阶段：形态评分至少 `entry_setup_min_score=50`；任一候选偏离 EMA 达 `entry_setup_late_extension_atr=5.0 ATR` 时直接淘汰。最近 `entry_setup_launch_candles=2` 根 15m 属于新鲜启动窗口，整理后突破使用 `entry_heat_cooled_breakout_factor=0.25` 降低热度惩罚。
 3. 形态短名单：按形态评分保留前 `entry_setup_shortlist_ratio=0.40`，但至少保留 `entry_setup_min_candidates=10` 个有效候选（不足时保留全部）。
-4. 强度排名：短名单按热度折扣后的买入评分排序，依次应用第 1 至第 10 仓门槛 `[40, 41, 42, 43, 44, 45, 47, 49, 51, 54]`。
-5. 最终复核：发出信号、取得盘口和实际下单前再次检查硬条件、形态阶段、排名、仓位槽位、强度门槛和交易资格。
+4. 强度排名：短名单按热度折扣后的买入评分排序，逐个计算风险预算门槛 `entry_risk_base_score + entry_risk_premium × 风险占用`。先令仓位利用率 `slot=(仓位数-1)/(max_positions-1)`，再按 `风险占用 = slot × (1 + entry_risk_correlation_weight × 相关性浓度) / (1 + entry_risk_correlation_weight)` 计算并截断到 [0,1]。相关性浓度 = 候选与现有持仓最近 `entry_risk_correlation_window=96` 根 15m 收益的平均相关系数 ÷ `entry_risk_correlation_full_weight=0.75`（截断到 [0,1]）。重叠不足 `entry_risk_correlation_min_overlap=48` 时取 `entry_risk_correlation_unknown=1.0`，即按完全同向保守处理。
+5. 硬上限：总名义敞口超过 `entry_risk_max_gross_ratio=4.4`、总保证金占用超过 `entry_risk_max_margin_ratio=0.88`，或候选与现有持仓相关性达到 `entry_risk_cluster_correlation=0.85` 的簇超过 `entry_risk_cluster_max_positions=5` 个时直接淘汰，强度分不能越过。已有仓位优先使用交易所钱包的实际保证金与名义价值，框架交易作为模拟盘及同步间隙的回退；同轮待开候选按每仓最大保证金和配置杠杆预留，无法可靠估值时拒绝新开仓。
+6. 最终复核：发出信号、取得盘口和实际下单前再次检查硬条件、形态阶段、排名、仓位槽位、按实时仓位重算的风险门槛、硬上限和交易资格；选择时与复核时取更严的门槛。
 
-常规最多 10 个仓位；先买后卖轮换最多临时使用第 11 个仓位。轮换普通目标的有效最低门槛取第 10 仓强度门槛 54 与原始 `replacement_entry_score=50` 的较大值，即 54；快速轮换仍使用 60。该漏斗保留能够通过筛选的候选，任何一层都不会因候选数量不足而降低硬条件或形态最低分。
+当前配置下第 1 仓门槛 40.0；满仓且完全同向时收满 54.0；满仓但彼此独立时约为 49.3，因为分散化本身就是风险下降。常规最多 10 个仓位；先买后卖轮换最多临时使用第 11 个仓位。所有仓位均不超过 8% 保证金和 5 倍杠杆时，两个敞口上限可容纳 11 个仓位；实际旧仓或手动仓更大时会更早拦截。轮换普通目标的有效最低门槛取模型最严门槛 54 与原始 `replacement_entry_score=50` 的较大值，即 54；快速轮换仍使用 60。该漏斗保留能够通过筛选的候选，任何一层都不会因候选数量不足而降低硬条件或形态最低分。
+
+仓位金额不再固定使用 8% 保证金，而是先把单笔计划损失限制为可交易资金的 `entry_risk_per_trade=1%`：以入场时冻结的 `1.5 × ATR1h` 作为 1R，并夹在价格的 0.8% 到 12%，再用 `保证金 = 资金 × 1% ÷ (1R价格比例 × 实际杠杆)` 反推仓位。`stake_ratio=8%` 只作为单仓保证金上限。成交后同一个 1R 同时成为初始保护止损，因此“风险预算”与真实退出边界采用同一口径；跳空、滑点、费用和止损建单失败仍可能使实际损失超过计划值。
 
 候选池由 `PercentChangePairList.number_assets=50` 控制；前置池最多取 200 个、要求 24 小时 USDT 成交额超过 2000 万，再执行黑名单、上市时间和价差过滤，尽量保留 50 个最终候选。符合条件不足时实际候选可少于 50。榜外持仓不参与候选覆盖率和市场普跌分母，只保留评分用于持仓监控与轮换。市场覆盖按实际候选数量计算：50 个候选时，普通市场覆盖 80% 为 40 个，严重普跌 60% 为 30 个。
 
@@ -89,7 +92,19 @@
 
 | 配置键 | 当前值 | 作用 |
 |---|---:|---|
-| entry_slot_score_thresholds | `[40,41,42,43,44,45,47,49,51,54]` | 第 1 至第 10 仓依次使用的强度评分门槛 |
+| entry_risk_base_score | 40.0 | 第 1 仓（无风险占用）使用的强度评分门槛 |
+| entry_risk_premium | 14.0 | 风险占用达到满值时追加的分数；与 base 相加为模型最严门槛 54 |
+| entry_risk_per_trade | 0.01 | 单仓初始止损对应的账户计划风险；当前为可交易资金的 1% |
+| entry_risk_initial_stop_enabled | true | 成交后使用冻结的 1R 价格距离建立初始保护止损 |
+| entry_risk_correlation_weight | 0.5 | 相关性对风险占用的放大权重；0 表示只看仓位数 |
+| entry_risk_correlation_window | 96 | 计算相关性的 15m 收益根数（约 24 小时） |
+| entry_risk_correlation_min_overlap | 48 | 相关系数所需的最少重叠根数，不足则视为不可用 |
+| entry_risk_correlation_full_weight | 0.75 | 平均相关性达到此值即计为完全同向（浓度 1.0） |
+| entry_risk_correlation_unknown | 1.0 | 相关性不可用时的浓度取值；1.0 为保守（按完全同向） |
+| entry_risk_max_gross_ratio | 4.4 | 硬上限：总名义敞口 / 权益；每仓不超过 8% 和 5x 时可容纳 11 个仓位 |
+| entry_risk_max_margin_ratio | 0.88 | 硬上限：总保证金 / 权益；每仓不超过 8% 时可容纳 11 个仓位 |
+| entry_risk_cluster_correlation | 0.85 | 判定“同一笔交易”的相关系数阈值 |
+| entry_risk_cluster_max_positions | 5 | 硬上限：单个高相关簇允许的最大仓位数 |
 | entry_setup_min_score | 50.0 | 形态阶段的最低评分 |
 | entry_setup_enabled | true | 是否启用形态筛选和末端追高硬闸门；与热度折扣开关独立 |
 | entry_setup_score_points | 启动35/中继20/偏离30/整理20/距离15 | 形态评分各组成项的分值 |
@@ -135,7 +150,7 @@
 
 | 配置键 | 当前值 | 作用 |
 |---|---:|---|
-| replacement_entry_score | 50.0 | 普通轮换原始目标门槛；实际与第 10 仓强度门槛取较大值，为 54 |
+| replacement_entry_score | 50.0 | 普通轮换原始目标门槛；实际与模型最严门槛取较大值，为 54 |
 | replacement_weak_score | 45.0 | 普通轮换旧仓原评分必须低于此值 |
 | replacement_score_gap | 10.0 | 普通目标买入评分至少领先旧仓原评分 10 分 |
 | replacement_confirmations | 2 | 普通通道需要 2 根连续不同的已收盘 15m K 线确认 |
@@ -160,7 +175,7 @@
 | replacement_fast_close_location | 0.65 | 收盘位于本根振幅的 65% 以上 |
 | replacement_fast_max_breakout_atr | 1.0 | 突破前高后最多超出 1 ATR |
 
-快速通道的核心分上限 97 来自动量 44 分、放量 27 分和主动买 26 分；`replacement_fast_core_score=75` 表示至少取得其中 75 分，维持约 77.3% 的严格程度。快速通道不要求旧仓原评分低于 45，但仍要求旧仓处于全评分池后 20%，并通过 1h 走弱、回撤和最近 3 根 1h 高点保护条件；目标必须处于排除持仓后的前 10%，再通过分层漏斗中的硬条件、形态检查及 15m 突破、量比、主动买和收盘位置检查。普通轮换目标门槛取第 10 仓门槛 54 与 `replacement_entry_score=50` 的较大值，即 54；快速轮换仍为 60。
+快速通道的核心分上限 97 来自动量 44 分、放量 27 分和主动买 26 分；`replacement_fast_core_score=75` 表示至少取得其中 75 分，维持约 77.3% 的严格程度。快速通道不要求旧仓原评分低于 45，但仍要求旧仓处于全评分池后 20%，并通过 1h 走弱、回撤和最近 3 根 1h 高点保护条件；目标必须处于排除持仓后的前 10%，再通过分层漏斗中的硬条件、形态检查及 15m 突破、量比、主动买和收盘位置检查。普通轮换目标门槛取模型最严门槛 54 与 `replacement_entry_score=50` 的较大值，即 54；快速轮换仍为 60。
 
 ## 轮换审计记录
 

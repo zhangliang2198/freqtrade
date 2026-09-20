@@ -35,6 +35,7 @@ def _funnel_strategy(
     strategy = _entry_ready_strategy(time.time())
     strategy.settings = configured_settings()
     strategy.settings["max_positions"] = max_positions
+    strategy.settings["entry_risk_cluster_max_positions"] = max_positions + 1
     # The setup stage is supplied by the test double; disable the underlying
     # 15-day heat fetch so these tests exercise only the funnel contract.
     strategy.settings["entry_heat_max_penalty"] = 0
@@ -133,7 +134,7 @@ def test_capacity_cutoff_is_not_reported_as_a_strength_rejection() -> None:
     with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
         assert len(strategy._select_entries()) == 10
 
-    assert strategy._entry_funnel_rows[3][0:4] == ["4 强度/逐仓门槛", "10", "10", "0"]
+    assert strategy._entry_funnel_rows[3][0:4] == ["4 风险门槛/上限", "10", "10", "0"]
     assert strategy._entry_funnel_rows[5] == ["6 容量截断", "12", "10", "2", "本轮可用名额10"]
 
 
@@ -149,7 +150,7 @@ def test_funnel_log_table_shows_stage_counts_and_final_slot(caplog) -> None:
     assert "入场漏斗" in rendered
     assert "3 形态短名单" in rendered
     assert f"最终候选 {TARGET}" in rendered
-    assert "第1仓 启动 形态80.0 强度70.0/门槛40.0" in rendered
+    assert "第1仓 启动 形态80.0 强度70.0/门槛40.0 相关度0.00" in rendered
 
 
 def test_confirmation_rechecks_setup_after_selection() -> None:
