@@ -3973,3 +3973,28 @@ def test_api_markets_webserver(botclient):
 
     assert "hyperliquid_spot" in ApiBG.exchanges
     assert "binance_spot" in ApiBG.exchanges
+
+
+def test_status_accepts_legacy_trade_without_requested_amount(
+    botclient, mocker, ticker, fee, markets
+):
+    ftbot, client = botclient
+    patch_get_signal(ftbot)
+    mocker.patch.multiple(
+        EXMS,
+        get_balances=MagicMock(return_value=ticker),
+        fetch_ticker=ticker,
+        get_fee=fee,
+        markets=PropertyMock(return_value=markets),
+        fetch_order=MagicMock(return_value={}),
+    )
+    create_mock_trades(fee)
+    trade = Trade.get_open_trades()[0]
+    trade.amount_requested = None
+    Trade.commit()
+    response = client_get(client, f"{BASE_URI}/status")
+    assert_response(response, 200)
+    assert (
+        next(row for row in response.json() if row["trade_id"] == trade.id)["amount_requested"]
+        is None
+    )

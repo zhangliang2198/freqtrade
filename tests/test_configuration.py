@@ -657,6 +657,46 @@ def test_validate_default_conf(default_conf) -> None:
     validate_config_schema(default_conf)
 
 
+def test_reconciliation_config_defaults_are_runtime_complete(default_conf) -> None:
+    default_conf["manual_position_sync"] = {"enabled": True}
+    default_conf["exchange_accounting"] = {"enabled": True}
+
+    validate_config_schema(default_conf)
+
+    assert default_conf["manual_position_sync"] == {
+        "enabled": True,
+        "import_positions": True,
+        "manage_protective_stops": True,
+        "cleanup_orphan_stops": True,
+        "interval_seconds": 60,
+        "orphan_stop_interval_seconds": 900,
+        "confirmations": 2,
+        "history_lookback_days": 89,
+        "history_limit": 1000,
+    }
+    assert default_conf["exchange_accounting"] == {
+        "enabled": True,
+        "interval_seconds": 900,
+        "overlap_seconds": 120,
+        "settlement_delay_seconds": 300,
+        "initial_lookback_days": 89,
+        "page_size": 1000,
+        "max_pages_per_trade": 30,
+        "batch_size": 3,
+    }
+
+
+def test_manual_position_legacy_exit_alias_is_not_shadowed_by_defaults(default_conf) -> None:
+    default_conf["manual_position_sync"] = {
+        "enabled": True,
+        "auto_manage_positions": True,
+    }
+
+    validate_config_schema(default_conf)
+
+    assert "auto_exit_positions" not in default_conf["manual_position_sync"]
+
+
 @pytest.mark.parametrize("fiat", ["EUR", "USD", "", None])
 def test_validate_fiat_currency_options(default_conf, fiat) -> None:
     # Validate via our validator - we allow setting defaults!

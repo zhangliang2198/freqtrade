@@ -1,7 +1,56 @@
 {
   "exchange": {
     "pair_blacklist": [
-      "BNB/.*"
+      "BTC/.*",
+      "ETH/.*",
+      "BNB/.*",
+      "SOL/.*",
+      "XRP/.*",
+      "DOGE/.*",
+      "ADA/.*",
+      "TRX/.*",
+      "TON/.*",
+      "LINK/.*",
+      "AVAX/.*",
+      "DOT/.*",
+      "LTC/.*",
+      "BCH/.*",
+      "XLM/.*",
+      "HBAR/.*",
+      "ETC/.*",
+      "ATOM/.*",
+      "XMR/.*",
+
+      "USDC/.*",
+      "FDUSD/.*",
+      "TUSD/.*",
+      "USDP/.*",
+      "DAI/.*",
+      "PYUSD/.*",
+      "USDE/.*",
+      "USD1/.*",
+      "USDS/.*",
+      "BUSD/.*",
+      "USTC/.*",
+      "EURC/.*",
+      "RLUSD/.*",
+      "XUSD/.*",
+      "GUSD/.*",
+      "FRAX/.*",
+      "LUSD/.*",
+      "CRVUSD/.*",
+
+      "WBTC/.*",
+      "WETH/.*",
+      "BTCB/.*",
+      "STETH/.*",
+      "WBETH/.*",
+      "WSTETH/.*",
+
+      "PAXG/.*",
+      "XAUT/.*",
+      "XAU/.*",
+      "XAG/.*"
     ]
   }
 }

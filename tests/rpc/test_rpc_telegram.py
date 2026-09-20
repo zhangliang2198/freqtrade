@@ -190,17 +190,32 @@ async def test_telegram_startup(default_conf, mocker, caplog) -> None:
 
     telegram, _, _ = get_telegram_testobject(mocker, default_conf)
     telegram._app = app_mock
+
+    async def start_polling(**kwargs):
+        telegram._closing = True
+        telegram._shutdown_complete.set()
+
+    app_mock.updater.start_polling = AsyncMock(side_effect=start_polling)
     await telegram._startup_telegram()
     assert app_mock.initialize.call_count == 1
     assert app_mock.start.call_count == 1
     assert app_mock.updater.start_polling.call_count == 1
     assert sleep_mock.call_count == 1
 
-    # Test telegram Retries and Exceptions
-    app_mock.start = AsyncMock(side_effect=Exception("Test exception"))
+    # Test telegram retries until initialization recovers.
+    telegram._closing = False
+    telegram._shutdown_complete.clear()
+
+    async def start_after_two_failures():
+        if app_mock.start.await_count < 3:
+            raise Exception("Test exception")
+        telegram._closing = True
+        telegram._shutdown_complete.set()
+
+    app_mock.start = AsyncMock(side_effect=start_after_two_failures)
     await telegram._startup_telegram()
     assert app_mock.start.call_count == 3
-    assert log_has("Telegram init failed.", caplog)
+    assert log_has_re(r"Error starting Telegram bot \(attempt 2\).*", caplog)
 
 
 async def test_telegram_cleanup(
@@ -209,6 +224,7 @@ async def test_telegram_cleanup(
 ) -> None:
     app_mock = MagicMock()
     app_mock.stop = AsyncMock()
+    app_mock.shutdown = AsyncMock()
     app_mock.initialize = AsyncMock()
 
     updater_mock = MagicMock()
@@ -3132,3 +3148,127 @@ async def test__tg_info(default_conf_usdt, mocker, update):
     content = context.bot.send_message.call_args[1]["text"]
     assert "Freqtrade Bot Info:\n" in content
     assert '"chat_id": "1235"' in content
+
+
+def test_telegram_proxy_and_timeouts_apply_to_both_clients(mocker):
+    builder = MagicMock()
+    mocker.patch("freqtrade.rpc.telegram.Application.builder", return_value=builder)
+    for name in (
+        "token",
+        "proxy",
+        "get_updates_proxy",
+        "connect_timeout",
+        "read_timeout",
+        "write_timeout",
+        "pool_timeout",
+        "get_updates_connect_timeout",
+        "get_updates_read_timeout",
+        "get_updates_write_timeout",
+        "get_updates_pool_timeout",
+    ):
+        getattr(builder, name).return_value = builder
+    instance = Telegram.__new__(Telegram)
+    instance._config = {
+        "telegram": {
+            "token": "test",
+            "proxy_url": "http://127.0.0.1:3128",
+            "connect_timeout": 20,
+            "read_timeout": 20,
+            "write_timeout": 20,
+            "pool_timeout": 10,
+        }
+    }
+    assert instance._init_telegram_app() is builder.build.return_value
+    builder.proxy.assert_called_once_with("http://127.0.0.1:3128")
+    builder.get_updates_proxy.assert_called_once_with("http://127.0.0.1:3128")
+    for name in ("connect_timeout", "read_timeout", "write_timeout", "pool_timeout"):
+        getattr(builder, name).assert_called_once_with(instance._config["telegram"][name])
+        getattr(builder, f"get_updates_{name}").assert_called_once_with(
+            instance._config["telegram"][name]
+        )
+
+
+async def test_shutdown_drains_notification_before_closing_http(default_conf, mocker):
+    telegram, _, send = get_telegram_testobject(mocker, default_conf)
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def slow_send(*args, **kwargs):
+        started.set()
+        await finish.wait()
+
+    send.side_effect = slow_send
+    telegram._app = MagicMock()
+    telegram._app.updater.stop = AsyncMock()
+    telegram._app.stop = AsyncMock()
+    telegram._app.shutdown = AsyncMock()
+    notification = asyncio.create_task(telegram._send_notification(telegram._send_msg("test")))
+    await started.wait()
+    closing = asyncio.create_task(telegram._cleanup_telegram())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    telegram._app.shutdown.assert_not_awaited()
+    await telegram._send_notification(telegram._send_msg("too late"))
+    assert send.await_count == 1
+    finish.set()
+    await asyncio.gather(notification, closing)
+    telegram._app.shutdown.assert_awaited_once()
+    assert not telegram._sending
+    assert telegram._shutdown_complete.is_set()
+
+
+async def test_shutdown_skips_stopped_updater_and_still_closes_application(default_conf, mocker):
+    telegram, _, _ = get_telegram_testobject(mocker, default_conf)
+    telegram._app = MagicMock()
+    telegram._app.updater.running = False
+    telegram._app.updater.stop = AsyncMock(side_effect=RuntimeError("not running"))
+    telegram._app.running = False
+    telegram._app.stop = AsyncMock()
+    telegram._app.shutdown = AsyncMock()
+
+    await telegram._cleanup_telegram()
+
+    telegram._app.updater.stop.assert_not_awaited()
+    telegram._app.stop.assert_not_awaited()
+    telegram._app.shutdown.assert_awaited_once()
+    assert telegram._shutdown_complete.is_set()
+
+
+async def test_polling_loop_stays_alive_until_shutdown_finishes(default_conf, mocker):
+    telegram, _, _ = get_telegram_testobject(mocker, default_conf)
+    telegram._app = MagicMock()
+    telegram._app.initialize = AsyncMock()
+    telegram._app.start = AsyncMock()
+    telegram._app.updater.start_polling = AsyncMock()
+    telegram._app.updater.running = False
+    telegram._closing = True
+    mocker.patch("freqtrade.rpc.telegram.asyncio.sleep", AsyncMock())
+    startup = asyncio.create_task(telegram._startup_telegram())
+    # Event.wait() yields even though the patched polling sleep does not.
+    await asyncio.wait({startup}, timeout=0.01)
+    assert not startup.done()
+    telegram._shutdown_complete.set()
+    await startup
+
+
+async def test_polling_restarts_after_updater_stops_unexpectedly(default_conf, mocker):
+    telegram, _, _ = get_telegram_testobject(mocker, default_conf)
+    telegram._app = MagicMock()
+    telegram._app.initialize = AsyncMock()
+    telegram._app.start = AsyncMock()
+    telegram._app.updater.running = False
+    polling_calls = []
+
+    async def start_polling(**kwargs):
+        polling_calls.append(kwargs)
+        telegram._app.updater.running = len(polling_calls) == 2
+        if len(polling_calls) == 2:
+            telegram._closing = True
+            telegram._shutdown_complete.set()
+
+    telegram._app.updater.start_polling = AsyncMock(side_effect=start_polling)
+    mocker.patch("freqtrade.rpc.telegram.asyncio.sleep", AsyncMock())
+
+    await telegram._startup_telegram()
+
+    assert telegram._app.updater.start_polling.await_count == 2
+    assert [call["drop_pending_updates"] for call in polling_calls] == [True, False]

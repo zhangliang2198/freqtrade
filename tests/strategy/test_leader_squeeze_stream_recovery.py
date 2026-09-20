@@ -5,7 +5,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 from unittest.mock import patch
 
-import leader_squeeze_data as DATA
+import leader_squeeze_helpers as DATA
 import pytest
 
 from tests.strategy.leader_squeeze_test_helpers import (
@@ -15,7 +15,9 @@ from tests.strategy.leader_squeeze_test_helpers import (
 )
 
 
-STRATEGY_PATH = Path(__file__).parents[2] / "user_data/strategies/leader_squeeze_strategy.py"
+STRATEGY_PATH = (
+    Path(__file__).parents[2] / "user_data/strategies/leader_squeeze/leader_squeeze_strategy.py"
+)
 SPEC = importlib.util.spec_from_file_location("leader_squeeze_strategy", STRATEGY_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -27,6 +29,7 @@ def _strategy() -> LeaderSqueezeStrategy:
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {**PUBLIC_CONFIG, "exchange": {"ccxt_config": {}}}
     strategy.settings = configured_settings()
+    strategy.settings["liquidation_warmup_score"] = 0.5
     strategy._stop_event = threading.Event()
     strategy._liquidation_connected = threading.Event()
     strategy._liquidation_started = 0.0

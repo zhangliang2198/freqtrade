@@ -161,6 +161,24 @@ def test_fiat_too_many_requests_response(mocker, caplog):
     )
 
 
+def test_fiat_ssl_failure_backs_off_and_static_mapping_does_not_reload(mocker):
+    CryptoToFiatConverter._coinlistings = []
+    CryptoToFiatConverter._backoff = 0
+    listmock = MagicMock(side_effect=RequestException("SSL: UNEXPECTED_EOF_WHILE_READING"))
+    mocker.patch.multiple(
+        "freqtrade.rpc.fiat_convert.FtCoinGeckoApi",
+        get_coins_list=listmock,
+    )
+
+    fiat_convert = CryptoToFiatConverter({})
+
+    assert listmock.call_count == 1
+    assert fiat_convert._backoff > datetime.datetime.now().timestamp()
+    assert fiat_convert._get_gecko_id("usdt") == "tether"
+    assert fiat_convert._get_gecko_id("usdt") == "tether"
+    assert listmock.call_count == 1
+
+
 def test_fiat_multiple_coins(caplog):
     fiat_convert = CryptoToFiatConverter({})
     fiat_convert._coinlistings = [

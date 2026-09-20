@@ -59,12 +59,13 @@ class CryptoToFiatConverter(LoggingMixin, metaclass=SingletonMeta):
             # Use list-comprehension to ensure we get a list.
             self._coinlistings = [x for x in self._coingecko.get_coins_list()]
         except RequestException as request_exception:
+            # Avoid retrying the full CoinGecko listing on every RPC/UI refresh after
+            # transient proxy, TLS, rate-limit, or connectivity failures.
+            self._backoff = dt_ts() + 60
             if "429" in str(request_exception):
                 logger.warning(
                     "Too many requests for CoinGecko API, backing off and trying again later."
                 )
-                # Set backoff timestamp to 60 seconds in the future
-                self._backoff = dt_ts() + 60
                 return
             # If the request is not a 429 error we want to raise the normal error
             logger.error(
@@ -77,6 +78,9 @@ class CryptoToFiatConverter(LoggingMixin, metaclass=SingletonMeta):
             )
 
     def _get_gecko_id(self, crypto_symbol):
+        crypto_symbol = crypto_symbol.lower()
+        if crypto_symbol in coingecko_mapping:
+            return coingecko_mapping[crypto_symbol]
         if not self._coinlistings:
             if self._backoff <= dt_ts():
                 self._load_cryptomap()
@@ -86,9 +90,6 @@ class CryptoToFiatConverter(LoggingMixin, metaclass=SingletonMeta):
             else:
                 return None
         found = [x for x in self._coinlistings if x["symbol"].lower() == crypto_symbol]
-
-        if crypto_symbol in coingecko_mapping:
-            found = [x for x in self._coinlistings if x["id"] == coingecko_mapping[crypto_symbol]]
 
         if len(found) == 1:
             return found[0]["id"]

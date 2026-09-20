@@ -7206,3 +7206,36 @@ def test_verify_candle_type_support(default_conf, mocker):
         ):
             exchange.verify_candle_type_support(candle_type)
     exchange.verify_candle_type_support(CandleType.PREMIUMINDEX)
+
+
+def test_fetch_orders_time_windows_preserve_request_parameters(default_conf, mocker):
+    exchange = get_patched_exchange(mocker, default_conf)
+    exchange._config["dry_run"] = False
+    exchange._ft_has["fetch_orders_limit_minutes"] = 7 * 1440
+    fetch = mocker.patch.object(exchange, "_fetch_orders", return_value=[])
+    end = datetime.now(UTC)
+    params = {"limit": 37, "endTime": int(end.timestamp() * 1000)}
+    exchange.fetch_orders("ETH/USDT:USDT", end - timedelta(hours=1), params=params)
+    assert fetch.call_count == 1
+    assert fetch.call_args.kwargs["params"] == params
+
+
+def test_fetch_orders_time_windows_bound_each_request_to_requested_end(default_conf, mocker):
+    exchange = get_patched_exchange(mocker, default_conf)
+    exchange._config["dry_run"] = False
+    exchange._ft_has["fetch_orders_limit_minutes"] = 7 * 1440
+    fetch = mocker.patch.object(exchange, "_fetch_orders", return_value=[])
+    end = datetime.now(UTC) - timedelta(hours=1)
+    start = end - timedelta(days=15)
+    params = {"limit": 37, "endTime": int(end.timestamp() * 1000)}
+
+    exchange.fetch_orders("ETH/USDT:USDT", start, params=params)
+
+    assert fetch.call_count == 3
+    starts = [call.args[1] for call in fetch.call_args_list]
+    ends = [call.kwargs["params"]["endTime"] for call in fetch.call_args_list]
+    assert all(
+        int(stamp.timestamp() * 1000) <= stop for stamp, stop in zip(starts, ends, strict=True)
+    )
+    assert ends[-1] == params["endTime"]
+    assert all(call.kwargs["params"]["limit"] == 37 for call in fetch.call_args_list)

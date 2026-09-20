@@ -4809,6 +4809,9 @@ def test_startup_backpopulate_precision(mocker, default_conf_usdt, fee, caplog):
 @pytest.mark.parametrize("is_short", [False, True])
 def test_update_trades_without_assigned_fees(mocker, default_conf_usdt, fee, is_short):
     freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
+    restore_verified = mocker.patch.object(
+        freqtrade.exchange_accounting, "restore_verified_profit", return_value=False
+    )
 
     def patch_with_fee(order):
         order.update(
@@ -4842,6 +4845,7 @@ def test_update_trades_without_assigned_fees(mocker, default_conf_usdt, fee, is_
     # Does nothing for dry-run
     trades = Trade.get_trades().all()
     assert len(trades) == MOCK_TRADE_COUNT
+    restore_verified.assert_not_called()
     for trade in trades:
         assert trade.fee_open_cost is None
         assert trade.fee_open_currency is None
@@ -4854,6 +4858,7 @@ def test_update_trades_without_assigned_fees(mocker, default_conf_usdt, fee, is_
 
     trades = Trade.get_trades().all()
     assert len(trades) == MOCK_TRADE_COUNT
+    assert restore_verified.called
 
     for trade in trades:
         if trade.is_open:

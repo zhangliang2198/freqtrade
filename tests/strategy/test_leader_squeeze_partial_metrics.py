@@ -1,10 +1,9 @@
+import importlib
 import importlib.util
-import logging
 import threading
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import leader_squeeze_data as DATA
 import pytest
 
 from tests.strategy.leader_squeeze_test_helpers import (
@@ -14,7 +13,12 @@ from tests.strategy.leader_squeeze_test_helpers import (
 )
 
 
-STRATEGY_PATH = Path(__file__).parents[2] / "user_data/strategies/leader_squeeze_strategy.py"
+DATA = importlib.import_module("leader_squeeze_helpers")
+
+
+STRATEGY_PATH = (
+    Path(__file__).parents[2] / "user_data/strategies/leader_squeeze/leader_squeeze_strategy.py"
+)
 SPEC = importlib.util.spec_from_file_location(
     "leader_squeeze_strategy_partial_metrics", STRATEGY_PATH
 )
@@ -25,8 +29,8 @@ LeaderSqueezeStrategy = MODULE.LeaderSqueezeStrategy
 
 
 PAIR = "BTC/USDT:USDT"
-NOW = 1_000.0
-OPTIONAL_PATHS = {
+NOW = 5_000.0
+REMOVED_SHORT_RATIO_PATHS = {
     "globalLongShortAccountRatio",
     "topLongShortPositionRatio",
 }
@@ -63,24 +67,19 @@ class _Session:
 
 def _payloads(
     *,
-    global_short: str = "0.35",
-    top_short: str = "0.45",
-    taker_timestamp: int = 100_000,
-    oi_timestamp: int = 1_000_000,
+    taker_timestamp: int = 3_600_000,
+    oi_timestamp: int = 4_500_000,
 ) -> dict[str, object]:
     return {
         "takerlongshortRatio": [
             {"buyVol": "1.2", "sellVol": "1", "timestamp": taker_timestamp},
         ],
         "openInterestHist": [
-            {"sumOpenInterest": str(value), "timestamp": oi_timestamp}
-            for value in (100, 99, 98, 97)
-        ],
-        "globalLongShortAccountRatio": [
-            {"shortAccount": global_short, "timestamp": 900_000},
-        ],
-        "topLongShortPositionRatio": [
-            {"shortAccount": top_short, "timestamp": 900_000},
+            {
+                "sumOpenInterest": str(value),
+                "timestamp": oi_timestamp - (4 - index) * 900_000,
+            }
+            for index, value in enumerate((101, 100, 99, 98, 97))
         ],
     }
 
@@ -89,6 +88,7 @@ def _strategy_and_session(*, payloads=None, failures=None):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {**PUBLIC_CONFIG, "exchange": {}}
     strategy.settings = configured_settings()
+    strategy.settings["weights"]["oi_squeeze"] = 0.03
     strategy.settings["taker_window_candles"] = 1
     strategy._market_id = Mock(return_value="BTCUSDT")
     session = _Session(payloads or _payloads(), failures or {})
@@ -121,45 +121,10 @@ def test_score_refresh_does_not_request_adl_and_can_score_the_result() -> None:
 
     assert "symbolAdlRisk" not in session.paths
     assert "adl_risk_score" not in metric
-    assert strategy._scores[PAIR] > float(strategy.settings["base_entry_score"])
-
-
-@pytest.mark.parametrize(
-    "failed_path",
-    ["globalLongShortAccountRatio", "topLongShortPositionRatio"],
-)
-def test_optional_score_metric_failure_keeps_fresh_exit_metric(caplog, failed_path) -> None:
-    strategy, session = _strategy_and_session(
-        failures={failed_path: RuntimeError(f"{failed_path} unavailable")}
-    )
-    with caplog.at_level(logging.WARNING, logger="leader_squeeze_strategy"):
-        metric = _fetch(strategy, session, [NOW])
-
-    assert metric["taker_ratio"] == pytest.approx(1.2)
-    assert metric["oi_change"] == pytest.approx(-0.03)
-    assert metric["_exit_valid_until"] == pytest.approx(2_860.0)
-    assert "_score_valid_until" not in metric
-    assert any(PAIR in record.message or "评分" in record.message for record in caplog.records)
-    assert session.close.call_count == 1
-    assert len(session.paths) == len(set(session.paths))
-
-
-@pytest.mark.parametrize(
-    "payload_kwargs",
-    [
-        {"global_short": "2.0"},
-    ],
-)
-def test_invalid_optional_payload_keeps_fresh_exit_metric(caplog, payload_kwargs) -> None:
-    strategy, session = _strategy_and_session(payloads=_payloads(**payload_kwargs))
-    with caplog.at_level(logging.WARNING, logger="leader_squeeze_strategy"):
-        metric = _fetch(strategy, session, [NOW])
-
-    assert set(metric) >= {"taker_ratio", "oi_change", "_exit_valid_until"}
-    assert "_score_valid_until" not in metric
-    assert any(record.levelno >= logging.WARNING for record in caplog.records)
-    assert session.close.call_count == 1
-    assert len(session.paths) == len(set(session.paths))
+    assert not REMOVED_SHORT_RATIO_PATHS.intersection(session.paths)
+    assert "short_share" not in metric
+    assert metric["oi_change"] == pytest.approx(98 / 101 - 1)
+    assert strategy._scores[PAIR] > float(strategy.settings["entry_slot_score_thresholds"][0])
 
 
 @pytest.mark.parametrize("failed_path", ["takerlongshortRatio", "openInterestHist"])
@@ -171,7 +136,7 @@ def test_required_exit_metric_failure_raises_and_never_returns_partial_metric(fa
         _fetch(strategy, session, [NOW])
 
     assert session.close.call_count == 1
-    assert not OPTIONAL_PATHS.intersection(session.paths)
+    assert not REMOVED_SHORT_RATIO_PATHS.intersection(session.paths)
 
 
 def test_invalid_required_oi_value_raises_and_closes_session() -> None:
@@ -185,22 +150,25 @@ def test_invalid_required_oi_value_raises_and_closes_session() -> None:
         _fetch(strategy, session, [NOW])
 
     assert session.close.call_count == 1
-    assert not OPTIONAL_PATHS.intersection(session.paths)
+    assert not REMOVED_SHORT_RATIO_PATHS.intersection(session.paths)
 
 
-def test_slow_optional_request_does_not_return_an_expired_exit_metric() -> None:
-    clock = [NOW]
+def test_transient_metric_request_is_retried_once() -> None:
     strategy, session = _strategy_and_session()
+    payloads = _payloads()
+    session.get = Mock(
+        side_effect=[
+            DATA.requests.ConnectionError("temporary"),
+            _Response(payloads["takerlongshortRatio"]),
+            _Response(payloads["openInterestHist"]),
+        ]
+    )
+    with patch.object(DATA.time, "sleep") as sleep:
+        metric = _fetch(strategy, session, [NOW])
 
-    def fail_after_exit_deadline():
-        clock[0] = NOW + float(strategy.settings["remote_metric_max_age_seconds"]) + 1
-        raise RuntimeError("optional request timed out")
-
-    session.failures["globalLongShortAccountRatio"] = fail_after_exit_deadline
-    with pytest.raises((ValueError, RuntimeError)):
-        _fetch(strategy, session, clock)
-
-    assert session.close.call_count == 1
+    assert metric["taker_ratio"] > 0
+    assert session.get.call_count == 3
+    sleep.assert_called_once_with(strategy.settings["metric_retry_backoff_seconds"])
 
 
 def test_consume_accepts_fresh_exit_only_result_without_scoring() -> None:

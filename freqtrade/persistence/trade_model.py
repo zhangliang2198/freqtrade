@@ -348,14 +348,21 @@ class Order(ModelBase):
     ) -> Self:
         """
         Parse an order from a ccxt object and return a new order Object.
-        Optional support for overriding amount and price is only used for test simplification.
+        Explicit overrides supply requested values when the exchange omits amount or price.
         """
         o = cls(
             order_id=str(order["id"]),
             ft_order_side=side,
             ft_pair=pair,
             ft_amount=amount or order.get("amount", None) or 0.0,
-            ft_price=price or order.get("price", None),
+            # Market fills and conditional market stops legitimately have no limit price.
+            ft_price=(
+                price
+                or order.get("price")
+                or order.get("average")
+                or order.get("stopPrice")
+                or order.get("triggerPrice")
+            ),
         )
 
         o.update_from_ccxt_object(order)
@@ -1430,10 +1437,17 @@ class LocalTrade:
         :param key: key of the custom data
         :param default: value to return if no data is found
         """
-        data = CustomDataWrapper.get_custom_data(trade_id=self.id, key=key)
-        if data:
-            return data[0].value
-        return default
+        try:
+            data = CustomDataWrapper.get_custom_data(trade_id=self.id, key=key)
+            if data:
+                return data[0].value
+            return default
+        finally:
+            # This method returns a plain value, so no ORM object needs to remain attached.
+            # Closing the dedicated custom-data session prevents read-only strategy callbacks
+            # from keeping a PostgreSQL transaction open between bot loops.
+            if CustomDataWrapper.use_db:
+                _CustomData.session.remove()
 
     def get_custom_data_entry(self, key: str) -> _CustomData | None:
         """
@@ -1815,6 +1829,9 @@ class Trade(ModelBase, LocalTrade):
         return value
 
     def delete(self) -> None:
+        from freqtrade.persistence.exchange_ledger import ExchangeLedger
+
+        Trade.session.query(ExchangeLedger).filter(ExchangeLedger.trade_id == self.id).delete()
         for order in self.orders:
             Order.session.delete(order)
 

@@ -1,6 +1,119 @@
 {
   "type": "object",
   "properties": {
+    "exchange_accounting": {
+      "description": "Reconcile Binance futures fills and funding.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "interval_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400,
+          "default": 900
+        },
+        "overlap_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 120
+        },
+        "settlement_delay_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 300
+        },
+        "initial_lookback_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 89,
+          "default": 89
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 1000
+        },
+        "max_pages_per_trade": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 30
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 3
+        }
+      }
+    },
+    "manual_position_sync": {
+      "description": "Reconcile manual futures positions and protective stops.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "import_positions": {
+          "type": "boolean",
+          "default": true
+        },
+        "auto_exit_positions": {
+          "description": "Allow strategy-initiated exits; protection is independent.",
+          "type": "boolean"
+        },
+        "auto_manage_positions": {
+          "description": "Deprecated alias for auto_exit_positions.",
+          "type": "boolean"
+        },
+        "manage_protective_stops": {
+          "type": "boolean",
+          "default": true
+        },
+        "cleanup_orphan_stops": {
+          "type": "boolean",
+          "default": true
+        },
+        "interval_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 60
+        },
+        "orphan_stop_interval_seconds": {
+          "description": "Interval between account-wide orphan stop scans.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 900
+        },
+        "confirmations": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 10,
+          "default": 2
+        },
+        "history_lookback_days": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 89,
+          "default": 89
+        },
+        "history_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 1000
+        }
+      }
+    },
     "max_open_trades": {
       "description": "Maximum number of open trades. -1 for unlimited.",
       "type": [
@@ -708,6 +821,37 @@
       "description": "Telegram settings.",
       "type": "object",
       "properties": {
+        "proxy_url": {
+          "description": "Proxy URL used for Telegram requests and update polling.",
+          "type": "string",
+          "minLength": 1
+        },
+        "connect_timeout": {
+          "description": "Telegram connection timeout in seconds.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "read_timeout": {
+          "description": "Telegram response read timeout in seconds.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "write_timeout": {
+          "description": "Telegram request write timeout in seconds.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "pool_timeout": {
+          "description": "Telegram connection-pool wait timeout in seconds.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "polling_restart_seconds": {
+          "description": "Delay before restarting a stopped Telegram updater.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 5
+        },
         "enabled": {
           "description": "Enable Telegram notifications.",
           "type": "boolean"

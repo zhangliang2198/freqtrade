@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from freqtrade.exceptions import OperationalException
 from tests.strategy.leader_squeeze_test_helpers import (
     PUBLIC_CONFIG,
     configured_settings,
@@ -15,7 +16,9 @@ from tests.strategy.leader_squeeze_test_helpers import (
 )
 
 
-STRATEGY_PATH = Path(__file__).parents[2] / "user_data/strategies/leader_squeeze_strategy.py"
+STRATEGY_PATH = (
+    Path(__file__).parents[2] / "user_data/strategies/leader_squeeze/leader_squeeze_strategy.py"
+)
 SPEC = importlib.util.spec_from_file_location("leader_squeeze_buy_first", STRATEGY_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -222,12 +225,11 @@ def test_eth_block_does_not_erase_submitted_rotation_or_prevent_confirmed_old_ex
     strategy._entry_pairs = {OTHER}
     strategy._rotation_candidate, strategy._rotation_seen = None, 0
     strategy._consume_score_refresh = Mock()
-    strategy.dp = SimpleNamespace(current_whitelist=list)
+    strategy.dp = SimpleNamespace(current_whitelist=list, current_selection_whitelist=list)
     strategy._next_score_refresh = float("inf")
     strategy._score_pending = False
     strategy._refresh_risk_state = Mock()
     strategy._plan_rotation = Mock()
-    strategy._manage_external_positions = Mock()
     strategy._select_entries = Mock(return_value=set())
     strategy._log_strategy_status = Mock()
     target = _trade(
@@ -249,46 +251,22 @@ def test_eth_block_does_not_erase_submitted_rotation_or_prevent_confirmed_old_ex
     strategy._plan_rotation.assert_not_called()
 
 
-@pytest.mark.parametrize("complete", [False, True])
-def test_external_old_position_only_gets_rotation_exit_after_complete_buy(complete) -> None:
+def test_unimported_external_old_position_cancels_rotation_without_direct_exit() -> None:
     strategy = _strategy(_state(phase="buy_pending", weak_trade_id=None))
     strategy._external_pairs = {WEAK}
-    strategy._external_stop_protected = {}
-    strategy._external_exit_requested = {}
-    strategy._account_stopped = False
-    strategy._market_is_down = Mock(return_value=False)
-    strategy._trend_reversed = Mock(return_value=False)
-    strategy._external_hard_stop_hit = Mock(return_value=False)
-    strategy._ensure_external_stop = Mock(return_value=True)
-    strategy.config = {
-        **PUBLIC_CONFIG,
-        "dry_run": False,
-        "exit_pricing": {"use_order_book": False},
-    }
-    strategy.wallets = SimpleNamespace(
-        get_all_positions=lambda: {WEAK: SimpleNamespace(side="long", position=2.0, leverage=5)}
+    strategy._position_data_healthy = True
+    strategy._persist_rotation = Mock(return_value=True)
+    strategy._record_rotation_event = Mock()
+
+    with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
+        strategy._sync_rotation_state()
+
+    assert strategy._rotation_state is None
+    assert strategy._rotation_pair is None
+    assert strategy._rotation_target is None
+    strategy._record_rotation_event.assert_called_with(
+        "cancelled", "旧仓尚未完成框架对账, 撤销轮换授权"
     )
-    exchange = SimpleNamespace(
-        get_rate=Mock(return_value=100), create_order=Mock(return_value={"status": "open"})
-    )
-    strategy.dp = SimpleNamespace(_exchange=exchange, send_msg=Mock())
-    target = _trade(
-        TARGET,
-        tag="rotation_rotation-token",
-        orders=[
-            _order(
-                filled=10 if complete else 5,
-                status="closed" if complete else "canceled",
-                is_open=False,
-            )
-        ],
-    )
-    with patch.object(MODULE.Trade, "get_open_trades", return_value=[target]):
-        strategy._manage_external_positions(1000.0)
-    assert exchange.create_order.call_count == int(complete)
-    if complete:
-        assert exchange.create_order.call_args.kwargs["reduceOnly"] is True
-        assert exchange.create_order.call_args.kwargs["pair"] == WEAK
 
 
 def test_completed_rotation_is_cleared_and_cannot_sell_a_new_trade_in_same_pair() -> None:
@@ -496,7 +474,9 @@ def test_bot_start_restores_rotation_state_and_cooldown(tmp_path: Path) -> None:
         "last_rotation": 1234.5,
         "rotation": state,
     }
-    (tmp_path / "leader_squeeze_state.json").write_text(json.dumps(payload))
+    state_path = tmp_path / PUBLIC_CONFIG["leader_squeeze"]["state_file_dry_run"]
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps(payload))
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
@@ -508,12 +488,10 @@ def test_bot_start_restores_rotation_state_and_cooldown(tmp_path: Path) -> None:
     strategy._sync_external_pairs = Mock()
     strategy._initialize_rotation_audit = Mock()
 
-    strategy.bot_start()
-
-    assert strategy._rotation_state == state
-    assert strategy._rotation_pair == WEAK
-    assert strategy._rotation_target == TARGET
-    assert strategy._last_rotation == pytest.approx(1234.5)
+    with pytest.raises(
+        OperationalException, match=r"requires live or dry_run mode.*no historical data source"
+    ):
+        strategy.bot_start()
 
 
 @pytest.mark.parametrize(
@@ -544,3 +522,13 @@ def test_invalid_persisted_rotation_state_blocks_loading(
 
     assert strategy._load_risk_state() == {}
     assert strategy._risk_state_load_failed
+
+
+def test_persisted_rotation_cannot_sell_manual_import_when_management_disabled():
+    strategy = _strategy(_state(phase="sell"))
+    weak = _trade(WEAK)
+    weak.enter_tag = "manual_import"
+    with patch.object(MODULE.Trade, "get_open_trades", return_value=[weak]):
+        strategy._sync_rotation_state()
+    assert strategy._rotation_state is None
+    assert strategy._rotation_pair is None

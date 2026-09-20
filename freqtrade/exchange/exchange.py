@@ -2039,8 +2039,16 @@ class Exchange:
             return []
         if (limit := self._ft_has.get("fetch_orders_limit_minutes")) is not None:
             orders = []
-            while since < dt_now():
-                orders += self._fetch_orders(pair, since)
+            query_end = dt_now()
+            requested_end = (params or {}).get("endTime")
+            if requested_end is not None:
+                query_end = min(query_end, dt_from_ts(int(requested_end) / 1000))
+            while since < query_end:
+                window_params = dict(params or {})
+                if requested_end is not None:
+                    window_end = min(query_end, since + timedelta(minutes=limit))
+                    window_params["endTime"] = int(window_end.timestamp() * 1000)
+                orders += self._fetch_orders(pair, since, params=window_params)
                 # Since with 1 minute overlap
                 since = since + timedelta(minutes=limit - 1)
             # Ensure each order is unique based on order id

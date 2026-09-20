@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import leader_squeeze_data as DATA
+import leader_squeeze_helpers as DATA
 import pytest
 
 from tests.strategy.leader_squeeze_test_helpers import (
@@ -18,7 +18,9 @@ from tests.strategy.leader_squeeze_test_helpers import (
 )
 
 
-STRATEGY_PATH = Path(__file__).parents[2] / "user_data/strategies/leader_squeeze_strategy.py"
+STRATEGY_PATH = (
+    Path(__file__).parents[2] / "user_data/strategies/leader_squeeze/leader_squeeze_strategy.py"
+)
 SPEC = importlib.util.spec_from_file_location(
     "leader_squeeze_strategy_remote_expiry", STRATEGY_PATH
 )
@@ -29,15 +31,12 @@ LeaderSqueezeStrategy = MODULE.LeaderSqueezeStrategy
 
 
 PAIR = "BTC/USDT:USDT"
-NOW = 1_000.0
+NOW = 5_000.0
 
 
 def _metric(now: float = NOW, *, score_age: float = 300.0, exit_age: float = 300.0):
     """Return a complete metric payload suitable for score consumption."""
     return {
-        "short_share": 0.60,
-        "short_account_share": 0.60,
-        "short_position_share": 0.60,
         "taker_ratio": 1.20,
         "oi_change": -0.01,
         "momentum": 0.05,
@@ -140,6 +139,7 @@ def _fetch_strategy(payloads: dict[str, object]) -> LeaderSqueezeStrategy:
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {**PUBLIC_CONFIG, "exchange": {"ccxt_config": {}}}
     strategy.settings = configured_settings()
+    strategy.settings["weights"]["oi_squeeze"] = 0.03
     strategy.settings["taker_window_candles"] = 1
     strategy._market_id = lambda pair: "BTCUSDT"
 
@@ -172,13 +172,16 @@ def _fetch_strategy(payloads: dict[str, object]) -> LeaderSqueezeStrategy:
 
 def _full_payloads() -> dict[str, object]:
     return {
-        # The taker source is intentionally oldest.  Its 15m period ends at 1000s.
-        "takerlongshortRatio": [{"buyVol": "1.2", "sellVol": "1", "timestamp": 100_000}],
+        # Both sources have their latest complete 15m period ending at 4500s.
+        "takerlongshortRatio": [{"buyVol": "1.2", "sellVol": "1", "timestamp": 3_600_000}],
         "openInterestHist": [
-            {"sumOpenInterest": str(value), "timestamp": 1_000_000} for value in (100, 99, 98, 97)
+            {"sumOpenInterest": str(value), "timestamp": timestamp}
+            for value, timestamp in zip(
+                (101, 100, 99, 98, 97),
+                (900_000, 1_800_000, 2_700_000, 3_600_000, 4_500_000),
+                strict=True,
+            )
         ],
-        "globalLongShortAccountRatio": [{"shortAccount": "0.35", "timestamp": 1_000_000}],
-        "topLongShortPositionRatio": [{"shortAccount": "0.45", "timestamp": 1_000_000}],
     }
 
 
@@ -195,9 +198,8 @@ def test_fetch_score_deadline_uses_earliest_remote_source() -> None:
     metrics = _fetch_with_payloads(_full_payloads(), NOW)
     remote_max_age = configured_settings()["remote_metric_max_age_seconds"]
 
-    # Taker period_end is 900s after its 100s timestamp; it is the earliest source.
-    assert metrics["_exit_valid_until"] == pytest.approx(1000 + remote_max_age)
-    assert metrics["_score_valid_until"] == pytest.approx(1000 + remote_max_age)
+    assert metrics["_exit_valid_until"] == pytest.approx(4500 + remote_max_age)
+    assert metrics["_score_valid_until"] == pytest.approx(4500 + remote_max_age)
     assert "adl_risk_score" not in metrics
 
 
@@ -218,7 +220,7 @@ def test_fetch_requests_use_the_15_minute_period() -> None:
     oi_call = next(
         call for call in strategy._session.calls if call[0].endswith("/openInterestHist")
     )
-    assert oi_call[1]["params"]["limit"] == 4
+    assert oi_call[1]["params"]["limit"] == 5
 
 
 def test_fetching_identical_payload_does_not_extend_deadlines() -> None:
@@ -261,7 +263,6 @@ def _entry_gate_strategy(now: float = NOW) -> LeaderSqueezeStrategy:
     strategy._position_data_healthy = True
     strategy._last_position_sync = now
     strategy._external_pairs = set()
-    strategy._external_stop_protected = {}
     strategy._risk_state_load_failed = False
     strategy._account_stopped = False
     strategy._market_data_healthy = True

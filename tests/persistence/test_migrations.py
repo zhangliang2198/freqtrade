@@ -391,11 +391,12 @@ def test_migrate_set_sequence_ids():
         kv_id=3,
         custom_data_id=10,
         wallet_history_id=15,
+        exchange_ledger_id=18,
     )
 
     # begin called once and connection.execute invoked for each provided sequence id
     assert engine.begin.call_count == 1
-    assert conn.execute.call_count == 6
+    assert conn.execute.call_count == 7
     assert (
         conn.execute.call_args_list[0][0][0].text == "ALTER SEQUENCE orders_id_seq RESTART WITH 22"
     )
@@ -418,6 +419,11 @@ def test_migrate_set_sequence_ids():
     assert (
         conn.execute.call_args_list[5][0][0].text
         == "ALTER SEQUENCE wallet_history_id_seq RESTART WITH 15"
+    )
+
+    assert (
+        conn.execute.call_args_list[6][0][0].text
+        == "ALTER SEQUENCE exchange_ledger_id_seq RESTART WITH 18"
     )
 
     engine.reset_mock()

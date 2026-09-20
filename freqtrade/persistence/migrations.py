@@ -54,6 +54,7 @@ def set_sequence_ids(
     kv_id: int | None = None,
     custom_data_id: int | None = None,
     wallet_history_id: int | None = None,
+    exchange_ledger_id: int | None = None,
 ):
     """
     Set sequence ids to the given values.
@@ -66,6 +67,7 @@ def set_sequence_ids(
     :param kv_id: value to set for KeyValueStore_id_seq (optional)
     :param custom_data_id: value to set for trade_custom_data_id_seq (optional)
     :param wallet_history_id: value to set for wallet_history_id_seq (optional)
+    :param exchange_ledger_id: value to set for exchange_ledger_id_seq (optional)
     """
     if engine.name == "postgresql":
         with engine.begin() as connection:
@@ -88,6 +90,10 @@ def set_sequence_ids(
             if wallet_history_id:
                 connection.execute(
                     text(f"ALTER SEQUENCE wallet_history_id_seq RESTART WITH {wallet_history_id}")
+                )
+            if exchange_ledger_id:
+                connection.execute(
+                    text(f"ALTER SEQUENCE exchange_ledger_id_seq RESTART WITH {exchange_ledger_id}")
                 )
 
 

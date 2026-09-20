@@ -43,10 +43,10 @@ def test_weekly_activity_keeps_points_after_launch_volume_moderates(bars):
     metric, points = metric_and_points([100.0] * 700 + [1000.0] + [500.0] * bars)
     assert metric["volume_recent_mean"] == 500
     assert metric["volume_activity_ratio"] >= 3
-    assert 10.5 <= points <= 15
+    assert 18.9 - 1e-9 <= points <= 27.0 + 1e-9
     if bars >= 22:
         assert metric["volume_ratio"] <= 1
-        assert points == pytest.approx(10.5)
+        assert points == pytest.approx(18.9)
 
 
 def test_short_and_weekly_baselines_exclude_all_three_signal_candles():
@@ -54,7 +54,7 @@ def test_short_and_weekly_baselines_exclude_all_three_signal_candles():
     assert metric["volume_short_baseline"] == 100
     assert metric["volume_activity_baseline"] == 100
     assert metric["volume_ratio"] == metric["volume_activity_ratio"] == 5
-    assert points == pytest.approx(15)
+    assert points == pytest.approx(27)
 
 
 def test_volume_retreat_removes_activity_points_and_weekly_baseline_eventually_adapts():
@@ -102,7 +102,7 @@ def test_invalid_activity_configuration_is_rejected(key, value):
     strategy.settings[key] = value
     with pytest.raises(ValueError):
         strategy._validate_tuning_settings()
-        from leader_squeeze_config import validate_runtime_settings
+        from leader_squeeze_helpers import validate_runtime_settings
 
         validate_runtime_settings(strategy)
 
@@ -111,36 +111,6 @@ def test_startup_history_must_cover_weekly_reference_plus_recent_window():
     strategy, _ = volume_strategy([100.0] * 700)
     strategy.startup_candle_count = 674
     with pytest.raises(ValueError, match="volume baselines"):
-        from leader_squeeze_config import validate_runtime_settings
-
-        validate_runtime_settings(strategy)
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("share", [0.49, 0.50, 0.51])
-def test_short_share_filter_is_optional_without_bypassing_other_entry_checks(enabled, share):
-    strategy, _ = volume_strategy([100.0] * 700)
-    strategy.settings["short_share_filter_enabled"] = enabled
-    strategy._pair_score_current = Mock(return_value=True)
-    strategy._metrics = {PAIR: {"short_share": share}}
-    strategy._candle_metrics = Mock(return_value={"momentum": 0.02, "trend_continuity": 1.0})
-    strategy._entry_score = Mock(return_value=80)
-    strategy._trend_reversed = Mock(return_value=False)
-    strategy._higher_entry_reason = Mock(return_value="")
-    reason = strategy._entry_quality_reason(PAIR, 50)
-    if enabled and share <= 0.5:
-        assert "空头占比" in reason
-    else:
-        assert reason == ""
-        strategy._entry_score.return_value = 30
-        assert "门槛" in strategy._entry_quality_reason(PAIR, 50)
-
-
-def test_short_share_filter_requires_boolean_configuration():
-    strategy, _ = volume_strategy([100.0] * 700)
-    assert strategy.settings["short_share_filter_enabled"] is False
-    strategy.settings["short_share_filter_enabled"] = "false"
-    with pytest.raises(ValueError, match="short_share_filter_enabled"):
-        from leader_squeeze_config import validate_runtime_settings
+        from leader_squeeze_helpers import validate_runtime_settings
 
         validate_runtime_settings(strategy)

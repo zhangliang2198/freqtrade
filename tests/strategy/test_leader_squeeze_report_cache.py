@@ -14,7 +14,8 @@ from tests.strategy.test_leader_squeeze_multi_timeframe import (
 )
 
 
-report_snapshot = importlib.import_module("leader_squeeze_support").report_snapshot
+report_snapshot = importlib.import_module("leader_squeeze_helpers").report_snapshot
+decision_snapshot = importlib.import_module("leader_squeeze_helpers").decision_snapshot
 
 
 @pytest.fixture(autouse=True)
@@ -54,5 +55,21 @@ def test_report_exception_cannot_leave_cache_active():
 
     with pytest.raises(RuntimeError):
         report()
+    strategy._trend_context(PAIR, "1h")
+    assert strategy.dp.get_pair_dataframe.call_count == 2
+
+
+def test_decision_snapshot_reuses_candles_but_next_callback_reads_again():
+    strategy = strategy_for(hourly_source())
+    read = strategy.dp.get_pair_dataframe
+    strategy.dp.get_pair_dataframe = Mock(side_effect=read)
+
+    @decision_snapshot
+    def bot_loop():
+        strategy._trend_context(PAIR, "1h")
+        strategy._trend_context(PAIR, "1h")
+
+    bot_loop()
+    assert strategy.dp.get_pair_dataframe.call_count == 1
     strategy._trend_context(PAIR, "1h")
     assert strategy.dp.get_pair_dataframe.call_count == 2

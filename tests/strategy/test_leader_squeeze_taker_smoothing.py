@@ -9,7 +9,7 @@ import pytest
 from tests.strategy.leader_squeeze_test_helpers import PUBLIC_CONFIG
 
 
-DATA = importlib.import_module("leader_squeeze_data")
+DATA = importlib.import_module("leader_squeeze_helpers")
 LeaderDataMixin = DATA.LeaderDataMixin
 
 PAIR = "BTC/USDT:USDT"
@@ -47,8 +47,11 @@ def _payloads(rows, *, oi_timestamp: int = 3_900_000):
     return {
         "takerlongshortRatio": rows,
         "openInterestHist": [
-            {"sumOpenInterest": str(value), "timestamp": oi_timestamp}
-            for value in (100, 99, 98, 97)
+            {
+                "sumOpenInterest": str(value),
+                "timestamp": oi_timestamp - (4 - index) * PERIOD_MS,
+            }
+            for index, value in enumerate((101, 100, 99, 98, 97))
         ],
     }
 

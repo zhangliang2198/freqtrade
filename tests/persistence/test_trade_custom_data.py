@@ -6,7 +6,7 @@ import pytest
 from freqtrade.data.history.history_utils import get_timerange
 from freqtrade.optimize.backtesting import Backtesting
 from freqtrade.persistence import Trade, disable_database_use, enable_database_use
-from freqtrade.persistence.custom_data import CustomDataWrapper
+from freqtrade.persistence.custom_data import CustomDataWrapper, _CustomData
 from tests.conftest import (
     EXMS,
     create_mock_trades_usdt,
@@ -91,6 +91,18 @@ def test_trade_custom_data_strategy_compat(mocker, default_conf_usdt, fee):
     assert ff_spy.call_count == 3
 
     assert trade_after.exit_reason == "test_value_1"
+
+
+@pytest.mark.usefixtures("init_persistence")
+def test_get_custom_data_closes_its_read_session(mocker, fee):
+    create_mock_trades_usdt(fee)
+    trade = Trade.get_open_trades()[0]
+    trade.set_custom_data("test", {"value": 1})
+    remove = mocker.spy(_CustomData.session, "remove")
+
+    assert trade.get_custom_data("test") == {"value": 1}
+
+    remove.assert_called_once_with()
 
 
 def test_trade_custom_data_strategy_backtest_compat(mocker, default_conf_usdt, fee):

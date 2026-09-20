@@ -128,40 +128,7 @@ def test_slow_book_response_is_not_cached_or_used():
     assert "盘口请求耗时超过5秒" in strategy._execution_block_reason
 
 
-@pytest.mark.parametrize("side", ["long", "short"])
-def test_external_stop_and_exit_share_book_but_refresh_after_expiry(side):
-    strategy = _strategy()
-    strategy._position_details = {PAIR: {"entryPrice": 100.0, "leverage": 5}}
-    with patch.object(MODULE.time, "monotonic", return_value=100.0):
-        assert strategy._external_hard_stop_hit(PAIR, side) is (side == "long")
-        strategy._external_exit_rate(PAIR, side)
-    strategy._exchange.fetch_l2_order_book.assert_called_once_with(PAIR, 20)
-    strategy._exchange.get_rate.assert_called_with(
-        PAIR,
-        side="exit",
-        is_short=side == "short",
-        refresh=True,
-        order_book=strategy._exchange.fetch_l2_order_book.return_value,
-    )
-    with patch.object(MODULE.time, "monotonic", return_value=105.0):
-        strategy._external_hard_stop_hit(PAIR, side)
-    assert strategy._exchange.fetch_l2_order_book.call_count == 2
-
-
-@pytest.mark.parametrize(
-    "pricing", [{"use_order_book": False}, {"use_order_book": True, "order_book_top": 25}]
-)
-def test_external_exit_keeps_framework_pricing_for_other_configurations(pricing):
-    strategy = _strategy()
-    strategy.config["exit_pricing"] = pricing
-    assert strategy._external_exit_rate(PAIR, "short") == 79.0
-    strategy._exchange.fetch_l2_order_book.assert_not_called()
-    strategy._exchange.get_rate.assert_called_once_with(
-        PAIR, side="exit", is_short=True, refresh=True
-    )
-
-
-@pytest.mark.parametrize("limit", [None, 0, 5, 5.5, 6.5, True, "6", float("nan")])
+@pytest.mark.parametrize("limit", [None, 0, 10, 10.5, True, "11", float("nan")])
 def test_missing_rotation_slot_fails_before_state_access_or_threads(limit):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {**PUBLIC_CONFIG, "runmode": "live"}
@@ -179,7 +146,7 @@ def test_missing_rotation_slot_fails_before_state_access_or_threads(limit):
     thread.assert_not_called()
 
 
-@pytest.mark.parametrize("limit", [6, 7, -1, float("inf")])
+@pytest.mark.parametrize("limit", [11, 12, -1, float("inf")])
 def test_rotation_slot_accepts_sufficient_or_framework_unlimited_capacity(tmp_path, limit):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {**PUBLIC_CONFIG, "max_open_trades": limit, "user_data_dir": tmp_path}
@@ -187,7 +154,7 @@ def test_rotation_slot_accepts_sufficient_or_framework_unlimited_capacity(tmp_pa
     strategy._sync_external_pairs = Mock()
     strategy._initialize_rotation_audit = Mock()
     strategy.bot_start()
-    assert strategy.settings["max_positions"] == 5
+    assert strategy.settings["max_positions"] == 10
 
 
 @pytest.mark.parametrize("limit", [0, -1, 1.5, True, float("inf")])
@@ -195,7 +162,7 @@ def test_invalid_strategy_capacity_fails_early(limit):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
-        "max_open_trades": 6,
+        "max_open_trades": 11,
         "leader_squeeze": {**configured_settings(), "max_positions": limit},
     }
     with pytest.raises(ValueError, match="max_positions must be a positive integer"):

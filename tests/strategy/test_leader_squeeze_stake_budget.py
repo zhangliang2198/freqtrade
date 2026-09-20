@@ -18,22 +18,22 @@ def stake(strategy, maximum=990, minimum=5):
     )
 
 
-def test_five_entries_and_rotation_use_equal_total_capital_budget():
+def test_ten_entries_and_rotation_use_equal_total_capital_budget():
     strategy = configured_strategy(LeaderSqueezeStrategy)
     wallets = Wallets.__new__(Wallets)
     wallets._config = {"tradable_balance_ratio": 0.99}
     wallets._stake_currency = "USDT"
     strategy.wallets = wallets
     values = []
-    for count in range(6):
-        tied = count * 99
+    for count in range(11):
+        tied = count * 79.2
         wallets.get_free = Mock(return_value=1000 - tied)
         with patch.object(Trade, "total_open_trades_stakes", return_value=tied):
             values.append(stake(strategy, maximum=990 - tied))
-    assert values == [99] * 6
+    assert values == [pytest.approx(79.2)] * 11
 
 
-@pytest.mark.parametrize("maximum,minimum", [(98, 5), (990, 100), (0, 5), (float("nan"), 5)])
+@pytest.mark.parametrize("maximum,minimum", [(79, 5), (990, 80), (0, 5), (float("nan"), 5)])
 def test_invalid_or_insufficient_budget_skips_instead_of_small_or_oversized_entry(maximum, minimum):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.wallets = SimpleNamespace(get_total_stake_amount=lambda: 990)

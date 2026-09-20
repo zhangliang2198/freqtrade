@@ -42,6 +42,7 @@ from freqtrade.strategy.informative_decorator import (
 )
 from freqtrade.strategy.strategy_validation import StrategyResultValidator
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
+from freqtrade.trade_policy import trade_exit_allowed
 from freqtrade.util import dt_now, dt_ts
 from freqtrade.wallets import Wallets
 
@@ -621,6 +622,16 @@ class IStrategy(ABC, HyperStrategyMixin):
         None or False.
         """
         return self.custom_sell(pair, trade, current_time, current_rate, current_profit, **kwargs)
+
+    def is_trade_exit_allowed(
+        self, trade: Trade | None = None, exit_type: ExitType | None = None
+    ) -> bool:
+        """Query framework exit permission before planning a multi-step strategy action.
+
+        Standard signals and callbacks are enforced by the framework automatically.
+        Strategies only need this query before actions such as buy-first rotation.
+        """
+        return trade_exit_allowed(self.config, trade, exit_type)
 
     def custom_stake_amount(
         self,

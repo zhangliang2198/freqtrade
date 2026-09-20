@@ -16,7 +16,9 @@ from tests.strategy.leader_squeeze_test_helpers import (
 )
 
 
-STRATEGY_PATH = Path(__file__).parents[2] / "user_data/strategies/leader_squeeze_strategy.py"
+STRATEGY_PATH = (
+    Path(__file__).parents[2] / "user_data/strategies/leader_squeeze/leader_squeeze_strategy.py"
+)
 SPEC = importlib.util.spec_from_file_location("leader_squeeze_strategy_freshness", STRATEGY_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)

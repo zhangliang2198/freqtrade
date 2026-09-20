@@ -1,6 +1,8 @@
-import importlib.util
+import importlib
 import json
 import logging
+import math
+import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -9,8 +11,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import leader_squeeze_data as DATA
-import leader_squeeze_support as SUPPORT
 import pandas as pd
 import pytest
 
@@ -22,7 +22,13 @@ from tests.strategy.leader_squeeze_test_helpers import (
 )
 
 
-STRATEGY_PATH = Path(__file__).parents[2] / "user_data/strategies/leader_squeeze_strategy.py"
+DATA = importlib.import_module("leader_squeeze_helpers")
+SUPPORT = DATA
+
+
+STRATEGY_PATH = (
+    Path(__file__).parents[2] / "user_data/strategies/leader_squeeze/leader_squeeze_strategy.py"
+)
 SPEC = importlib.util.spec_from_file_location("leader_squeeze_strategy", STRATEGY_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -30,16 +36,16 @@ SPEC.loader.exec_module(MODULE)
 LeaderSqueezeStrategy = MODULE.LeaderSqueezeStrategy
 
 
-def _fetch_pair_metrics_fixture(
-    short_account: float = 0.35,
-    short_position: float = 0.45,
-) -> tuple[dict[str, float], dict[str, str]]:
+def _fetch_pair_metrics_fixture() -> tuple[dict[str, float], dict[str, str]]:
     payloads = {
-        "globalLongShortAccountRatio": [{"shortAccount": str(short_account), "timestamp": 900_000}],
-        "topLongShortPositionRatio": [{"shortAccount": str(short_position), "timestamp": 900_000}],
-        "takerlongshortRatio": [{"buyVol": "1.2", "sellVol": "1", "timestamp": 100_000}],
+        "takerlongshortRatio": [{"buyVol": "1.2", "sellVol": "1", "timestamp": 3_600_000}],
         "openInterestHist": [
-            {"sumOpenInterest": str(value), "timestamp": 900_000} for value in (100, 99, 98, 97)
+            {"sumOpenInterest": str(value), "timestamp": timestamp}
+            for value, timestamp in zip(
+                (101, 100, 99, 98, 97),
+                (900_000, 1_800_000, 2_700_000, 3_600_000, 4_500_000),
+                strict=True,
+            )
         ],
     }
     sessions = []
@@ -74,7 +80,7 @@ def _fetch_pair_metrics_fixture(
 
     with (
         patch.object(DATA.requests, "Session", Session),
-        patch.object(MODULE.time, "time", return_value=1_000.0),
+        patch.object(MODULE.time, "time", return_value=5_000.0),
     ):
         strategy.settings["taker_window_candles"] = 1
         metrics = strategy._fetch_pair_metrics("BTC/USDT:USDT")
@@ -97,7 +103,28 @@ def _eth_frame(
     ]
     if gap_at is not None:
         dates[gap_at] -= timedelta(minutes=15)
-    return pd.DataFrame({"date": dates, "close": closes})
+    numeric = pd.Series(closes, dtype="float64")
+    opening = numeric.shift(1).fillna(numeric)
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "open": opening,
+            "high": pd.concat([opening, numeric], axis=1).max(axis=1) + 1.0,
+            "low": pd.concat([opening, numeric], axis=1).min(axis=1) - 1.0,
+            "close": numeric,
+            "volume": 1.0,
+        }
+    )
+
+
+def _eth_trend_closes(direction: str) -> list[float]:
+    if direction == "up":
+        return [100.0] * 84 + [100.0 + 0.5 * index for index in range(1, 17)]
+    if direction == "down":
+        return [100.0] * 84 + [100.0 - 0.25 * index for index in range(1, 17)]
+    if direction == "flat":
+        return [100.0] * 100
+    raise ValueError(direction)
 
 
 def _eth_gate_strategy(frame: pd.DataFrame) -> LeaderSqueezeStrategy:
@@ -109,7 +136,6 @@ def _eth_gate_strategy(frame: pd.DataFrame) -> LeaderSqueezeStrategy:
 
 def _fresh_score_metric(**values) -> dict[str, float]:
     return {
-        "short_share": 0.60,
         "momentum": 0.05,
         "trend_continuity": 1.0,
         "_score_valid_until": 1e12,
@@ -126,6 +152,7 @@ def _entry_ready_strategy(
     # These fixtures exercise the existing entry, rotation, and execution
     # policies.  Heat-aware entry tests provide their own 15-day history.
     strategy.settings["entry_heat_max_penalty"] = entry_heat_max_penalty
+    strategy.settings["entry_setup_enabled"] = bool(entry_heat_max_penalty)
     strategy._eth_entries_allowed = lambda current_time: True
     strategy._entry_pair_available = Mock(return_value=True)
     strategy._higher_entry_reason = Mock(return_value="")
@@ -142,7 +169,6 @@ def _entry_ready_strategy(
     strategy._position_data_healthy = True
     strategy._last_position_sync = now
     strategy._external_pairs = set()
-    strategy._external_stop_protected = {}
     strategy._daily_blocked = False
     strategy._account_stopped = False
     strategy._market_data_healthy = True
@@ -156,9 +182,10 @@ def _status_strategy() -> LeaderSqueezeStrategy:
     strategy.config = {**PUBLIC_CONFIG, "stake_currency": "USDT"}
     strategy.settings = configured_settings()
     strategy.settings["entry_heat_max_penalty"] = 0
+    strategy.settings["entry_setup_enabled"] = False
     strategy._entry_block_reason = "ETH拦截: ETH 下跌"
     strategy._entry_pairs = {"BTC/USDT:USDT"}
-    strategy._entry_decisions = {"BTC/USDT:USDT": "入选: 评分 80.0 >= 45.0"}
+    strategy._entry_decisions = {"BTC/USDT:USDT": "入选第1仓: 形态80.0 强度80.0>=40.0"}
     strategy._rotation_pair = None
     strategy._rotation_target = None
     strategy._last_status_signature = None
@@ -176,7 +203,6 @@ def _status_strategy() -> LeaderSqueezeStrategy:
     strategy._market_down = False
     strategy._scores = {"BTC/USDT:USDT": 80.0}
     strategy._external_pairs = {"ETH/USDT:USDT"}
-    strategy._external_stop_protected = {"ETH/USDT:USDT": True}
     strategy._position_details = {}
     strategy._risk_state = {}
     strategy._daily_blocked = False
@@ -188,19 +214,17 @@ def _status_strategy() -> LeaderSqueezeStrategy:
     return strategy
 
 
-def test_weights_and_default_crowding_floor() -> None:
+def test_score_weights() -> None:
     weights = configured_settings()["weights"]
     assert sum(weights.values()) == 1.0
-    assert weights["short_crowding"] == 0.20
-    assert weights["momentum"] == 0.32
-    assert weights["volume"] == 0.15
-    assert weights["taker_buy"] == 0.15
-    assert weights["liquidation"] == 0.05
-    assert weights["oi_squeeze"] == 0.10
+    assert weights["momentum"] == 0.44
+    assert weights["volume"] == 0.27
+    assert weights["taker_buy"] == 0.26
+    assert weights["liquidation"] == 0.0
+    assert weights["oi_squeeze"] == 0.0
     assert weights["funding"] == 0.03
     assert "adl_risk" not in weights
-    assert len(weights) == 7
-    assert configured_settings()["min_short_share"] == 0.50
+    assert len(weights) == 6
 
 
 def test_cleanup_before_bot_start_is_safe() -> None:
@@ -233,28 +257,114 @@ def test_candle_metrics_uses_one_hour_and_three_15m_changes() -> None:
     assert metrics["momentum"] == pytest.approx(104 / 100 - 1)
 
 
-@pytest.mark.parametrize(
-    ("closes", "expected"),
-    [
-        ([100.0] * 20 + [101.0, 102.0], True),
-        ([100.0] * 20 + [99.0, 98.0], False),
-        ([100.0] * 20 + [99.0, 100.0], True),
-        ([100.0] * 22, True),
-        ([100.0] * 19 + [101.0, 102.0], False),
-    ],
-)
-def test_eth_gate_requires_twenty_two_closed_candles_and_two_below_ema(
-    closes: list[float], expected: bool
-) -> None:
-    strategy = _eth_gate_strategy(_eth_frame(closes))
+@pytest.mark.parametrize(("direction", "expected"), [("up", True), ("flat", True), ("down", False)])
+def test_eth_gate_uses_fast_and_slow_ema_structure(direction: str, expected: bool) -> None:
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes(direction)))
 
     assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp()) is expected
 
 
+def test_eth_gate_allows_15m_pullback_while_1h_ema_is_not_falling() -> None:
+    closes = [100.0 + 0.05 * index for index in range(98)] + [102.0, 101.0]
+    strategy = _eth_gate_strategy(_eth_frame(closes))
+
+    assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    assert strategy._eth_trend == "15m走弱/1h整理"
+
+
+def test_eth_gate_blocks_single_fast_atr_break_without_waiting_for_1h() -> None:
+    closes = _eth_trend_closes("up")
+    closes[-1] = 85.0
+    strategy = _eth_gate_strategy(_eth_frame(closes))
+
+    assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    assert strategy._eth_trend == "15m急跌"
+    assert "1.5xATR" in strategy._eth_block_reason
+
+
+def _eth_context(**values) -> dict:
+    return {
+        "date": ETH_TEST_NOW - timedelta(minutes=15),
+        "close": 100.0,
+        "ema": 100.0,
+        "slope": 0.0,
+        "atr": 10.0,
+        "falling": False,
+        "rising": False,
+        "weakening": False,
+        "state": "整理",
+        **values,
+    }
+
+
+def test_eth_gate_does_not_block_when_only_1h_is_weak() -> None:
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("flat")))
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[
+            _eth_context(close=101.0, ema=100.0, slope=1.0, rising=True, state="上涨"),
+            _eth_context(
+                close=95.0,
+                ema=100.0,
+                slope=-1.0,
+                falling=True,
+                weakening=True,
+                state="走弱",
+            ),
+        ]
+    )
+
+    assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    assert strategy._eth_trend == "15m上涨/1h走弱"
+
+
+@pytest.mark.parametrize("falling", [True, False])
+def test_eth_fast_break_requires_strict_threshold_and_falling_ema(falling: bool) -> None:
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("flat")))
+    # 85 equals EMA100 - 1.5 * ATR10, so even a falling EMA must not trigger.
+    # With a flat EMA, a price below the threshold must not trigger either.
+    close = 85.0 if falling else 84.0
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[
+            _eth_context(close=close, slope=-1.0 if falling else 0.0, falling=falling),
+            _eth_context(),
+        ]
+    )
+
+    assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+
+
+def test_eth_fast_break_atr_excludes_the_signal_candle() -> None:
+    frame = _eth_frame(_eth_trend_closes("up"))
+    frame.loc[frame.index[-1], ["high", "low", "close"]] = [150.0, 85.0, 85.0]
+    strategy = _eth_gate_strategy(frame)
+
+    context = strategy._eth_timeframe_context("15m", 2, ETH_TEST_NOW.timestamp())
+
+    assert context is not None
+    assert context["atr"] == pytest.approx(strategy._wilder_atr(frame.iloc[:-1]))
+
+
+def test_eth_gate_requires_two_15m_closes_and_rising_ema_to_recover() -> None:
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("down")))
+    strategy._risk_state = {}
+    assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    assert strategy._risk_state["eth_entry_blocked"] is True
+
+    partial = _eth_trend_closes("flat")
+    partial[-1] = 101.0
+    strategy.dp.get_pair_dataframe = lambda pair, timeframe: _eth_frame(partial)
+    assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    assert strategy._eth_trend == "恢复确认中"
+
+    strategy.dp.get_pair_dataframe = lambda pair, timeframe: _eth_frame(_eth_trend_closes("up"))
+    assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    assert strategy._risk_state["eth_entry_blocked"] is False
+
+
 def test_eth_gate_ignores_an_unclosed_candle() -> None:
-    frame = _eth_frame([100.0] * 20 + [99.0, 98.0])
+    frame = _eth_frame(_eth_trend_closes("down"))
     frame = pd.concat(
-        [frame, pd.DataFrame({"date": [ETH_TEST_NOW], "close": [1_000.0]})],
+        [frame, _eth_frame([1_000.0], latest_offset_minutes=0)],
         ignore_index=True,
     )
     strategy = _eth_gate_strategy(frame)
@@ -262,24 +372,17 @@ def test_eth_gate_ignores_an_unclosed_candle() -> None:
     assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
 
 
-@pytest.mark.parametrize(
-    ("latest_offset_minutes", "expected"),
-    [(30 + 20 / 60, True), (30 + 31 / 60, False)],
-)
-def test_eth_gate_applies_data_grace_to_candle_freshness(
-    latest_offset_minutes: float, expected: bool
-) -> None:
-    strategy = _eth_gate_strategy(
-        _eth_frame([100.0] * 20 + [101.0, 102.0], latest_offset_minutes=latest_offset_minutes)
-    )
+@pytest.mark.parametrize(("age_seconds", "expected"), [(20, True), (31, False)])
+def test_eth_gate_applies_data_grace_to_candle_freshness(age_seconds: int, expected: bool) -> None:
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("up"), latest_offset_minutes=30))
     strategy.settings["data_grace_seconds"] = 30
 
-    assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp()) is expected
+    assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp() + age_seconds) is expected
 
 
 def test_eth_gate_rejects_missing_and_non_contiguous_candles() -> None:
-    missing = _eth_gate_strategy(_eth_frame([100.0] * 21))
-    non_contiguous = _eth_gate_strategy(_eth_frame([100.0] * 20 + [101.0, 102.0], gap_at=10))
+    missing = _eth_gate_strategy(_eth_frame(_eth_trend_closes("up")[:91]))
+    non_contiguous = _eth_gate_strategy(_eth_frame(_eth_trend_closes("up"), gap_at=10))
 
     assert not missing._eth_entries_allowed(ETH_TEST_NOW.timestamp())
     assert not non_contiguous._eth_entries_allowed(ETH_TEST_NOW.timestamp())
@@ -287,7 +390,7 @@ def test_eth_gate_rejects_missing_and_non_contiguous_candles() -> None:
 
 @pytest.mark.parametrize("bad_close", [float("nan"), None])
 def test_eth_gate_rejects_non_finite_close(bad_close: float | None) -> None:
-    closes: list[float | None] = [100.0] * 20 + [101.0, 102.0]
+    closes: list[float | None] = _eth_trend_closes("up")
     closes[5] = bad_close
 
     assert not _eth_gate_strategy(_eth_frame(closes))._eth_entries_allowed(ETH_TEST_NOW.timestamp())
@@ -314,7 +417,7 @@ def test_informative_pairs_subscribe_to_eth_outside_the_whitelist() -> None:
 
 
 def test_eth_gate_rejects_existing_signal_and_final_entry_confirmation() -> None:
-    strategy = _eth_gate_strategy(_eth_frame([100.0] * 20 + [99.0, 98.0]))
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("down")))
     strategy._entry_pairs = {"BTC/USDT:USDT"}
     signal_frame = pd.DataFrame({"close": [100.0], "enter_long": [1]})
 
@@ -335,21 +438,21 @@ def test_eth_gate_rejects_existing_signal_and_final_entry_confirmation() -> None
     assert not confirmed
 
 
-def test_eth_blocked_loop_keeps_risk_and_external_management_but_skips_new_work(caplog) -> None:
+def test_eth_blocked_loop_keeps_risk_checks_but_skips_new_work(caplog) -> None:
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.settings = configured_settings()
     strategy._last_position_sync = time.time()
     strategy._sync_external_pairs = Mock()
     strategy.dp = SimpleNamespace(
-        get_pair_dataframe=Mock(return_value=_eth_frame([100.0] * 20 + [99.0, 98.0])),
+        get_pair_dataframe=Mock(return_value=_eth_frame(_eth_trend_closes("down"))),
         current_whitelist=list,
+        current_selection_whitelist=list,
     )
     strategy._consume_score_refresh = Mock(return_value=True)
     strategy._start_score_refresh = Mock()
     strategy._refresh_risk_state = Mock()
     strategy._sync_rotation_state = Mock()
     strategy._plan_rotation = Mock()
-    strategy._manage_external_positions = Mock()
     strategy._select_entries = Mock(return_value=set())
     strategy._log_strategy_status = Mock()
     strategy._entry_pairs = {"OLD"}
@@ -369,7 +472,6 @@ def test_eth_blocked_loop_keeps_risk_and_external_management_but_skips_new_work(
         strategy.bot_loop_start(ETH_TEST_NOW)
 
     strategy._refresh_risk_state.assert_called_once_with(ETH_TEST_NOW)
-    strategy._manage_external_positions.assert_called_once()
     strategy._start_score_refresh.assert_called_once_with(ETH_TEST_NOW.timestamp(), exit_only=True)
     strategy._consume_score_refresh.assert_called_once_with(
         ETH_TEST_NOW.timestamp(), allow_scoring=False
@@ -387,7 +489,7 @@ def test_eth_blocked_loop_keeps_risk_and_external_management_but_skips_new_work(
         ]
 
     assert len(messages()) == 1
-    assert "ETH 下跌" in messages()[0]
+    assert "15m 与 1h 均低于 EMA20" in messages()[0]
     assert "已有仓位继续止损和退出" in messages()[0]
     for seconds, expected_count in [(5, 1), (299, 1), (300, 2)]:
         with (
@@ -399,7 +501,7 @@ def test_eth_blocked_loop_keeps_risk_and_external_management_but_skips_new_work(
 
     for frame, expected_message in [
         (pd.DataFrame(), "数据缺失、过期或无效"),
-        (_eth_frame([100.0] * 22), "不拦截"),
+        (_eth_frame(_eth_trend_closes("up")), "不拦截"),
     ]:
         strategy.dp.get_pair_dataframe.return_value = frame
         strategy._next_score_refresh = float("inf")
@@ -424,22 +526,24 @@ def test_bot_start_isolates_state_file_by_mode_without_network(
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
-        "max_open_trades": 6,
+        "max_open_trades": 11,
         "dry_run": dry_run,
         "runmode": runmode,
         "user_data_dir": str(tmp_path),
     }
     strategy._sync_external_pairs = Mock()
-    strategy._load_risk_state = Mock(return_value={})
+    strategy._load_risk_state = Mock(return_value={"eth_entry_blocked": True})
     strategy._initialize_rotation_audit = Mock()
 
     with patch.object(MODULE.threading, "Thread") as thread:
         strategy.bot_start()
 
-    assert strategy._state_path == tmp_path / state_file
+    setting = "state_file_dry_run" if dry_run else "state_file_live"
+    assert strategy._state_path == tmp_path / PUBLIC_CONFIG["leader_squeeze"][setting]
+    assert strategy._state_path.name == state_file
+    assert strategy._eth_blocked is True
     strategy._sync_external_pairs.assert_called_once()
-    thread.assert_called_once()
-    thread.return_value.start.assert_called_once()
+    thread.assert_not_called()
 
 
 def _risk_state_strategy(tmp_path: Path) -> LeaderSqueezeStrategy:
@@ -453,7 +557,7 @@ def test_missing_risk_state_file_allows_first_initialization_and_save(tmp_path) 
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
-        "max_open_trades": 6,
+        "max_open_trades": 11,
         "dry_run": False,
         "runmode": "live",
         "user_data_dir": str(tmp_path),
@@ -492,6 +596,13 @@ def test_missing_risk_state_file_allows_first_initialization_and_save(tmp_path) 
         json.dumps({"peak_equity": 1_000.0, "account_stopped": False, "day_start_equity": 0.0}),
         json.dumps({"peak_equity": 1_000.0, "account_stopped": False, "last_equity": float("inf")}),
         json.dumps({"peak_equity": 1_000.0, "account_stopped": "false"}),
+        json.dumps(
+            {
+                "peak_equity": 1_000.0,
+                "account_stopped": False,
+                "eth_entry_blocked": "true",
+            }
+        ),
     ],
 )
 def test_invalid_risk_state_is_rejected_and_latches_load_failure(tmp_path, raw_state) -> None:
@@ -561,7 +672,8 @@ def test_custom_exit_keeps_trend_reversal_available_after_risk_state_load_failur
 
 
 def test_legacy_account_stop_is_ignored_on_restart(tmp_path) -> None:
-    state_path = tmp_path / "leader_squeeze_state.live.json"
+    state_path = tmp_path / PUBLIC_CONFIG["leader_squeeze"]["state_file_live"]
+    state_path.parent.mkdir(parents=True)
     state_path.write_text(
         json.dumps(
             {
@@ -576,7 +688,7 @@ def test_legacy_account_stop_is_ignored_on_restart(tmp_path) -> None:
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
-        "max_open_trades": 6,
+        "max_open_trades": 11,
         "dry_run": False,
         "runmode": "live",
         "user_data_dir": str(tmp_path),
@@ -599,8 +711,9 @@ def test_eth_allowed_log_shows_uptrend_values_and_is_throttled(caplog) -> None:
     strategy._last_position_sync = ETH_TEST_NOW.timestamp() + 3_600
     strategy._sync_external_pairs = Mock()
     strategy.dp = SimpleNamespace(
-        get_pair_dataframe=Mock(return_value=_eth_frame([100.0] * 20 + [101.0, 102.0])),
+        get_pair_dataframe=Mock(return_value=_eth_frame(_eth_trend_closes("up"))),
         current_whitelist=list,
+        current_selection_whitelist=list,
     )
     strategy._consume_score_refresh = Mock(return_value=False)
     strategy._advance_score_refresh = Mock()
@@ -608,7 +721,6 @@ def test_eth_allowed_log_shows_uptrend_values_and_is_throttled(caplog) -> None:
     strategy._refresh_risk_state = Mock()
     strategy._sync_rotation_state = Mock()
     strategy._plan_rotation = Mock()
-    strategy._manage_external_positions = Mock()
     strategy._select_entries = Mock(return_value=set())
     strategy._log_strategy_status = Mock()
     strategy._entry_pairs = set()
@@ -635,10 +747,11 @@ def test_eth_allowed_log_shows_uptrend_values_and_is_throttled(caplog) -> None:
 
     message = messages()[0].getMessage()
     assert "不拦截" in message
-    assert "当前趋势=上涨" in message
-    assert "前根收盘=101.0000" in message
-    assert "最新收盘=102.0000" in message
+    assert "当前趋势=双周期上涨" in message
+    assert "15m=上涨" in message
+    assert "1h=上涨" in message
     assert "EMA20=" in message
+    assert "已收盘=" in message
 
 
 @pytest.mark.parametrize(
@@ -646,11 +759,11 @@ def test_eth_allowed_log_shows_uptrend_values_and_is_throttled(caplog) -> None:
     [
         ("score_data", "行情评分数据不完整"),
         ("score_age", "评分数据过期"),
-        ("stream", "强平数据流断开"),
-        ("stream_age", "强平流心跳过期"),
         ("position_data", "仓位同步失败"),
         ("position_age", "仓位数据过期"),
-        ("external_stop", "外部仓位止损未确认"),
+        ("manual_sync", "手动仓位对账不可用"),
+        ("external_unmanaged", "检测到框架未接管的外部仓位"),
+        ("external_reconciling", "外部仓位正在框架对账"),
         ("market_data", "龙头K线覆盖不足"),
         ("market_down", "龙头市场普跌"),
     ],
@@ -662,17 +775,19 @@ def test_actual_entry_rejects_each_global_gate(gate: str, expected_reason: str) 
         strategy._data_healthy = False
     elif gate == "score_age":
         strategy._last_good_data = now - strategy.settings["score_refresh_seconds"] - 31
-    elif gate == "stream":
-        strategy._liquidation_connected.clear()
-    elif gate == "stream_age":
-        strategy._liquidation_last_message = now - 16
     elif gate == "position_data":
         strategy._position_data_healthy = False
     elif gate == "position_age":
         strategy._last_position_sync = now - 61
-    elif gate == "external_stop":
+    elif gate == "manual_sync":
+        strategy._manual_sync_healthy = False
+    elif gate == "external_unmanaged":
+        strategy.config["manual_position_sync"] = {"enabled": False, "import_positions": False}
         strategy._external_pairs = {"ETH/USDT:USDT"}
-        strategy._external_stop_protected = {"ETH/USDT:USDT": False}
+    elif gate == "external_reconciling":
+        strategy.config["manual_position_sync"] = {"enabled": True, "import_positions": True}
+        strategy._external_pairs = {"ETH/USDT:USDT"}
+        strategy._manual_sync_blocked_pairs = {"ETH/USDT:USDT"}
     elif gate == "market_data":
         strategy._market_data_healthy = False
     else:
@@ -708,10 +823,8 @@ def test_select_entries_records_each_pair_decision_without_changing_selection() 
     now = time.time()
     strategy = _entry_ready_strategy(now)
     strategy.settings["max_positions"] = 2
-    strategy.settings["short_share_filter_enabled"] = True
     strategy._scores = {
         "HELD": 110.0,
-        "CROWD": 105.0,
         "NO_TREND": 100.0,
         "UNSAFE": 99.0,
         "LOW": 39.0,
@@ -720,10 +833,8 @@ def test_select_entries_records_each_pair_decision_without_changing_selection() 
     }
     strategy._metrics = {pair: _fresh_score_metric() for pair in strategy._scores}
     strategy._score_leaders = list(strategy._scores)
-    strategy._metrics["CROWD"]["short_share"] = 0.50
     strategy._metrics["NO_TREND"]["momentum"] = 0.0
     strategy._metrics["NO_TREND"]["trend_continuity"] = 0.0
-    strategy._metrics["LOW"]["short_share"] = 0.60
     strategy._candle_metrics = Mock(side_effect=lambda pair: strategy._metrics[pair])
     strategy._trend_reversed = Mock(return_value=False)
     strategy._higher_entry_reason = Mock(return_value="")
@@ -735,17 +846,16 @@ def test_select_entries_records_each_pair_decision_without_changing_selection() 
     assert selected == {"GOOD"}
     assert strategy._entry_decisions == {
         "HELD": "已持仓",
-        "CROWD": "空头占比 50.0% <= 50.0%",
         "NO_TREND": "上涨条件不足: 1h涨幅=0.00%, 上涨连续性=0%",
         "UNSAFE": "盘口安全检查未通过",
         "LOW": "本轮剩余名额已用完",
-        "GOOD": "入选: 评分 90.0 >= 40.0",
+        "GOOD": "入选第2仓: 形态关闭 强度90.0>=41.0",
         "EXTRA": "本轮剩余名额已用完",
     }
     strategy._scores = {"LOW": 39.0}
     with patch.object(MODULE.Trade, "get_open_trades", return_value=[SimpleNamespace(pair="HELD")]):
         assert strategy._select_entries() == set()
-    assert strategy._entry_decisions["LOW"] == "评分 39.0 < 门槛 40.0"
+    assert strategy._entry_decisions["LOW"] == "强度评分 39.0 < 第2仓门槛 41.0"
 
 
 def test_status_logging_reads_cached_holding_state_without_network_or_decision_changes(
@@ -796,7 +906,7 @@ def test_status_logging_reads_cached_holding_state_without_network_or_decision_c
         ]
         assert [row.style for row in table.rows] == ["green", "red"]
         assert "\x1b" not in record.getMessage()
-    selection = [record for record in caplog.records if "🎯 选币结果" in record.getMessage()]
+    selection = [record for record in caplog.records if "📊 评分综合明细" in record.getMessage()]
     assert len(selection) == 2
     assert "BTC/USDT:USDT" in selection[0].getMessage()
     assert "入选" in selection[0].getMessage()
@@ -836,7 +946,6 @@ def test_trend_continuity_increases_the_confidence_score() -> None:
     strategy._market_id = lambda pair: pair
     metrics = {
         "TRENDING": {
-            "short_share": 0.60,
             "momentum": 0.10,
             "trend_continuity": 1.0,
             "volume_ratio": 2.0,
@@ -846,7 +955,6 @@ def test_trend_continuity_increases_the_confidence_score() -> None:
             "oi_change": -0.01,
         },
         "CHOPPY": {
-            "short_share": 0.60,
             "momentum": 0.10,
             "trend_continuity": 0.0,
             "volume_ratio": 2.0,
@@ -865,12 +973,12 @@ def test_trend_continuity_increases_the_confidence_score() -> None:
 def test_apply_scores_logs_each_component_in_chinese(caplog) -> None:
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.settings = configured_settings()
+    strategy.settings["raw_metrics_log_enabled"] = True
     strategy._score_selection = ["LEADER"]
     strategy._liquidation_score = lambda symbol, now: 0.25
     strategy._market_id = lambda pair: pair
     metrics = {
         "LEADER": {
-            "short_share": 0.65,
             "momentum": 0.10,
             "trend_continuity": 1.0,
             "volume_ratio": 2.0,
@@ -888,7 +996,6 @@ def test_apply_scores_logs_each_component_in_chinese(caplog) -> None:
             "funding_next_time": 2000.0,
         },
         "FOLLOWER": {
-            "short_share": 0.60,
             "momentum": 0.05,
             "trend_continuity": 1.0,
             "volume_ratio": 1.5,
@@ -901,54 +1008,78 @@ def test_apply_scores_logs_each_component_in_chinese(caplog) -> None:
 
     with caplog.at_level(logging.INFO, logger="leader_squeeze_strategy"):
         strategy._apply_scores(1.0, metrics, metrics)
+        assert not any(hasattr(record, "strategy_log_table") for record in caplog.records)
+        # The score pass only stores a snapshot.  The status pass owns the
+        # rendered table so it can show the decisions from this selection.
+        strategy._entry_decisions = {
+            "LEADER": "本轮筛选后拦截",
+            "FOLLOWER": "本轮筛选后入选",
+        }
+        assert strategy._consume_score_report(report_now=1.0)
+        assert not strategy._consume_score_report(report_now=1.0)
 
     table_logs = [record for record in caplog.records if hasattr(record, "strategy_log_table")]
-    assert len(table_logs) == 4
+    assert len(table_logs) == 2
     component_logs = [record.getMessage() for record in table_logs]
-    labels = (
-        "原评分",
-        "轮换还需小时趋势走弱",
-        "来源",
-        "空头人数",
-        "空头持仓量",
-        "最终取高",
-        "动量",
-        "放量",
-        "短期量比",
-        "持续量比",
-        "主动买",
-        "强平",
-        "OI",
-        "15日涨幅",
-        "偏离EMA96/ATR",
-        "整理突破",
-        "评分折扣",
+    primary_labels = (
         "买入评分",
-        "1h趋势",
-        "4h背景",
+        "原评分",
+        "加权分项(动/放/买/费)",
+        "热度/形态(涨幅/偏离/折扣/阶段分)",
+        "趋势(持仓/背景)",
+        "筛选结果",
     )
-    assert all(label in "\n".join(component_logs) for label in labels)
+    detail_labels = (
+        "原始指标(动/量/买)",
+        "资金费率(本期/每h/8h/限/位/调/结)",
+    )
+    assert all(label in component_logs[0] for label in primary_labels)
+    assert all(label in component_logs[1] for label in detail_labels)
     for message in component_logs:
         assert all(pair in message for pair in metrics)
         assert "\x1b" not in message
     score_table = table_logs[0].strategy_log_table
+    detail_table = table_logs[1].strategy_log_table
     assert [cell.plain for cell in score_table.columns[1]._cells] == ["LEADER", "FOLLOWER"]
-    assert [cell.plain for cell in score_table.columns[3]._cells] == ["本轮选币", "持仓监控"]
+    assert [cell.plain for cell in score_table.columns[7]._cells] == [
+        "本轮筛选后拦截",
+        "榜外持仓 | 本轮筛选后入选",
+    ]
     assert "本批评分 2 个 = 本轮选币 1 个 + 榜外持仓监控 1 个" in score_table.caption.plain
     for index, pair in enumerate(("LEADER", "FOLLOWER")):
-        total = float(score_table.columns[2]._cells[index].plain)
-        component_total = sum(
-            float(score_table.columns[column]._cells[index].plain) for column in range(4, 11)
+        assert float(score_table.columns[3]._cells[index].plain) == pytest.approx(
+            strategy._scores[pair], abs=0.05
         )
-        assert total == pytest.approx(component_total, abs=0.15)
-        assert total == pytest.approx(strategy._scores[pair], abs=0.05)
-    assert "行情不足/无效" in component_logs[1]
-    assert "不可用/已过期" in component_logs[3]
-    assert "-0.90000%" in component_logs[3]
-    assert "-0.11250%" in component_logs[3]
-    assert "45.0%" in component_logs[3]
-    assert "1.35" in component_logs[3]
-    assert "01-01 08:33:20" in component_logs[3]
+        component_total = sum(
+            float(value)
+            for value in re.findall(r"\d+\.\d+", score_table.columns[4]._cells[index].plain)
+        )
+        assert component_total == pytest.approx(strategy._scores[pair], abs=0.15)
+    assert "行情不足/禁止" in component_logs[0]
+    assert "不可用/过期" in component_logs[1]
+    assert "-0.90000%" in component_logs[1]
+    assert "-0.11250%" in component_logs[1]
+    assert "45%" in component_logs[1]
+    assert "1.35" in component_logs[1]
+    assert "01-01 08:33" in detail_table.columns[3]._cells[0].plain
+
+    caplog.clear()
+    strategy.settings["raw_metrics_log_enabled"] = False
+    strategy._score_report_dirty = True
+    with caplog.at_level(logging.INFO, logger="leader_squeeze_strategy"):
+        assert strategy._consume_score_report(report_now=1.0)
+    table_logs = [record for record in caplog.records if hasattr(record, "strategy_log_table")]
+    assert len(table_logs) == 1
+    assert "评分综合明细" in table_logs[0].getMessage()
+    assert "原始指标与资金费率" not in table_logs[0].getMessage()
+
+
+def test_raw_metrics_log_switch_requires_boolean() -> None:
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+    strategy.settings["raw_metrics_log_enabled"] = "false"
+
+    with pytest.raises(ValueError, match="raw_metrics_log_enabled"):
+        SUPPORT.validate_runtime_settings(strategy)
 
 
 @pytest.mark.parametrize("width", [80, 140])
@@ -1021,12 +1152,12 @@ def test_market_emergency_exits_an_existing_trade() -> None:
     )
 
 
-def test_selects_two_base_positions_and_only_high_confidence_extras() -> None:
+def test_progressive_slot_floors_accept_only_candidates_for_their_next_slot() -> None:
     now = time.time()
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.settings = configured_settings()
     strategy.settings["entry_heat_max_penalty"] = 0
-    strategy.settings["short_share_filter_enabled"] = True
+    strategy.settings["entry_setup_enabled"] = False
     strategy._entry_pair_available = Mock(return_value=True)
     strategy._candle_metrics = Mock(side_effect=lambda pair: strategy._metrics[pair])
     strategy._trend_reversed = Mock(return_value=False)
@@ -1034,16 +1165,14 @@ def test_selects_two_base_positions_and_only_high_confidence_extras() -> None:
     strategy._scores = {
         "DOWN": 110.0,
         "FADING": 105.0,
-        "BLOCKED": 100.0,
         "A": 90.0,
         "B": 60.0,
-        "C": 44.99,
+        "C": 41.99,
     }
     strategy._metrics = {pair: _fresh_score_metric() for pair in strategy._scores}
     strategy._score_leaders = list(strategy._scores)
     strategy._metrics["DOWN"]["momentum"] = -0.01
     strategy._metrics["FADING"]["trend_continuity"] = 1 / 3
-    strategy._metrics["BLOCKED"]["short_share"] = 0.50
     strategy._external_pairs = set()
     strategy._data_healthy = True
     strategy._last_good_data = now
@@ -1055,39 +1184,17 @@ def test_selects_two_base_positions_and_only_high_confidence_extras() -> None:
     strategy._liquidation_last_message = now
     strategy._position_data_healthy = True
     strategy._last_position_sync = now
-    strategy._external_stop_protected = {}
     strategy._execution_is_safe = lambda pair: True
 
     with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
         assert strategy._select_entries() == {"A", "B"}
-        strategy._scores["C"] = 45.0
+        strategy._scores["C"] = 42.0
         assert strategy._select_entries() == {"A", "B", "C"}
 
         strategy._scores = {"LOW": 39.0}
         strategy._metrics = {"LOW": _fresh_score_metric()}
         strategy._score_leaders = ["LOW"]
         assert strategy._select_entries() == set()
-
-
-def test_detects_only_real_reduce_only_stop_orders() -> None:
-    assert LeaderSqueezeStrategy._is_protective_stop(
-        {
-            "side": "sell",
-            "amount": 2.0,
-            "info": {"reduceOnly": True, "stopPrice": "10"},
-        },
-        "long",
-        2.0,
-    )
-    assert not LeaderSqueezeStrategy._is_protective_stop(
-        {
-            "side": "sell",
-            "amount": 2.0,
-            "info": {"reduceOnly": True, "stopPrice": "0"},
-        },
-        "long",
-        2.0,
-    )
 
 
 def test_liquidation_worker_accepts_only_usdm_buy_and_uses_filled_quantity() -> None:
@@ -1148,25 +1255,9 @@ def test_liquidation_worker_accepts_only_usdm_buy_and_uses_filled_quantity() -> 
 def test_taker_metric_freshness_uses_the_fifteen_minute_period_end() -> None:
     metrics, headers = _fetch_pair_metrics_fixture()
 
-    assert metrics["short_share"] == 0.45
+    assert metrics["taker_ratio"] == pytest.approx(1.2)
     assert "adl_risk_score" not in metrics
     assert "X-MBX-APIKEY" not in headers
-
-
-@pytest.mark.parametrize(
-    ("short_account", "short_position", "expected_short_share"),
-    [(0.60, 0.45, 0.60), (0.35, 0.65, 0.65)],
-)
-def test_short_share_uses_the_higher_account_or_position_ratio(
-    short_account: float,
-    short_position: float,
-    expected_short_share: float,
-) -> None:
-    metrics, _ = _fetch_pair_metrics_fixture(
-        short_account=short_account, short_position=short_position
-    )
-
-    assert metrics["short_share"] == expected_short_share
 
 
 @pytest.mark.parametrize(
@@ -1183,6 +1274,7 @@ def test_rotation_confirmation_requires_adjacent_closed_candles(interruption) ->
     strategy._higher_entry_reason = Mock(return_value="")
     strategy.settings = configured_settings()
     strategy.settings["entry_heat_max_penalty"] = 0
+    strategy.settings["entry_setup_enabled"] = False
     strategy.settings["replacement_confirmations"] = 2
     strategy.settings["replacement_fast_enabled"] = False
     strategy.settings["max_positions"] = 1
@@ -1414,45 +1506,6 @@ def test_execution_guard_rejects_unsafe_or_invalid_books(book) -> None:
     assert not strategy._execution_is_safe("BTC/USDT:USDT", amount=1.0)
 
 
-def test_rotation_rejects_a_challenger_at_the_short_crowding_floor() -> None:
-    strategy = configured_strategy(LeaderSqueezeStrategy)
-    strategy._entries_allowed = lambda now: True
-    strategy._entry_pair_available = Mock(return_value=True)
-    strategy._candle_metrics = Mock(side_effect=lambda pair: strategy._metrics[pair])
-    strategy._trend_reversed = Mock(return_value=False)
-    strategy._higher_entry_reason = Mock(return_value="")
-    strategy.settings = configured_settings()
-    strategy.settings["short_share_filter_enabled"] = True
-    strategy.settings["replacement_cooldown_minutes"] = 0
-    strategy._scores = {"WEAK": 40.0, "CHALLENGER": 100.0}
-    strategy._metrics = {
-        "CHALLENGER": _fresh_score_metric(short_share=0.50),
-        "WEAK": _fresh_score_metric(),
-    }
-    strategy._external_pairs = set()
-    strategy._rotation_pair = None
-    strategy._rotation_target = None
-    strategy._rotation_candidate = None
-    strategy._rotation_seen = 0
-    strategy._rotation_score_snapshot = 0.0
-    strategy._last_rotation = 0.0
-    strategy._last_score_refresh = 12345.0
-    strategy._position_first_seen = {}
-    strategy._rotation_holding_weak = lambda pair: True
-    current_time = datetime.now(UTC)
-    weak_trade = SimpleNamespace(
-        pair="WEAK",
-        is_short=False,
-        open_date_utc=current_time - timedelta(hours=1),
-    )
-
-    with patch.object(MODULE.Trade, "get_open_trades", return_value=[weak_trade]):
-        strategy._plan_rotation(time.time() + 3600, current_time)
-
-    assert strategy._rotation_pair is None
-    assert strategy._rotation_target is None
-
-
 def test_rotation_does_not_treat_an_unscored_held_pair_as_zero() -> None:
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy._entries_allowed = lambda now: True
@@ -1490,17 +1543,18 @@ def test_rotation_does_not_treat_an_unscored_held_pair_as_zero() -> None:
     assert strategy._rotation_target is None
 
 
-def test_rotation_target_requires_the_additional_entry_score() -> None:
+def test_rotation_target_requires_the_strictest_slot_score() -> None:
     now = time.time()
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.settings = configured_settings()
     strategy.settings["entry_heat_max_penalty"] = 0
+    strategy.settings["entry_setup_enabled"] = False
     strategy._entry_pair_available = Mock(return_value=True)
     strategy._candle_metrics = Mock(side_effect=lambda pair: strategy._metrics[pair])
     strategy._trend_reversed = Mock(return_value=False)
     strategy._higher_entry_reason = Mock(return_value="")
     strategy._scores = {"TARGET": 60.0}
-    strategy._metrics = {"TARGET": _fresh_score_metric(short_share=0.56)}
+    strategy._metrics = {"TARGET": _fresh_score_metric()}
     strategy._score_leaders = ["TARGET"]
     strategy._rotation_target = "TARGET"
     strategy._external_pairs = set()
@@ -1514,7 +1568,6 @@ def test_rotation_target_requires_the_additional_entry_score() -> None:
     strategy._liquidation_last_message = now
     strategy._position_data_healthy = True
     strategy._last_position_sync = now
-    strategy._external_stop_protected = {}
     strategy._execution_is_safe = lambda pair: True
     open_trades = [SimpleNamespace(pair=f"HELD-{index}") for index in range(4)]
 
@@ -1562,59 +1615,6 @@ def test_timeframe_reversal_low_level_uses_15m_structure_data() -> None:
     strategy.dp.get_pair_dataframe.assert_called_once_with("BTC/USDT:USDT", "15m")
 
 
-def test_protective_stop_requires_correct_direction_and_quantity() -> None:
-    stop_checker = LeaderSqueezeStrategy._is_protective_stop
-    order = {
-        "side": "sell",
-        "amount": 2.0,
-        "info": {"reduceOnly": True, "stopPrice": "90"},
-    }
-    assert stop_checker(order, "long", 2.0)
-    assert not stop_checker({**order, "side": "buy"}, "long", 2.0)
-    assert not stop_checker({**order, "amount": 1.0}, "long", 2.0)
-
-
-def test_external_stops_use_binance_conditional_order_api() -> None:
-    fetch_open_orders = Mock(return_value=[])
-    strategy = configured_strategy(LeaderSqueezeStrategy)
-    strategy.dp = SimpleNamespace(
-        _exchange=SimpleNamespace(_api=SimpleNamespace(fetch_open_orders=fetch_open_orders))
-    )
-
-    assert strategy._external_stop_orders("BTC/USDT:USDT") == []
-    fetch_open_orders.assert_called_once_with("BTC/USDT:USDT", params={"stop": True})
-
-
-def test_adl_refresh_requests_linear_usdm_positions() -> None:
-    fetch_adl = Mock(return_value=[{"symbol": "BTC/USDT:USDT", "rank": 4}])
-    strategy = configured_strategy(LeaderSqueezeStrategy)
-    strategy.config = {**PUBLIC_CONFIG, "dry_run": False}
-    strategy.dp = SimpleNamespace(
-        _exchange=SimpleNamespace(_api=SimpleNamespace(fetch_positions_adl_rank=fetch_adl))
-    )
-    strategy._adl_ranks = {}
-
-    strategy._refresh_adl_ranks()
-
-    fetch_adl.assert_called_once_with(None, params={"subType": "linear"})
-    assert strategy._adl_ranks == {"BTC/USDT:USDT": 4.0}
-
-
-def test_adl_refresh_skips_positions_in_dry_run() -> None:
-    fetch_adl = Mock()
-    strategy = configured_strategy(LeaderSqueezeStrategy)
-    strategy.config = {**PUBLIC_CONFIG, "dry_run": True}
-    strategy.dp = SimpleNamespace(
-        _exchange=SimpleNamespace(_api=SimpleNamespace(fetch_positions_adl_rank=fetch_adl))
-    )
-    strategy._adl_ranks = {}
-
-    strategy._refresh_adl_ranks()
-
-    fetch_adl.assert_not_called()
-    assert strategy._adl_ranks == {}
-
-
 def test_score_network_refresh_is_background_and_includes_held_pairs() -> None:
     started = threading.Event()
     release = threading.Event()
@@ -1653,7 +1653,7 @@ def test_score_network_refresh_is_background_and_includes_held_pairs() -> None:
         time.sleep(0.01)
 
     assert set(captured) == set(leaders) | {"DB", "EXT"}
-    assert strategy._score_result[1] == [*leaders, "DB"]
+    assert strategy._score_result[1] == leaders
     assert strategy._score_selection == leaders
 
 
@@ -1662,7 +1662,6 @@ def test_score_refresh_scores_held_pairs_and_requires_eighty_percent_of_leaders(
     strategy.settings = configured_settings()
     leaders = [f"L{index}" for index in range(10)]
     remote = {
-        "short_share": 0.60,
         "taker_ratio": 1.2,
         "taker_ratio_latest": 1.2,
         "oi_change": -0.01,
@@ -1723,7 +1722,7 @@ def test_bad_candles_cannot_refresh_scores(fault) -> None:
     strategy = _entry_ready_strategy(now)
     strategy.dp = SimpleNamespace(get_pair_dataframe=lambda pair, timeframe: frame)
     strategy._score_result_lock = threading.Lock()
-    strategy._score_result = (now, ["BTC"], {"BTC": {"short_share": 0.6}})
+    strategy._score_result = (now, ["BTC"], {"BTC": {}})
     strategy._apply_scores = Mock()
     strategy._rotation_candidate, strategy._rotation_seen = ("WEAK", "BTC"), 1
     with patch.object(MODULE.time, "time", return_value=now):
@@ -1793,6 +1792,87 @@ def test_daily_loss_and_peak_drawdown_are_statistics_only(equity) -> None:
     strategy._save_risk_state.assert_called_once()
 
 
+def test_risk_state_periodic_checkpoint_is_throttled() -> None:
+    strategy = _entry_ready_strategy(ETH_TEST_NOW.timestamp())
+    strategy.config = {**PUBLIC_CONFIG, "stake_currency": "USDT"}
+    strategy.wallets = SimpleNamespace(get_all_positions=dict, get_total=lambda currency: 1000.0)
+    strategy._risk_state = {
+        "day": ETH_TEST_NOW.date().isoformat(),
+        "day_start_equity": 1000.0,
+        "peak_equity": 1000.0,
+        "account_stopped": False,
+    }
+    strategy._last_risk_state_checkpoint = -math.inf
+    strategy._save_risk_state = Mock(return_value=True)
+
+    with patch.object(MODULE.time, "monotonic", side_effect=[100.0, 120.0, 161.0]):
+        strategy._refresh_risk_state(ETH_TEST_NOW)
+        strategy._refresh_risk_state(ETH_TEST_NOW)
+        strategy._refresh_risk_state(ETH_TEST_NOW)
+
+    assert strategy._save_risk_state.call_count == 2
+
+
+def test_custom_exit_blocks_entries_and_alerts_after_configured_failures(caplog) -> None:
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+    strategy._market_exit_required = Mock(side_effect=RuntimeError("broken"))
+    strategy.dp = SimpleNamespace(send_msg=Mock())
+    pair = "BTC/USDT:USDT"
+    limit = strategy.settings["exit_evaluation_failure_limit"]
+
+    with caplog.at_level(logging.ERROR, logger="leader_squeeze_strategy"):
+        for _ in range(limit + 1):
+            assert strategy.custom_exit(pair, SimpleNamespace(), ETH_TEST_NOW, 100.0, 0.0) is None
+
+    assert strategy._exit_evaluation_failures[pair] == limit + 1
+    assert "退出评估异常" in caplog.records[-1].getMessage()
+    strategy.dp.send_msg.assert_called_once()
+    with patch.object(MODULE.Trade, "get_open_trades", return_value=[SimpleNamespace(pair=pair)]):
+        assert strategy._exit_evaluation_block_reason()
+
+
+def test_closed_trade_clears_stale_exit_evaluation_failure() -> None:
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+    pair = "BTC/USDT:USDT"
+    strategy._exit_evaluation_failures = {pair: strategy.settings["exit_evaluation_failure_limit"]}
+    strategy._external_pairs = set()
+
+    with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
+        assert strategy._exit_evaluation_block_reason() is None
+
+    assert pair not in strategy._exit_evaluation_failures
+
+
+def test_exit_evaluation_failure_gate_survives_trade_lookup_error() -> None:
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+    strategy._exit_evaluation_failures = {
+        "BTC/USDT:USDT": strategy.settings["exit_evaluation_failure_limit"]
+    }
+    strategy._warn_data_unavailable = Mock()
+
+    with patch.object(MODULE.Trade, "get_open_trades", side_effect=RuntimeError("database")):
+        reason = strategy._exit_evaluation_block_reason()
+
+    assert reason == "退出评估连续失败且持仓复核异常, 暂停新开仓"
+    strategy._warn_data_unavailable.assert_called_once()
+
+
+def test_bot_loop_revokes_stale_entry_authorization_before_failure() -> None:
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+    strategy._entry_pairs = {"BTC/USDT:USDT"}
+    strategy._prune_pending_entry_scores = Mock(side_effect=RuntimeError("broken"))
+
+    with pytest.raises(RuntimeError, match="broken"):
+        strategy.bot_loop_start(ETH_TEST_NOW)
+
+    assert strategy._entry_pairs == set()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_clamp_rejects_non_finite_values(value) -> None:
+    assert LeaderSqueezeStrategy._clamp(value, 0.2, 0.8) == 0.2
+
+
 def test_eth_blocked_refresh_only_fetches_held_exit_metrics() -> None:
     strategy = _entry_ready_strategy(1000.0)
     strategy.dp = SimpleNamespace(
@@ -1815,7 +1895,7 @@ def test_eth_blocked_refresh_only_fetches_held_exit_metrics() -> None:
             "Thread",
             side_effect=lambda target, **kwargs: SimpleNamespace(start=target),
         ),
-        patch.object(MODULE.time, "time", return_value=1000.0),
+        patch.object(MODULE.time, "time", return_value=1900.0),
     ):
         strategy._start_score_refresh(1000.0, exit_only=True)
     strategy._fetch_market_metrics.assert_called_once_with(["DB", "EXT"], exit_only=True)
@@ -1848,14 +1928,19 @@ def test_exit_metrics_update_even_when_score_coverage_fails() -> None:
     assert not strategy._data_healthy
 
 
-def test_exit_only_http_uses_source_timestamps_and_no_adl_or_crowding_endpoints() -> None:
+def test_exit_only_http_skips_disabled_oi_and_removed_crowding_endpoints() -> None:
     strategy = _entry_ready_strategy(1000.0)
     strategy.config = {**PUBLIC_CONFIG, "exchange": {}}
     strategy._market_id = lambda pair: "BTCUSDT"
     payloads = {
-        "takerlongshortRatio": [{"buyVol": "0.9", "sellVol": "1", "timestamp": 100_000}],
+        "takerlongshortRatio": [{"buyVol": "0.9", "sellVol": "1", "timestamp": 3_600_000}],
         "openInterestHist": [
-            {"sumOpenInterest": str(value), "timestamp": 900_000} for value in (100, 101, 102, 103)
+            {"sumOpenInterest": str(value), "timestamp": timestamp}
+            for value, timestamp in zip(
+                (100, 101, 102, 103, 104),
+                (900_000, 1_800_000, 2_700_000, 3_600_000, 4_500_000),
+                strict=True,
+            )
         ],
     }
     session = Mock()
@@ -1864,14 +1949,14 @@ def test_exit_only_http_uses_source_timestamps_and_no_adl_or_crowding_endpoints(
     )
     with (
         patch.object(DATA.requests, "Session", return_value=session),
-        patch.object(MODULE.time, "time", return_value=1000.0),
+        patch.object(MODULE.time, "time", return_value=5000.0),
     ):
         strategy.settings["taker_window_candles"] = 1
         metric = strategy._fetch_pair_metrics("BTC", exit_only=True)
     assert metric["taker_ratio"] == 0.9
-    assert metric["oi_change"] == pytest.approx(0.03)
-    assert metric["_exit_valid_until"] == 900 + strategy.settings["remote_metric_max_age_seconds"]
-    assert session.get.call_count == 2
+    assert metric["oi_change"] == 0.0
+    assert metric["_exit_valid_until"] == 4500 + strategy.settings["remote_metric_max_age_seconds"]
+    assert session.get.call_count == 1
     session.close.assert_called_once()
 
 

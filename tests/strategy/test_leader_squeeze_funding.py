@@ -6,7 +6,7 @@ import importlib.util
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import leader_squeeze_data as DATA
+import leader_squeeze_helpers as DATA
 import pytest
 
 from tests.strategy.leader_squeeze_test_helpers import (
@@ -16,7 +16,9 @@ from tests.strategy.leader_squeeze_test_helpers import (
 )
 
 
-STRATEGY_PATH = Path(__file__).parents[2] / "user_data/strategies/leader_squeeze_strategy.py"
+STRATEGY_PATH = (
+    Path(__file__).parents[2] / "user_data/strategies/leader_squeeze/leader_squeeze_strategy.py"
+)
 SPEC = importlib.util.spec_from_file_location("leader_squeeze_funding", STRATEGY_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -95,6 +97,7 @@ def test_funding_rate_and_floor_are_normalized_to_hourly_units(
 
     assert metric["funding_rate_hourly"] == pytest.approx(expected_rate_hourly)
     assert metric["funding_floor_hourly"] == pytest.approx(expected_floor_hourly)
+    assert metric["funding_cap_hourly"] == pytest.approx(-expected_floor_hourly)
 
 
 def test_equivalent_hourly_rate_and_floor_have_the_same_funding_score() -> None:
@@ -130,20 +133,18 @@ def test_more_negative_funding_scores_more_and_caps_at_three_points(
     assert 100 * strategy.settings["weights"]["funding"] * score <= 3.0
 
 
-def test_positive_funding_rate_receives_no_long_funding_bonus() -> None:
+def test_positive_funding_rate_penalizes_long_score_and_caps_at_three_points() -> None:
     strategy = _strategy()
 
-    assert (
-        strategy._funding_score(
-            {
-                "funding_rate_hourly": 0.001,
-                "funding_floor_hourly": -0.002,
-                "_funding_valid_until": NOW + 60,
-            },
-            NOW,
-        )
-        == 0.0
-    )
+    metric = {
+        "funding_rate_hourly": 0.001,
+        "funding_floor_hourly": -0.002,
+        "funding_cap_hourly": 0.002,
+        "_funding_valid_until": NOW + 60,
+    }
+    assert strategy._funding_score(metric, NOW) == pytest.approx(-0.5)
+    metric["funding_rate_hourly"] = 0.003
+    assert strategy._funding_score(metric, NOW) == pytest.approx(-1.0)
 
 
 def test_missing_funding_data_has_no_bonus_and_keeps_core_score_valid() -> None:
@@ -214,6 +215,29 @@ def test_funding_fetch_network_failure_returns_empty_without_blocking() -> None:
     session.close.assert_called_once()
 
 
+def test_funding_fetch_retries_one_transient_request_error() -> None:
+    session = Mock()
+    session.headers = {}
+    session.get.side_effect = [
+        DATA.requests.ConnectionError("temporary"),
+        _Response([_info()]),
+        _Response([_rate()]),
+    ]
+    strategy = _strategy()
+
+    with (
+        patch.object(DATA.requests, "Session", return_value=session),
+        patch.object(DATA.time, "sleep") as sleep,
+        patch.object(MODULE.time, "time", return_value=NOW),
+    ):
+        result = strategy._fetch_funding_metrics([PAIR])
+
+    assert set(result) == {PAIR}
+    assert session.get.call_count == 3
+    sleep.assert_called_once_with(strategy.settings["metric_retry_backoff_seconds"])
+    session.close.assert_called_once()
+
+
 def test_old_future_and_post_settlement_funding_data_do_not_score() -> None:
     strategy = _strategy()
     funding_max_age = float(strategy.settings["score_refresh_seconds"]) + float(
@@ -231,11 +255,14 @@ def test_old_future_and_post_settlement_funding_data_do_not_score() -> None:
     assert strategy._funding_score(valid, valid["funding_next_time"]) == 0.0
 
 
-def test_expired_funding_only_removes_optional_points_from_current_score() -> None:
+@pytest.mark.parametrize(("stored", "funding_score"), [(53.0, 1.0), (47.0, -1.0)])
+def test_expired_funding_removes_signed_adjustment_from_current_score(
+    stored: float, funding_score: float
+) -> None:
     strategy = _strategy()
-    strategy._scores = {PAIR: 53.0}
+    strategy._scores = {PAIR: stored}
     metric = {
-        "score_funding": 1.0,
+        "score_funding": funding_score,
         "funding_rate_hourly": -0.002,
         "funding_floor_hourly": -0.002,
         "_funding_valid_until": NOW - 1,

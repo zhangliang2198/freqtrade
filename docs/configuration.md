@@ -234,12 +234,37 @@ Mandatory parameters are marked as **Required**, which means that they are requi
 | `exchange.log_responses` | Log relevant exchange responses. For debug mode only - use with care.<br>*Defaults to `false`*<br> **Datatype:** Boolean
 | `exchange.only_from_ccxt` | Prevent data-download from data.binance.vision. Leaving this as false can greatly speed up downloads, but may be problematic if the site is not available.<br>*Defaults to `false`*<br> **Datatype:** Boolean
 | `experimental.block_bad_exchanges` | Block exchanges known to not work with freqtrade. Leave on default unless you want to test if that exchange works now. <br>*Defaults to `true`.* <br> **Datatype:** Boolean
+| | **Manual position and exchange accounting**
+| `manual_position_sync.enabled` | Reconcile manually opened Binance linear-futures positions. Disabling the subsystem restores native framework stop handling for previously imported trades. <br>*Defaults to `false`.* <br> **Datatype:** Boolean
+| `manual_position_sync.import_positions` | Import reconstructable exchange positions into the Trade database. <br>*Defaults to `true`.* <br> **Datatype:** Boolean
+| `manual_position_sync.auto_exit_positions` | Allow strategy, ROI and ordinary stop exits for imported positions. Exchange protective stops, liquidation/emergency safety exits and explicit force-exit remain available when disabled. The deprecated `auto_manage_positions` key is accepted as an alias. This setting is independent of `enabled`. <br>*Defaults to `false`.* <br> **Datatype:** Boolean
+| `manual_position_sync.manage_protective_stops` | Maintain exchange protective stops for imported positions. <br>*Defaults to `true`.* <br> **Datatype:** Boolean
+| `manual_position_sync.cleanup_orphan_stops` | Remove confirmed orphaned protective stops. <br>*Defaults to `true`.* <br> **Datatype:** Boolean
+| `manual_position_sync.interval_seconds` | Reconciliation interval. <br>*Defaults to `60`.* <br> **Datatype:** Number
+| `manual_position_sync.orphan_stop_interval_seconds` | Interval between account-wide orphan protective-stop scans. Two consecutive flat scans are still required before cancellation. <br>*Defaults to `900`.* <br> **Datatype:** Number
+| `manual_position_sync.confirmations` | Consecutive matching snapshots required before mutation. <br>*Defaults to `2`.* <br> **Datatype:** Integer
+| `manual_position_sync.history_lookback_days` | Order-history window used to reconstruct manual positions. Binance requests are split into seven-day chunks, up to 89 days total. If complete evidence is unavailable, the pair remains blocked from new entries and discretionary exits while existing exchange stops continue to be checked. <br>*Defaults to `89`.* <br> **Datatype:** Number
+| `manual_position_sync.history_limit` | Maximum order-history rows accepted before treating the result as truncated. <br>*Defaults to `1000`.* <br> **Datatype:** Integer
+| `exchange_accounting.enabled` | Reconcile Binance linear-futures fills, fees and funding with recorded trades. Fee rows in currencies other than the settlement currency remain pending because historical conversion is not inferred. <br>*Defaults to `false`.* <br> **Datatype:** Boolean
+| `exchange_accounting.interval_seconds` | Ledger reconciliation interval. <br>*Defaults to `900`.* <br> **Datatype:** Integer
+| `exchange_accounting.overlap_seconds` | Cursor overlap used to safely deduplicate incremental ledger records. <br>*Defaults to `120`.* <br> **Datatype:** Integer
+| `exchange_accounting.settlement_delay_seconds` | Delay before ledger records are considered settled. <br>*Defaults to `300`.* <br> **Datatype:** Integer
+| `exchange_accounting.initial_lookback_days` | Complete-history window for the first reconciliation, up to 89 days. <br>*Defaults to `89`.* <br> **Datatype:** Integer
+| `exchange_accounting.page_size` | Private-ledger API page size. <br>*Defaults to `1000`.* <br> **Datatype:** Integer
+| `exchange_accounting.max_pages_per_trade` | Per-trade request-page budget. <br>*Defaults to `30`.* <br> **Datatype:** Integer
+| `exchange_accounting.batch_size` | Trades processed per bot loop. <br>*Defaults to `3`.* <br> **Datatype:** Integer
 | | **Plugins**
 | `pairlists` | Define one or more pairlists to be used. [More information](plugins.md#pairlists-and-pairlist-handlers). <br>*Defaults to `StaticPairList`.*  <br> **Datatype:** List of Dicts
 | | **Telegram**
 | `telegram.enabled` | Enable the usage of Telegram. <br> **Datatype:** Boolean
 | `telegram.token` | Your Telegram bot token. Only required if `telegram.enabled` is `true`. <br>**Keep it in secret, do not disclose publicly.** <br> **Datatype:** String
 | `telegram.chat_id` | Your personal Telegram account id. Only required if `telegram.enabled` is `true`. <br>**Keep it in secret, do not disclose publicly.** <br> **Datatype:** String
+| `telegram.proxy_url` | Proxy URL used for Telegram sending and update polling. <br> **Datatype:** String
+| `telegram.connect_timeout` | Telegram connection timeout in seconds. When omitted, the Telegram client default is used. <br> **Datatype:** Number
+| `telegram.read_timeout` | Telegram read timeout in seconds. When omitted, the Telegram client default is used. <br> **Datatype:** Number
+| `telegram.write_timeout` | Telegram write timeout in seconds. When omitted, the Telegram client default is used. <br> **Datatype:** Number
+| `telegram.pool_timeout` | Telegram request-pool timeout in seconds. When omitted, the Telegram client default is used. <br> **Datatype:** Number
+| `telegram.polling_restart_seconds` | Delay before restarting an unexpectedly stopped Telegram updater. <br>*Defaults to `5`.* <br> **Datatype:** Number
 | `telegram.balance_dust_level` | Dust-level (in stake currency) - currencies with a balance below this will not be shown by `/balance`. <br> **Datatype:** float
 | `telegram.reload` | Allow "reload" buttons on telegram messages. <br>*Defaults to `true`.*<br> **Datatype:** boolean
 | `telegram.notification_settings.*` | Detailed notification settings. Refer to the [telegram documentation](telegram-usage.md) for details.<br> **Datatype:** dictionary

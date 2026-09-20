@@ -33,6 +33,18 @@ _STRATEGY = StrategyTestV3(config={})
 _STRATEGY.dp = DataProvider({}, None, None)
 
 
+def test_strategy_can_query_framework_trade_exit_policy():
+    strategy = StrategyTestV3(config={"manual_position_sync": {"auto_exit_positions": False}})
+    manual_trade = MagicMock(enter_tag="manual_import")
+    strategy_trade = MagicMock(enter_tag="strategy_entry")
+
+    assert not strategy.is_trade_exit_allowed(manual_trade)
+    assert strategy.is_trade_exit_allowed(manual_trade, ExitType.FORCE_EXIT)
+    assert strategy.is_trade_exit_allowed(strategy_trade)
+    strategy.config["manual_position_sync"]["auto_exit_positions"] = True
+    assert strategy.is_trade_exit_allowed(manual_trade)
+
+
 @pytest.mark.parametrize("disable_dataframe_checks", [False, True])
 def test_returns_latest_signal(ohlcv_history, disable_dataframe_checks):
     _STRATEGY.disable_dataframe_checks = disable_dataframe_checks

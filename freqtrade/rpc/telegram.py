@@ -30,7 +30,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import MessageLimit, ParseMode
-from telegram.error import BadRequest, NetworkError, TelegramError
+from telegram.error import BadRequest, InvalidToken, NetworkError, TelegramError
 from telegram.ext import Application, CallbackContext, CallbackQueryHandler, CommandHandler
 from telegram.helpers import escape_markdown
 
@@ -160,6 +160,9 @@ class Telegram(RPCHandler):
 
         self._app: Application
         self._loop: asyncio.AbstractEventLoop
+        self._closing = False
+        self._sending: set[asyncio.Task] = set()
+        self._shutdown_complete = asyncio.Event()
         self._init_keyboard()
         self._start_thread()
 
@@ -252,7 +255,15 @@ class Telegram(RPCHandler):
                 logger.info(f"using custom keyboard from config.json: {self._keyboard}")
 
     def _init_telegram_app(self):
-        return Application.builder().token(self._config["telegram"]["token"]).build()
+        settings = self._config["telegram"]
+        builder = Application.builder().token(settings["token"])
+        if proxy := settings.get("proxy_url"):
+            builder = builder.proxy(proxy).get_updates_proxy(proxy)
+        for name in ("connect_timeout", "read_timeout", "write_timeout", "pool_timeout"):
+            if name in settings:
+                builder = getattr(builder, name)(settings[name])
+                builder = getattr(builder, f"get_updates_{name}")(settings[name])
+        return builder.build()
 
     def _init(self) -> None:
         """
@@ -350,38 +361,80 @@ class Telegram(RPCHandler):
         self._loop.run_until_complete(self._startup_telegram())
 
     async def _startup_telegram(self) -> None:
-        retries = 3
         attempt = 0
-        while attempt < retries:
+        restart_delay = float(self._config["telegram"].get("polling_restart_seconds", 5))
+        while not self._closing:
             try:
                 await self._app.initialize()
                 await self._app.start()
                 break
+            except InvalidToken:
+                logger.exception("Telegram token is invalid. Telegram RPC is disabled.")
+                await self._cleanup_telegram()
+                return
             except Exception as ex:
-                logger.error(
-                    "Error starting Telegram bot (attempt %d/%d): %s", attempt + 1, retries, ex
-                )
                 attempt += 1
-                if attempt == retries:
-                    logger.warning("Telegram init failed.")
-                    return
-                await asyncio.sleep(2)
+                logger.error(
+                    "Error starting Telegram bot (attempt %d): %s. Retrying in %.1fs.",
+                    attempt,
+                    ex,
+                    restart_delay,
+                )
+                await asyncio.sleep(restart_delay)
+        if self._closing:
+            await self._shutdown_complete.wait()
+            return
         if self._app.updater:
-            await self._app.updater.start_polling(
-                bootstrap_retries=10,
-                timeout=20,
-                drop_pending_updates=True,
-            )
+            drop_pending_updates = True
             while True:
-                await asyncio.sleep(10)
-                if not self._app.updater.running:
+                stop_reason = "unexpectedly"
+                try:
+                    await self._app.updater.start_polling(
+                        bootstrap_retries=10,
+                        timeout=20,
+                        drop_pending_updates=drop_pending_updates,
+                    )
+                    if not drop_pending_updates:
+                        logger.info("Telegram polling reconnected.")
+                    drop_pending_updates = False
+                    while True:
+                        await asyncio.sleep(10)
+                        if not self._app.updater.running or self._closing:
+                            break
+                except Exception as ex:
+                    stop_reason = f"after {type(ex).__name__}"
+                if self._closing:
+                    await self._shutdown_complete.wait()
                     break
+                logger.warning(
+                    "Telegram polling stopped %s. Restarting in %.1fs.",
+                    stop_reason,
+                    restart_delay,
+                )
+                await asyncio.sleep(restart_delay)
 
     async def _cleanup_telegram(self) -> None:
-        if self._app.updater:
-            await self._app.updater.stop()
-        await self._app.stop()
-        await self._app.shutdown()
+        self._closing = True
+        try:
+            if self._app.updater and self._app.updater.running:
+                try:
+                    await self._app.updater.stop()
+                except Exception as exc:
+                    logger.warning("Telegram updater cleanup failed (%s).", type(exc).__name__)
+            # Notifications scheduled outside Application handlers are not awaited by app.stop().
+            if self._sending:
+                await asyncio.gather(*self._sending, return_exceptions=True)
+            if self._app.running:
+                try:
+                    await self._app.stop()
+                except Exception as exc:
+                    logger.warning("Telegram application stop failed (%s).", type(exc).__name__)
+            try:
+                await self._app.shutdown()
+            except Exception as exc:
+                logger.warning("Telegram application shutdown failed (%s).", type(exc).__name__)
+        finally:
+            self._shutdown_complete.set()
 
     def cleanup(self) -> None:
         """
@@ -389,7 +442,8 @@ class Telegram(RPCHandler):
         :return: None
         """
         # This can take up to `timeout` from the call to `start_polling`.
-        asyncio.run_coroutine_threadsafe(self._cleanup_telegram(), self._loop)
+        if self._thread.is_alive() and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._cleanup_telegram(), self._loop)
         self._thread.join()
 
     def _exchange_from_msg(self, msg: RPCOrderMsg | RPCLiquidationWarningMsg) -> str:
@@ -664,6 +718,8 @@ class Telegram(RPCHandler):
 
     def send_msg(self, msg: RPCSendMsg) -> None:
         """Send a message to telegram channel"""
+        if self._closing:
+            return
         noti = self._message_loudness(msg)
 
         if noti == "off":
@@ -674,8 +730,25 @@ class Telegram(RPCHandler):
         message = self.compose_message(deepcopy(msg))
         if message:
             asyncio.run_coroutine_threadsafe(
-                self._send_msg(message, disable_notification=(noti == "silent")), self._loop
+                self._send_notification(
+                    self._send_msg(message, disable_notification=(noti == "silent"))
+                ),
+                self._loop,
             )
+
+    async def _send_notification(self, notification: Coroutine[Any, Any, None]) -> None:
+        if self._closing:
+            notification.close()
+            return
+        task = asyncio.current_task()
+        if task is None:
+            notification.close()
+            return
+        self._sending.add(task)
+        try:
+            await notification
+        finally:
+            self._sending.discard(task)
 
     def _get_exit_emoji(self, msg):
         """

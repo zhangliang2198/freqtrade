@@ -24,8 +24,8 @@ from tests.strategy.test_leader_squeeze_dual_rotation import (
 from tests.strategy.test_leader_squeeze_strategy import LeaderSqueezeStrategy
 
 
-AUDIT = importlib.import_module("leader_squeeze_audit")
-CONFIG = importlib.import_module("leader_squeeze_config")
+AUDIT = importlib.import_module("leader_squeeze_helpers")
+CONFIG = importlib.import_module("leader_squeeze_helpers")
 RotationJournal, rotation_events = AUDIT.RotationJournal, AUDIT.rotation_events
 configure_strategy, validate_runtime_settings = (
     CONFIG.configure_strategy,
@@ -197,6 +197,15 @@ def test_config_has_no_code_fallback_and_framework_values_are_available_before_s
         configure_strategy(strategy, config)
 
 
+def test_candidate_pool_configuration_contract():
+    volume, *_, final = PUBLIC_CONFIG["pairlists"]
+    assert volume["method"] == "VolumePairList"
+    assert volume["number_assets"] == 200
+    assert volume["min_value"] == 20_000_000
+    assert final["method"] == "PercentChangePairList"
+    assert final["number_assets"] == 50
+
+
 @pytest.mark.parametrize(
     "key,value",
     [
@@ -204,6 +213,7 @@ def test_config_has_no_code_fallback_and_framework_values_are_available_before_s
         ("oi_sample_count", 1),
         ("rotation_audit_enabled", "false"),
         ("liquidation_recent_seconds", 3600),
+        ("score_candle_close_delay_seconds", 900),
     ],
 )
 def test_invalid_new_runtime_settings_are_rejected(key, value):

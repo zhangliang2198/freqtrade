@@ -6,13 +6,10 @@ import logging
 import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 
-from tests.strategy.leader_squeeze_test_helpers import (
-    PUBLIC_CONFIG,
-)
 from tests.strategy.test_leader_squeeze_remote_expiry import (
     NOW,
     PAIR,
@@ -31,12 +28,20 @@ def test_entries_allowed_reports_first_score_load_without_expiry_reason() -> Non
     assert "评分数据过期" not in strategy._entry_block_reason
 
 
+def test_disabled_liquidation_component_does_not_gate_entries() -> None:
+    strategy = _entry_ready_strategy(NOW)
+    strategy._liquidation_connected.clear()
+    strategy._liquidation_last_message = 0.0
+
+    assert strategy._entries_allowed(NOW)
+
+
 def test_consume_score_refresh_retries_before_the_earliest_metric_deadline() -> None:
     strategy = _consume_strategy(NOW)
     strategy._candle_metrics.return_value = {
         "momentum": 0.05,
         "trend_continuity": 1.0,
-        "_candle_valid_until": 1_020.0,
+        "_candle_valid_until": NOW + 20.0,
     }
     strategy._score_result = (
         NOW,
@@ -45,7 +50,16 @@ def test_consume_score_refresh_retries_before_the_earliest_metric_deadline() -> 
     )
 
     assert strategy._consume_score_refresh(NOW)
-    assert strategy._next_score_refresh <= 1_030.0
+    assert strategy._next_score_refresh <= NOW + 30.0
+
+
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [(3_599.0, 3_630.0), (3_605.0, 3_630.0), (3_631.0, 4_530.0)],
+)
+def test_normal_score_refresh_follows_candle_close_delay(now, expected) -> None:
+    strategy = _entry_ready_strategy(now)
+    assert strategy._scheduled_score_refresh(now, now + 3600) == expected
 
 
 def test_blocked_score_refresh_retries_before_the_earliest_exit_deadline() -> None:
@@ -100,10 +114,10 @@ def test_entry_pair_outside_whitelist_has_specific_reason_without_data_warning(c
 @pytest.mark.parametrize(
     "pending, eth_allowed, last_request, expected",
     [
-        (False, True, 900.0, NOW),
-        (True, True, 900.0, 1300.0),
-        (False, False, 900.0, 1300.0),
-        (False, True, 995.0, 1300.0),
+        (False, True, NOW - 100.0, NOW),
+        (True, True, NOW - 100.0, NOW + 300.0),
+        (False, False, NOW - 100.0, NOW + 300.0),
+        (False, True, NOW - 5.0, NOW + 300.0),
     ],
 )
 def test_lost_coverage_requests_refresh_without_bypassing_throttle(
@@ -113,7 +127,7 @@ def test_lost_coverage_requests_refresh_without_bypassing_throttle(
     strategy._metrics = {}
     strategy._score_pending = pending
     strategy._last_score_request = last_request
-    strategy._next_score_refresh = 1300.0
+    strategy._next_score_refresh = NOW + 300.0
     strategy._advance_score_refresh(NOW, allow_scoring=eth_allowed)
     assert strategy._next_score_refresh == expected
 
@@ -126,21 +140,10 @@ def test_rankings_hide_removed_candidates_but_retain_their_position_scores():
     assert strategy._current_score("REMOVED", NOW) == 80.0
 
 
-def test_disabled_external_exchange_stop_does_not_create_or_cancel_orders():
-    strategy = _entry_ready_strategy(NOW)
-    strategy.config = {**PUBLIC_CONFIG, "dry_run": False}
-    strategy.dp = Mock()
-    strategy.order_types["stoploss_on_exchange"] = False
-    assert not strategy.order_types["stoploss_on_exchange"]
-    assert strategy._ensure_external_stop(PAIR, SimpleNamespace(), NOW)
-    assert strategy.dp.mock_calls == []
-
-
 def test_future_database_trade_time_blocks_new_entries_without_mutating_trade():
     strategy = _entry_ready_strategy(NOW)
     strategy.wallets = SimpleNamespace(get_all_positions=dict)
     strategy._position_first_seen = {}
-    strategy._external_stop_last_check = {}
     trade = SimpleNamespace(pair=PAIR, open_date_utc=datetime.fromtimestamp(NOW + 28800, UTC))
     original = trade.open_date_utc
     with (

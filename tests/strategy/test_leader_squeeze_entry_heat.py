@@ -46,7 +46,7 @@ def _strategy(frame):
         {
             key: value
             for key, value in configured_settings().items()
-            if key.startswith("entry_heat_")
+            if key.startswith(("entry_heat_", "entry_setup_"))
         }
     )
     strategy.dp = SimpleNamespace(get_pair_dataframe=Mock(return_value=frame))
@@ -68,7 +68,7 @@ def test_extended_and_cooled_breakouts_with_same_return_receive_different_penalt
     assert extended["return_15d"] == cooled["return_15d"] == pytest.approx(0.8)
     assert extended["penalty"] == pytest.approx(0.16)
     assert cooled["cooled_breakout"] == 1
-    assert cooled["penalty"] == pytest.approx(0.02)
+    assert cooled["penalty"] == pytest.approx(0.01)
 
 
 def test_recent_appreciation_increases_discount_but_never_increases_base_score():
@@ -146,7 +146,7 @@ def test_discounted_score_controls_ranking_threshold_and_order_confirmation():
     ):
         assert strategy._ranked_pairs()[0][0] == "COOL"
         assert strategy._select_entries() == {"COOL"}
-        assert "门槛" in strategy._entry_decisions[PAIR]
+        assert "末端过热" in strategy._entry_decisions[PAIR]
         assert not strategy.confirm_trade_entry(PAIR, "market", 1, 180, "GTC", NOW, None, "long")
 
 
@@ -166,7 +166,7 @@ def test_order_confirmation_recomputes_heat_after_orderbook_request():
     ):
         assert strategy._entry_score(PAIR) > 40
         assert not strategy.confirm_trade_entry(PAIR, "market", 1, 180, "GTC", NOW, None, "long")
-        assert "门槛" in strategy._entry_block_reason
+        assert "末端过热" in strategy._entry_block_reason
     strategy._execution_is_safe.assert_called_once()
 
 
@@ -208,6 +208,20 @@ def test_disabled_heat_does_not_require_long_history():
     strategy.settings["entry_heat_max_penalty"] = 0
     assert strategy._entry_score(PAIR) == 90
     strategy.dp.get_pair_dataframe.assert_not_called()
+
+
+def test_zero_heat_discount_keeps_setup_and_late_chase_protection_enabled():
+    strategy = _strategy(_frame())
+    strategy.settings["entry_heat_max_penalty"] = 0
+
+    with patch.object(MODULE.time, "time", return_value=NOW.timestamp()):
+        assert strategy._entry_score(PAIR) == 90
+        strategy.dp.get_pair_dataframe.assert_not_called()
+        setup = strategy._entry_setup_metrics(PAIR)
+
+    assert setup is not None
+    assert setup["late"] == 1
+    assert setup["stage"] == "末端"
 
 
 def test_long_history_request_fits_binance_futures_startup_limit(mocker, default_conf):
@@ -279,13 +293,79 @@ def test_heat_log_shows_real_discount_and_buy_score(caplog):
         caplog.at_level("INFO", logger="leader_squeeze_strategy"),
     ):
         strategy._apply_scores(NOW.timestamp(), {PAIR: metric}, {PAIR: metric})
-    heat_table = next(
+        strategy._consume_score_report(report_now=NOW.timestamp())
+    score_table = next(
         record.strategy_log_table
         for record in caplog.records
-        if "入场过热评估" in record.getMessage()
+        if "评分综合明细" in record.getMessage()
     )
-    assert heat_table.columns[1]._cells[0].plain == "+80.0%"
-    assert heat_table.columns[4]._cells[0].plain == "16.0%"
-    assert float(heat_table.columns[5]._cells[0].plain) == pytest.approx(
+    assert "+80.0%" in score_table.columns[5]._cells[0].plain
+    assert "折16.0%" in score_table.columns[5]._cells[0].plain
+    assert float(score_table.columns[2]._cells[0].plain) == pytest.approx(
         strategy._scores[PAIR] * 0.84, abs=0.05
     )
+
+
+def test_setup_remains_visible_when_heat_discount_is_disabled(caplog):
+    strategy = _strategy(_frame("cooled"))
+    strategy.settings["entry_heat_max_penalty"] = 0
+    strategy._liquidation_score = Mock(return_value=0.5)
+    strategy._market_id = lambda pair: pair
+    metric = {
+        **strategy._metrics[PAIR],
+        "volume_ratio": 2.0,
+        "volume_activity_ratio": 3.0,
+        "taker_ratio": 1.5,
+        "taker_ratio_latest": 1.5,
+        "oi_change": -0.01,
+    }
+
+    with (
+        patch.object(MODULE.time, "time", return_value=NOW.timestamp()),
+        caplog.at_level("INFO", logger="leader_squeeze_strategy"),
+    ):
+        strategy._apply_scores(NOW.timestamp(), {PAIR: metric}, {PAIR: metric})
+        strategy._consume_score_report(report_now=NOW.timestamp())
+
+    score_table = next(
+        record.strategy_log_table
+        for record in caplog.records
+        if "评分综合明细" in record.getMessage()
+    )
+    heat_cell = score_table.columns[5]._cells[0].plain
+    assert "形" in heat_cell
+    assert "折0.0%" in heat_cell
+    assert float(score_table.columns[2]._cells[0].plain) == pytest.approx(
+        strategy._scores[PAIR], abs=0.05
+    )
+
+
+def test_disabled_setup_is_reported_as_disabled_instead_of_fake_score(caplog):
+    strategy = _strategy(_frame())
+    strategy.settings["entry_setup_enabled"] = False
+    strategy._liquidation_score = Mock(return_value=0.5)
+    strategy._market_id = lambda pair: pair
+    metric = {
+        **strategy._metrics[PAIR],
+        "volume_ratio": 2.0,
+        "volume_activity_ratio": 3.0,
+        "taker_ratio": 1.5,
+        "taker_ratio_latest": 1.5,
+        "oi_change": -0.01,
+    }
+
+    with (
+        patch.object(MODULE.time, "time", return_value=NOW.timestamp()),
+        caplog.at_level("INFO", logger="leader_squeeze_strategy"),
+    ):
+        strategy._apply_scores(NOW.timestamp(), {PAIR: metric}, {PAIR: metric})
+        strategy._consume_score_report(report_now=NOW.timestamp())
+
+    score_table = next(
+        record.strategy_log_table
+        for record in caplog.records
+        if "评分综合明细" in record.getMessage()
+    )
+    heat_cell = score_table.columns[5]._cells[0].plain
+    assert "形关闭" in heat_cell
+    assert "形中继100" not in heat_cell

@@ -43,7 +43,9 @@ from freqtrade.exchange import (
     timeframe_to_seconds,
 )
 from freqtrade.exchange.exchange_types import CcxtOrder
+from freqtrade.exchange_accounting import ExchangeAccounting
 from freqtrade.leverage.liquidation_price import update_liquidation_prices
+from freqtrade.manual_position_sync import ManualPositionSync
 from freqtrade.misc import safe_value_fallback, safe_value_fallback2
 from freqtrade.mixins import LoggingMixin
 from freqtrade.persistence import Order, PairLocks, Trade, init_db
@@ -64,6 +66,7 @@ from freqtrade.rpc.rpc_types import (
 )
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
+from freqtrade.trade_policy import MANUAL_IMPORT_TAG, trade_exit_allowed
 from freqtrade.util import FtPrecise, FtScheduler, MeasureTime, PeriodicCache, dt_from_ts, dt_now
 from freqtrade.util.migrations import migrate_live_content
 from freqtrade.wallets import Wallets
@@ -165,6 +168,9 @@ class FreqtradeBot(LoggingMixin):
 
             # Protect exit-logic from forcesell and vice versa
             self._exit_lock = Lock()
+            self._manual_sync_lock = Lock()
+            self.manual_position_sync = ManualPositionSync(self)
+            self.exchange_accounting = ExchangeAccounting(self)
             timeframe_secs = timeframe_to_seconds(self.strategy.timeframe)
             self._exit_reason_cache = PeriodicCache(100, ttl=timeframe_secs)
             # Tracks which positions we already warned about approaching liquidation.
@@ -313,6 +319,11 @@ class FreqtradeBot(LoggingMixin):
 
         self.update_trades_without_assigned_fees()
 
+        # Manual reconciliation performs several exchange reads. A dedicated lock prevents
+        # overlapping runs without delaying RPC force-exit on the execution lock.
+        with self._manual_sync_lock:
+            self.manual_position_sync.run()
+
         # Query trades from persistence layer
         trades: list[Trade] = Trade.get_open_trades()
 
@@ -358,6 +369,9 @@ class FreqtradeBot(LoggingMixin):
         Trade.commit()
         self.rpc.process_msg_queue(self.dataprovider._msg_queue)
         self.last_process = datetime.now(UTC)
+        # Ledger history is diagnostic/accounting work. Run it after this loop's trading
+        # decisions; exchange reads are lock-free and its short write phase locks internally.
+        self.exchange_accounting.run()
 
     def process_stopped(self) -> None:
         """
@@ -639,6 +653,7 @@ class FreqtradeBot(LoggingMixin):
                         stoploss_order=order.ft_order_side == "stoploss",
                         send_msg=False,
                     )
+                    self.exchange_accounting.restore_verified_profit(trade)
 
         trades = Trade.get_open_trades_without_assigned_fees()
         for trade in trades:
@@ -679,15 +694,19 @@ class FreqtradeBot(LoggingMixin):
             except ExchangeError:
                 logger.warning(f"Error updating {order.order_id}.")
 
-    def handle_onexchange_order(self, trade: Trade) -> bool:
+    def handle_onexchange_order(self, trade: Trade, orders: list[CcxtOrder] | None = None) -> bool:
         """
         Try refinding a order that is not in the database.
         Only used balance disappeared, which would make exiting impossible.
         :return: True if the trade was deleted, False otherwise
         """
         try:
-            orders = self.exchange.fetch_orders(
-                trade.pair, trade.open_date_utc - timedelta(seconds=10)
+            orders = (
+                orders
+                if orders is not None
+                else self.exchange.fetch_orders(
+                    trade.pair, trade.open_date_utc - timedelta(seconds=10)
+                )
             )
             prev_exit_reason = trade.exit_reason
             prev_trade_state = trade.is_open
@@ -716,7 +735,6 @@ class FreqtradeBot(LoggingMixin):
                         safe_value_fallback(order, "lastTradeTimestamp", "timestamp")
                     )
                     trade.orders.append(order_obj)
-                    Trade.commit()
                     trade.exit_reason = ExitType.SOLD_ON_EXCHANGE.value
 
                 self.update_trade_state(trade, order["id"], order, send_msg=False)
@@ -917,6 +935,8 @@ class FreqtradeBot(LoggingMixin):
         """
         # Walk through each pair and check if it needs changes
         for trade in Trade.get_open_trades():
+            if not self.manual_position_sync.entry_allowed(trade.pair):
+                continue
             # If there is any open orders, wait for them to finish.
             # TODO Remove to allow mul open orders
             if trade.has_open_position or trade.has_open_orders:
@@ -988,6 +1008,8 @@ class FreqtradeBot(LoggingMixin):
             )
 
         if stake_amount is not None and stake_amount < 0.0:
+            if not trade_exit_allowed(self.config, trade):
+                return
             # We should decrease our position
             amount = self.exchange.amount_to_contract_precision(
                 trade.pair,
@@ -1078,6 +1100,9 @@ class FreqtradeBot(LoggingMixin):
         :return: True if an entry order is created, False if it fails.
         :raise: DependencyException or it's subclasses like ExchangeError.
         """
+        if not self.manual_position_sync.entry_allowed(pair):
+            logger.warning("Entry blocked for %s: manual position reconciliation pending", pair)
+            return False
         time_in_force = self.strategy.order_time_in_force["entry"]
 
         side: BuySell = "sell" if is_short else "buy"
@@ -1239,11 +1264,7 @@ class FreqtradeBot(LoggingMixin):
         self._notify_enter(trade, order_obj, order_type, sub_trade=pos_adjust)
 
         if pos_adjust:
-            if order_status == "closed":
-                logger.info(f"DCA order closed, trade should be up to date: {trade}")
-                trade = self.cancel_stoploss_on_exchange(trade)
-            else:
-                logger.info(f"DCA order {order_status}, will wait for resolution: {trade}")
+            trade = self._handle_position_adjustment_order(trade, order_status)
 
         # Update fees if order is non-opened
         if order_status in constants.NON_OPEN_EXCHANGE_STATES:
@@ -1256,6 +1277,13 @@ class FreqtradeBot(LoggingMixin):
                 )
 
         return True
+
+    def _handle_position_adjustment_order(self, trade: Trade, order_status: str | None) -> Trade:
+        if order_status == "closed":
+            logger.info(f"DCA order closed, trade should be up to date: {trade}")
+            return self.cancel_stoploss_on_exchange(trade)
+        logger.info(f"DCA order {order_status}, will wait for resolution: {trade}")
+        return trade
 
     def cancel_stoploss_on_exchange(self, trade: Trade, allow_nonblocking: bool = False) -> Trade:
         """
@@ -1485,7 +1513,8 @@ class FreqtradeBot(LoggingMixin):
         trades_closed = 0
         for trade in trades:
             if (
-                not trade.has_open_orders
+                trade.pair not in self.manual_position_sync.blocked
+                and not trade.has_open_orders
                 and not trade.has_open_sl_orders
                 and trade.fee_open_currency is not None
                 and not self.wallets.check_exit_amount(trade)
@@ -1512,6 +1541,10 @@ class FreqtradeBot(LoggingMixin):
                     logger.warning(
                         f"Unable to handle stoploss on exchange for {trade.pair}: {exception}"
                     )
+                if trade.pair in self.manual_position_sync.blocked:
+                    continue
+                if not trade_exit_allowed(self.config, trade):
+                    continue
                 # Check if we can exit our current position for this trade
                 if trade.has_open_position and trade.is_open and self.handle_trade(trade):
                     trades_closed += 1
@@ -1576,6 +1609,8 @@ class FreqtradeBot(LoggingMixin):
         )
         for should_exit in exits:
             if should_exit.exit_flag:
+                if not trade_exit_allowed(self.config, trade, should_exit.exit_type):
+                    continue
                 exit_tag1 = exit_tag if should_exit.exit_type == ExitType.EXIT_SIGNAL else None
                 if trade.has_open_orders and (
                     prev_eval := self._exit_reason_cache.get(
@@ -1601,6 +1636,13 @@ class FreqtradeBot(LoggingMixin):
         Force-sells the pair (using EmergencySell reason) in case of Problems creating the order.
         :return: True if the order succeeded, and False in case of problems.
         """
+        manual_sync = self.config.get("manual_position_sync", {})
+        if (
+            trade.enter_tag == MANUAL_IMPORT_TAG
+            and manual_sync.get("enabled", False)
+            and not manual_sync.get("manage_protective_stops", True)
+        ):
+            return False
         try:
             stoploss_order = self.exchange.create_stoploss(
                 pair=trade.pair,
@@ -1623,8 +1665,11 @@ class FreqtradeBot(LoggingMixin):
 
         except InvalidOrderException as e:
             logger.error(f"Unable to place a stoploss order on exchange. {e}")
-            logger.warning("Exiting the trade forcefully")
-            self.emergency_exit(trade, stop_price)
+            if trade_exit_allowed(self.config, trade, ExitType.EMERGENCY_EXIT):
+                logger.warning("Exiting the trade forcefully")
+                self.emergency_exit(trade, stop_price)
+            else:
+                logger.warning("Manual position protection failed; automatic exit is disabled.")
 
         except ExchangeError:
             logger.exception("Unable to place a stoploss order on exchange.")
@@ -1671,6 +1716,10 @@ class FreqtradeBot(LoggingMixin):
             or (trade.has_open_orders and self.exchange.get_option("stoploss_blocks_assets", True))
         ):
             # The trade can be closed already (sell-order fill confirmation came in this iteration)
+            return False
+
+        # Manual stops are adopted, resized and deduplicated by the reconciliation pass.
+        if trade.enter_tag == MANUAL_IMPORT_TAG and self.manual_position_sync.enabled:
             return False
 
         # Disabling new exchange stops must not abandon already submitted stop orders.
@@ -2268,6 +2317,8 @@ class FreqtradeBot(LoggingMixin):
         :param exit_check: CheckTuple with signal and reason
         :return: True if it succeeds False
         """
+        if not trade_exit_allowed(self.config, trade, exit_check.exit_type):
+            return False
         trade.set_funding_fees(
             self.exchange.get_funding_fees(
                 pair=trade.pair,

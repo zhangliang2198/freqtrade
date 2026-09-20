@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import json
+import copy
 import time
 from datetime import timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 
 from tests.strategy.leader_squeeze_test_helpers import (
+    PUBLIC_CONFIG,
     configured_settings,
     configured_strategy,
 )
@@ -45,7 +45,6 @@ def _score_strategy() -> LeaderSqueezeStrategy:
 
 def _metric(
     *,
-    short_share: float = 0.65,
     momentum: float = 0.015,
     trend_continuity: float = 2 / 3,
     volume_ratio: float = 1.5,
@@ -58,7 +57,6 @@ def _metric(
     if volume_activity_ratio is None:
         volume_activity_ratio = 1 + 2 * (volume_ratio - 1)
     return {
-        "short_share": short_share,
         "momentum": momentum,
         "trend_continuity": trend_continuity,
         "volume_ratio": volume_ratio,
@@ -99,23 +97,23 @@ def test_absolute_momentum_score_is_invariant_to_candidate_extrema(extra_momentu
     assert after == pytest.approx(before)
 
 
-def test_score_weights_remove_adl_and_keep_oi_squeeze_at_ten_points() -> None:
+def test_score_weights_prioritize_direct_price_volume_and_buying_evidence() -> None:
     strategy = _score_strategy()
     weights = strategy.settings["weights"]
-    assert weights["momentum"] == pytest.approx(0.32)
+    assert weights["momentum"] == pytest.approx(0.44)
     assert weights["funding"] == pytest.approx(0.03)
-    assert weights["volume"] == pytest.approx(0.15)
-    assert weights["taker_buy"] == pytest.approx(0.15)
-    assert weights["oi_squeeze"] == pytest.approx(0.10)
+    assert weights["volume"] == pytest.approx(0.27)
+    assert weights["taker_buy"] == pytest.approx(0.26)
+    assert weights["oi_squeeze"] == pytest.approx(0.0)
     assert "adl_risk" not in weights
-    assert len(weights) == 7
+    assert len(weights) == 6
     assert sum(weights.values()) == pytest.approx(1.0)
     score = _apply(strategy, {PAIR: _metric()})[PAIR]
 
-    assert score == pytest.approx(45.9)
+    assert score == pytest.approx(47.3666666667)
 
 
-def test_positive_price_and_falling_oi_score_at_most_ten_points() -> None:
+def test_oi_change_does_not_affect_score_when_component_is_disabled() -> None:
     strategy = _score_strategy()
     rising = _metric(momentum=0.01, oi_change=-0.03)
     unchanged_oi = _metric(momentum=0.01, oi_change=0.0)
@@ -123,7 +121,7 @@ def test_positive_price_and_falling_oi_score_at_most_ten_points() -> None:
     rising_score = _apply(strategy, {PAIR: rising})[PAIR]
     unchanged_oi_score = _apply(strategy, {PAIR: unchanged_oi})[PAIR]
 
-    assert rising_score - unchanged_oi_score == pytest.approx(10.0)
+    assert rising_score == pytest.approx(unchanged_oi_score)
 
 
 def test_strong_price_volume_and_taker_buy_score_without_oi_drop() -> None:
@@ -142,7 +140,7 @@ def test_strong_price_volume_and_taker_buy_score_without_oi_drop() -> None:
         },
     )[PAIR]
 
-    assert score == pytest.approx(74.0)
+    assert score == pytest.approx(97.0)
 
 
 def test_stronger_price_volume_and_buying_score() -> None:
@@ -154,7 +152,7 @@ def test_stronger_price_volume_and_buying_score() -> None:
         },
     )[PAIR]
 
-    assert score == pytest.approx(57.6666667)
+    assert score == pytest.approx(66.5333333333)
 
 
 def test_oi_squeeze_requires_positive_price_momentum() -> None:
@@ -163,7 +161,7 @@ def test_oi_squeeze_requires_positive_price_momentum() -> None:
     no_oi_score = _apply(strategy, {PAIR: _metric(momentum=0.0, oi_change=0.0)})[PAIR]
 
     assert weak_score == pytest.approx(no_oi_score)
-    assert weak_score < float(strategy.settings["base_entry_score"])
+    assert weak_score < float(strategy.settings["entry_slot_score_thresholds"][0])
 
 
 def test_missing_funding_data_defaults_to_zero_and_does_not_block_entry() -> None:
@@ -176,8 +174,6 @@ def test_missing_funding_data_defaults_to_zero_and_does_not_block_entry() -> Non
 def _entry_strategy(scores: dict[str, float]) -> LeaderSqueezeStrategy:
     now = time.time()
     strategy = _entry_ready_strategy(now)
-    # These tests cover the legacy optional short-crowding hard gate.
-    strategy.settings["short_share_filter_enabled"] = True
     strategy._scores = scores
     strategy._metrics = {pair: _metric() for pair in scores}
     strategy._score_leaders = list(scores)
@@ -185,15 +181,13 @@ def _entry_strategy(scores: dict[str, float]) -> LeaderSqueezeStrategy:
     strategy._trend_reversed = Mock(return_value=False)
     strategy._entry_pair_available = Mock(return_value=True)
     strategy._execution_is_safe = Mock(return_value=True)
-    strategy.settings["min_positions"] = 2
-    strategy.settings["max_positions"] = 5
+    strategy.settings["max_positions"] = 10
     return strategy
 
 
 @pytest.mark.parametrize(
     "override",
     [
-        {"short_share": 0.50},
         {"momentum": 0.0},
         {"trend_continuity": 1 / 3},
     ],
@@ -206,16 +200,22 @@ def test_low_intensity_hard_gates_reject_even_a_100_point_candidate(override) ->
         assert strategy._select_entries() == set()
 
 
-def test_two_initial_positions_accept_40_but_third_position_requires_45() -> None:
-    strategy = _entry_strategy({"A": 40.0, "B": 40.0})
-    with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
-        assert strategy._select_entries() == {"A", "B"}
+@pytest.mark.parametrize("slot_index", range(10))
+def test_each_position_uses_its_configured_incremental_strength_floor(slot_index: int) -> None:
+    thresholds = configured_settings()["entry_slot_score_thresholds"]
+    floor = float(thresholds[slot_index])
+    pair = f"SLOT-{slot_index}"
+    held = [SimpleNamespace(pair=f"HELD-{index}") for index in range(slot_index)]
+    strategy = _entry_strategy({pair: floor})
 
-    strategy = _entry_strategy({"A": 45.0, "B": 40.0, "C": 44.99})
-    with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
-        assert strategy._select_entries() == {"A", "C"}
-    assert "B" not in strategy._entry_pairs
-    assert "45.0" in strategy._entry_decisions["B"]
+    with patch.object(MODULE.Trade, "get_open_trades", return_value=held):
+        assert strategy._select_entries() == {pair}
+        assert strategy._entry_slot_assignments[pair] == slot_index
+
+    strategy = _entry_strategy({pair: floor - 0.01})
+    with patch.object(MODULE.Trade, "get_open_trades", return_value=held):
+        assert strategy._select_entries() == set()
+    assert f"第{slot_index + 1}仓门槛" in strategy._entry_decisions[pair]
 
 
 def _rotation_strategy(weak_score: float, target_score: float) -> LeaderSqueezeStrategy:
@@ -300,7 +300,7 @@ def test_eth_downtrend_blocks_select_confirm_and_rotation_even_at_100_points() -
     assert strategy._rotation_seen == 0
 
 
-def test_rotation_skips_too_young_weakest_and_unsafe_best_candidate() -> None:
+def test_rotation_does_not_fall_back_when_bottom_ranked_holding_is_too_young() -> None:
     strategy = _rotation_strategy(40.0, 60.0)
     strategy.settings["max_positions"] = 2
     strategy._scores.update({"YOUNG": 20.0, "UNSAFE": 90.0})
@@ -314,8 +314,8 @@ def test_rotation_skips_too_young_weakest_and_unsafe_best_candidate() -> None:
     ]
     with patch.object(MODULE.Trade, "get_open_trades", return_value=trades):
         strategy._plan_rotation(ETH_TEST_NOW.timestamp() + 3600, ETH_TEST_NOW)
-    assert strategy._rotation_candidate == (WEAK, TARGET)
-    assert [c.args[0] for c in strategy._execution_is_safe.call_args_list] == ["UNSAFE", TARGET]
+    assert strategy._rotation_candidate is None
+    strategy._execution_is_safe.assert_not_called()
 
 
 def test_unsubmitted_rotation_is_cancelled_when_score_gap_disappears() -> None:
@@ -329,7 +329,7 @@ def test_unsubmitted_rotation_is_cancelled_when_score_gap_disappears() -> None:
     strategy._persist_rotation.assert_called_once()
 
 
-@pytest.mark.parametrize("held_count,allowed", [(0, True), (1, True), (2, False)])
+@pytest.mark.parametrize("held_count,allowed", [(0, True), (1, True), (10, False)])
 def test_confirmation_checks_actual_position_count_after_funding_expires(held_count, allowed):
     strategy = _entry_strategy({PAIR: 46.0})
     strategy._metrics[PAIR].update(
@@ -350,7 +350,7 @@ def test_confirmation_checks_actual_position_count_after_funding_expires(held_co
             is allowed
         )
     if not allowed:
-        assert "43.0 < 门槛 45.0" in strategy._entry_block_reason
+        assert "43.0 < 门槛 54.0" in strategy._entry_block_reason
         strategy._execution_is_safe.assert_not_called()
 
 
@@ -377,16 +377,14 @@ def test_global_risk_gates_cannot_be_bypassed_by_a_high_score(flag, value):
 
 
 def test_public_config_matches_strategy_policy_and_keeps_margin_and_risk_limits():
-    config_path = Path(__file__).parents[2] / "user_data/config.json"
-    config = json.loads(config_path.read_text())
+    config = copy.deepcopy(PUBLIC_CONFIG)
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = config
     strategy.settings = {**configured_settings(), **config["leader_squeeze"]}
     strategy._validate_score_settings()
     for key in (
-        "base_entry_score",
-        "additional_entry_score",
-        "min_short_share",
+        "entry_slot_score_thresholds",
+        "entry_setup_min_score",
         "min_trend_continuity",
         "momentum_full_score",
         "liquidation_min_notional",
@@ -395,8 +393,8 @@ def test_public_config_matches_strategy_policy_and_keeps_margin_and_risk_limits(
     ):
         assert config["leader_squeeze"][key] == configured_settings()[key]
     assert config["margin_mode"] == "cross"
-    assert config["max_open_trades"] == 6
-    assert strategy.settings["max_positions"] == 5
-    assert strategy.settings["stake_ratio"] == 0.10
+    assert config["max_open_trades"] == 11
+    assert strategy.settings["max_positions"] == 10
+    assert strategy.settings["stake_ratio"] == 0.08
     assert strategy.settings["leverage"] == 5.0
     assert "max_drawdown_limit" not in strategy.settings

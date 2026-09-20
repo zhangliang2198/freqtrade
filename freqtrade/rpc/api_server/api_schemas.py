@@ -295,7 +295,7 @@ class TradeSchema(BaseModel):
     is_short: bool
     exchange: str
     amount: float
-    amount_requested: float
+    amount_requested: float | None = None
     stake_amount: float
     max_stake_amount: float | None = None
     strategy: str

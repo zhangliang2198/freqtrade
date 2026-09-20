@@ -94,6 +94,23 @@ def test_15m_pullback_does_not_exit_or_rotate_a_healthy_hourly_trend():
     assert strategy.custom_exit(PAIR, SimpleNamespace(), NOW, 101.6, 0.1) is None
 
 
+def test_trend_reversal_cache_reuses_closed_candle_and_invalidates_on_correction():
+    frame = hourly_source()
+    strategy = strategy_for(frame)
+    strategy._timeframe_reversed = Mock(wraps=strategy._timeframe_reversed)
+    strategy._intrabar_reversed = Mock(wraps=strategy._intrabar_reversed)
+
+    assert strategy._trend_reversed(PAIR) is False
+    assert strategy._trend_reversed(PAIR) is False
+    assert strategy._timeframe_reversed.call_count == 1
+    assert strategy._intrabar_reversed.call_count == 1
+
+    frame.loc[frame.index[-1], ["high", "low", "close"]] = [101.5, 99.5, 100.5]
+    assert strategy._trend_reversed(PAIR) is False
+    assert strategy._timeframe_reversed.call_count == 2
+    assert strategy._intrabar_reversed.call_count == 2
+
+
 @pytest.mark.parametrize("weak_hours, expected", [(4, False), (5, True)])
 def test_five_hour_slow_decline_is_independent_of_support_break(weak_hours, expected):
     closes = [100.0] * 120 + [99.4 - 0.6 * index for index in range(weak_hours)]
@@ -198,13 +215,14 @@ def test_missing_hourly_data_blocks_entry_rotation_but_does_not_disable_market_e
         ("background_timeframe", "1h"),
         ("holding_timeframe", "oops"),
         ("trend_slope_candles", 0),
+        ("eth_fast_atr_buffer", 0),
         ("reversal_emergency_memory_candles", True),
         ("reversal_intrabar_atr_buffer", 0.1),
         ("replacement_weak_atr_drop", float("nan")),
     ],
 )
 def test_invalid_multi_timeframe_configuration_is_rejected(key, value):
-    from leader_squeeze_config import validate_runtime_settings
+    from leader_squeeze_helpers import validate_runtime_settings
 
     strategy = strategy_for(hourly_source())
     strategy.settings[key] = value
@@ -213,11 +231,12 @@ def test_invalid_multi_timeframe_configuration_is_rejected(key, value):
 
 
 def test_real_config_covers_aggregation_windows_without_changing_score_weights():
-    from leader_squeeze_config import validate_runtime_settings
+    from leader_squeeze_helpers import validate_runtime_settings
 
     strategy = strategy_for(hourly_source())
     validate_runtime_settings(strategy)
     strategy.settings["entry_heat_max_penalty"] = 0
+    strategy.settings["entry_setup_enabled"] = False
     # Isolate the higher-timeframe history guard from the independent weekly volume guard.
     strategy.settings["volume_activity_baseline_candles"] = 30
     strategy.startup_candle_count = 100

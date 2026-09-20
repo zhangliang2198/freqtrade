@@ -49,6 +49,7 @@ def _rotation_strategy(
         trades.append(_trade(pair, 120.0, index + 1))
 
     strategy = _entry_ready_strategy(NOW.timestamp())
+    strategy.settings["max_positions"] = held_count
     strategy.settings.update(
         {
             "replacement_entry_score": 50.0,
@@ -63,6 +64,8 @@ def _rotation_strategy(
             "replacement_fast_core_score": 40.0,
             "replacement_min_age_minutes": 30,
             "replacement_cooldown_minutes": 30,
+            "replacement_weak_bottom_ratio": 0.20,
+            "replacement_target_top_ratio": 0.10,
         }
     )
     strategy._entries_allowed = Mock(return_value=True)
@@ -252,6 +255,49 @@ def test_fast_rotation_can_replace_a_still_acceptable_old_score() -> None:
     assert strategy._rotation_state["weak"] == WEAK
 
 
+def test_rotation_only_replaces_holdings_in_bottom_score_percentile() -> None:
+    strategy, trades = _rotation_strategy(target_score=75.0, fast_quality=True)
+    lower_scores = {f"LOW-{index}/USDT:USDT": float(index) for index in range(1, 7)}
+    strategy._scores.update(lower_scores)
+    strategy._metrics.update({pair: _fresh_score_metric() for pair in lower_scores})
+    strategy._score_leaders = list(strategy._scores)
+
+    _plan(strategy, trades, NOW.timestamp(), NOW)
+
+    assert strategy._rotation_state is None
+    assert strategy._rotation_candidate is None
+
+
+def test_rotation_target_must_rank_in_top_percentile_before_quality_filters() -> None:
+    strategy, trades = _rotation_strategy(target_score=75.0, fast_quality=True)
+    higher_scores = {f"HIGH-{index}/USDT:USDT": 90.0 - index for index in range(1, 5)}
+    strategy._scores.update(higher_scores)
+    strategy._metrics.update({pair: _fresh_score_metric() for pair in higher_scores})
+    strategy._score_leaders = list(strategy._scores)
+    strategy._entry_pair_available = Mock(side_effect=lambda pair: pair not in higher_scores)
+
+    _plan(strategy, trades, NOW.timestamp(), NOW)
+
+    assert strategy._rotation_state is None
+    assert strategy._rotation_candidate is None
+
+
+def test_rotation_rank_is_rechecked_before_target_order() -> None:
+    strategy, trades = _rotation_strategy(target_score=75.0, fast_quality=True)
+    _plan(strategy, trades, NOW.timestamp(), NOW)
+    assert strategy._rotation_state is not None
+
+    higher_scores = {f"HIGH-{index}/USDT:USDT": 90.0 - index for index in range(1, 5)}
+    strategy._scores.update(higher_scores)
+    strategy._metrics.update({pair: _fresh_score_metric() for pair in higher_scores})
+    strategy._score_leaders = list(strategy._scores)
+
+    with patch.object(MODULE.Trade, "get_open_trades", return_value=trades):
+        reason = strategy._confirmation_quality_reason(TARGET)
+
+    assert "轮换" in reason
+
+
 def test_fast_rotation_requires_breakout_quality_when_old_score_is_still_high() -> None:
     strategy, trades = _rotation_strategy(
         weak_score=55.0,
@@ -292,3 +338,13 @@ def test_fast_and_normal_rotation_have_independent_cooldowns() -> None:
     _plan(normal, normal_trades, NOW.timestamp(), NOW)
     assert normal._rotation_state is None
     assert normal._rotation_candidate is None
+
+
+def test_manual_imports_are_excluded_from_rotation_candidates():
+    strategy, trades = _rotation_strategy(fast_quality=True)
+    for trade in trades:
+        trade.enter_tag = "manual_import"
+    with patch.object(MODULE.Trade, "get_open_trades", return_value=trades):
+        strategy._evaluate_rotation(NOW.timestamp(), NOW)
+    assert strategy._rotation_candidate is None
+    assert strategy._rotation_pair is None

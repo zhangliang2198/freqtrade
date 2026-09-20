@@ -1,11 +1,11 @@
 """Configurable scales affect the real score, with invalid configurations rejected."""
 
-import json
-from pathlib import Path
+import copy
 
 import pytest
 
 from tests.strategy.leader_squeeze_test_helpers import (
+    PUBLIC_CONFIG,
     configured_settings,
 )
 from tests.strategy.test_leader_squeeze_entry_heat import PAIR, _frame, _heat, _strategy
@@ -15,11 +15,10 @@ from tests.strategy.test_leader_squeeze_score_policy import _apply, _metric, _sc
 @pytest.mark.parametrize(
     "key,value,expected",
     [
-        ("short_score_full_share", 0.80, -2.0),
-        ("volume_score_full_ratio", 3.0, -1.125),
-        ("taker_score_full_ratio", 2.0, -3.0),
-        ("oi_score_full_drop", 0.06, -5 / 3),
-        ("momentum_return_weight", 0.5, 1.6),
+        ("volume_score_full_ratio", 3.0, -2.025),
+        ("taker_score_full_ratio", 2.0, -5.2),
+        ("oi_score_full_drop", 0.06, 0.0),
+        ("momentum_return_weight", 0.5, 2.2),
     ],
 )
 def test_scoring_scale_changes_only_its_expected_contribution(key, value, expected):
@@ -34,7 +33,6 @@ def test_scoring_scale_changes_only_its_expected_contribution(key, value, expect
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("short_score_full_share", 0.50),
         ("volume_score_full_ratio", 1.0),
         ("taker_score_full_ratio", float("nan")),
         ("momentum_return_weight", 1.1),
@@ -44,7 +42,9 @@ def test_scoring_scale_changes_only_its_expected_contribution(key, value, expect
         ("replacement_fast_enabled", "false"),
         ("replacement_fast_entry_score", 40),
         ("replacement_fast_score_gap", 9),
-        ("replacement_fast_core_score", 63),
+        ("replacement_fast_core_score", 98),
+        ("replacement_weak_bottom_ratio", 0),
+        ("replacement_target_top_ratio", 1.1),
         ("replacement_confirmations", 1.5),
         ("replacement_fast_close_location", 2),
         ("replacement_fast_volume_baseline_candles", 1),
@@ -61,7 +61,7 @@ def test_invalid_tuning_fails_validation(key, value):
 
 def test_heat_breakout_relief_and_base_fraction_are_configurable():
     strategy = _strategy(_frame("cooled"))
-    assert _heat(strategy)["penalty"] == pytest.approx(0.02)
+    assert _heat(strategy)["penalty"] == pytest.approx(0.01)
     strategy.settings["entry_heat_cooled_breakout_factor"] = 1
     assert _heat(strategy)["penalty"] == pytest.approx(0.04)
     strategy.settings["entry_heat_base_fraction"] = 0.5
@@ -69,7 +69,7 @@ def test_heat_breakout_relief_and_base_fraction_are_configurable():
 
 
 def test_all_public_settings_validate_and_weights_remain_unchanged():
-    config = json.loads((Path(__file__).parents[2] / "user_data/config.json").read_text())
+    config = copy.deepcopy(PUBLIC_CONFIG)
     strategy = _score_strategy()
     strategy.config = config
     strategy.settings = config["leader_squeeze"]
@@ -78,6 +78,46 @@ def test_all_public_settings_validate_and_weights_remain_unchanged():
     strategy._validate_entry_heat_settings()
     strategy._validate_reversal_settings()
     strategy._validate_tuning_settings()
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("entry_slot_score_thresholds", [40.0] * 10),
+        ("entry_slot_score_thresholds", list(range(9))),
+        ("entry_setup_min_score", 101),
+        ("entry_setup_shortlist_ratio", 0),
+        ("entry_setup_min_candidates", 0),
+        ("entry_setup_enabled", "true"),
+        ("entry_setup_score_points", {"launch": 101}),
+        (
+            "entry_setup_score_points",
+            {
+                "launch": 40,
+                "continuation": 20,
+                "extension": 30,
+                "compression": 20,
+                "proximity": 15,
+            },
+        ),
+    ],
+)
+def test_invalid_entry_pipeline_configuration_is_rejected(key, value):
+    strategy = _score_strategy()
+    strategy.settings[key] = value
+    with pytest.raises(ValueError):
+        strategy._validate_score_settings()
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [("entry_setup_launch_candles", 0), ("entry_setup_late_extension_atr", 2.0)],
+)
+def test_invalid_entry_setup_window_is_rejected(key, value):
+    strategy = _strategy(_frame("cooled"))
+    strategy.settings[key] = value
+    with pytest.raises(ValueError):
+        strategy._validate_entry_heat_settings()
 
 
 def test_new_channel_plan_rechecks_breakout_and_full_capacity_before_buy():
@@ -129,6 +169,10 @@ def test_candidate_hysteresis_keeps_near_equal_challenger_across_bars():
     _plan(strategy, trades, NOW.timestamp())
     strategy._scores["NEW"] = 57
     strategy._metrics["NEW"] = strategy._metrics[TARGET].copy()
+    for index in range(9):
+        pair = f"MID-{index}"
+        strategy._scores[pair] = 50
+        strategy._metrics[pair] = strategy._metrics[TARGET].copy()
     strategy._rotation_bar.return_value += 900
     strategy._last_score_refresh += 900
     _plan(strategy, trades, NOW.timestamp() + 900)
@@ -186,4 +230,5 @@ def test_fast_breakout_uses_actual_candle_metrics_and_independent_quality_gates(
         strategy._metrics[TARGET]["taker_latest_candle_time"] -= 900
     elif failure == "core":
         strategy.settings["momentum_full_score"] = 0.5
+        strategy.settings["replacement_fast_core_score"] = 80
     assert strategy._fast_rotation_quality(TARGET) is (failure is None)

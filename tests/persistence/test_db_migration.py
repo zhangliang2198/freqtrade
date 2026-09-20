@@ -20,6 +20,10 @@ def test_migrate_db_detail(mocker):
     kv = MagicMock()
     custom_data = MagicMock()
     wallet_history = MagicMock()
+    ledger = MagicMock()
+    trade_session = MagicMock()
+    trade_session.scalars.return_value = [ledger]
+    mocker.patch.object(Trade, "session", trade_session)
 
     kv_session = MagicMock()
     kv_session.scalars.return_value = [kv]
@@ -38,12 +42,12 @@ def test_migrate_db_detail(mocker):
     set_sequence_ids_mock = mocker.patch("freqtrade.persistence.db_migration.set_sequence_ids")
 
     # max ids for Trade, Order, PairLock, KeyValueStore, CustomData, WalletHistory
-    session_target.scalar.side_effect = [10, 11, 12, 13, 14, 15]
+    session_target.scalar.side_effect = [10, 11, 12, 13, 14, 15, 16]
     session_target.get_bind.return_value = "bind"
 
     migrate_db(session_target)
 
-    assert session_target.add.call_count == 5
+    assert session_target.add.call_count == 6
     # Order objects are linked to trades, so they are not added explicitly
 
     assert session_target.add.call_count == len(expected_models) - 1
@@ -53,8 +57,8 @@ def test_migrate_db_detail(mocker):
     session_target.add.assert_any_call(custom_data)
     session_target.add.assert_any_call(wallet_history)
 
-    assert session_target.commit.call_count == 5
-    assert make_transient_mock.call_count == 6
+    assert session_target.commit.call_count == 6
+    assert make_transient_mock.call_count == 7
     make_transient_mock.assert_any_call(trade)
     make_transient_mock.assert_any_call(order)
 
@@ -66,4 +70,5 @@ def test_migrate_db_detail(mocker):
         kv_id=14,
         custom_data_id=15,
         wallet_history_id=16,
+        exchange_ledger_id=17,
     )

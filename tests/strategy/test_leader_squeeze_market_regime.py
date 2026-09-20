@@ -69,17 +69,3 @@ def test_emergency_expires_and_resets_on_recovery():
         ["0"], {"0": {"momentum": 0.01, "_candle_valid_until": NOW + 100}}
     )
     assert not strategy._market_down
-
-
-def test_external_positions_use_the_same_market_emergency_gate():
-    from tests.strategy.test_leader_squeeze_external_isolation import _strategy
-
-    strategy = _strategy()
-    strategy._market_down = True
-    strategy._market_is_down.return_value = True
-    strategy._market_emergency = False
-    strategy._manage_external_positions(NOW)
-    strategy.dp._exchange.create_order.assert_not_called()
-    strategy._market_emergency = True
-    strategy._manage_external_positions(NOW + 100)
-    assert strategy.dp._exchange.create_order.call_count == 2

@@ -16,6 +16,7 @@ from sqlalchemy.pool import StaticPool
 from freqtrade.exceptions import OperationalException
 from freqtrade.persistence.base import ModelBase
 from freqtrade.persistence.custom_data import _CustomData
+from freqtrade.persistence.exchange_ledger import ExchangeLedger  # noqa: F401
 from freqtrade.persistence.key_value_store import _KeyValueStoreModel
 from freqtrade.persistence.migrations import check_migrate
 from freqtrade.persistence.pairlock import PairLock
