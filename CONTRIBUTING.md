@@ -9,7 +9,7 @@ Issues labeled [good first issue](https://github.com/freqtrade/freqtrade/labels/
 Few pointers for contributions:
 
 - Create your PR against the `develop` branch, not `stable`.
-- Stick to english in both commit messages, PR descriptions and code comments and variable names.
+- Use English for commit messages, PR descriptions, and variable names. Code comments and docstrings may use English or Chinese depending on the project or module's readers; keep the wording concise and natural.
 - New features need to contain unit tests, must pass CI (run pre-commit and pytest to get an early feedback) and should be documented with the introduction PR.
 - PR's can be declared as draft - signaling Work in Progress for Pull Requests (which are not finished). We'll still aim to provide feedback on draft PR's in a timely manner.
 

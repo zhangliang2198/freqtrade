@@ -181,7 +181,9 @@
 | `trend_slope_candles` | 3 | EMA 与 3 根更早的同周期收盘比较 |
 | `entry_heat_history_days` | 15 | 入场热度涨幅历史天数 |
 | `atr_period` / `trend_ema_candles` | 14 / 20 | Wilder ATR 周期和趋势 EMA 周期 |
-| `eth_confirm_candles` / `eth_fast_atr_buffer` | 2 / 1.5 | ETH 15m 恢复/走弱确认根数和快速急跌 ATR 阈值 |
+| `eth_confirm_candles` | 2 | 仅用于 ETH 15m 趋势状态和日志观察，不作为恢复拦截条件 |
+| `eth_fast_atr_buffer` | 3.0 | ETH 快速急跌 ATR 阈值 |
+| `eth_cooldown_candles` | 8 | ETH 急跌触发后暂停开仓 8 根 ETH 15m K 线 |
 | `reversal_pivot_side_candles` | 2 | 结构支撑局部低点两侧窗口 |
 | `momentum_lookback_candles` / `trend_continuity_candles` | 4 / 3 | 动量和收盘连续性窗口 |
 | `volume_window_candles` / `volume_baseline_windows` | 3 / 20 | 近期均量窗口和此前短期基准根数 |

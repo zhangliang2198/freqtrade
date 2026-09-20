@@ -124,6 +124,9 @@ def _eth_trend_closes(direction: str) -> list[float]:
         return [100.0] * 84 + [100.0 - 0.25 * index for index in range(1, 17)]
     if direction == "flat":
         return [100.0] * 100
+    if direction == "crash":
+        # 收盘 68.00 < EMA20 - 3.0xATR (83.17 - 10.02 = 73.14), 触发急跌熔断。
+        return [100.0] * 84 + [100.0 - 2.0 * index for index in range(1, 17)]
     raise ValueError(direction)
 
 
@@ -257,8 +260,17 @@ def test_candle_metrics_uses_one_hour_and_three_15m_changes() -> None:
     assert metrics["momentum"] == pytest.approx(104 / 100 - 1)
 
 
-@pytest.mark.parametrize(("direction", "expected"), [("up", True), ("flat", True), ("down", False)])
-def test_eth_gate_uses_fast_and_slow_ema_structure(direction: str, expected: bool) -> None:
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    [("up", True), ("flat", True), ("down", True), ("crash", False)],
+)
+def test_eth_gate_blocks_only_on_a_fast_atr_break(direction: str, expected: bool) -> None:
+    """缓慢走弱(15m 与 1h 同时低于 EMA)不再拦截, 只有急跌熔断才拦截。
+
+    实测(14天/122币选币池, 剔除预热): 双周期走弱拦截 25.1% 的时间却占用
+    22.5% 的期望收益, 而急跌只占 1.4%; 被拦窗口的下行分位与放行窗口几乎
+    相同, 只损失上行。故只保留急跌熔断。
+    """
     strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes(direction)))
 
     assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp()) is expected
@@ -273,13 +285,16 @@ def test_eth_gate_allows_15m_pullback_while_1h_ema_is_not_falling() -> None:
 
 
 def test_eth_gate_blocks_single_fast_atr_break_without_waiting_for_1h() -> None:
+    """急跌分支只作为极端错位熔断, 门槛为 EMA - eth_fast_atr_buffer x ATR。"""
     closes = _eth_trend_closes("up")
     closes[-1] = 85.0
     strategy = _eth_gate_strategy(_eth_frame(closes))
 
     assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
     assert strategy._eth_trend == "15m急跌"
-    assert "1.5xATR" in strategy._eth_block_reason
+    assert f"{float(strategy.settings['eth_fast_atr_buffer']):.1f}xATR" in (
+        strategy._eth_block_reason
+    )
 
 
 def _eth_context(**values) -> dict:
@@ -320,9 +335,10 @@ def test_eth_gate_does_not_block_when_only_1h_is_weak() -> None:
 @pytest.mark.parametrize("falling", [True, False])
 def test_eth_fast_break_requires_strict_threshold_and_falling_ema(falling: bool) -> None:
     strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("flat")))
-    # 85 equals EMA100 - 1.5 * ATR10, so even a falling EMA must not trigger.
+    threshold = 100.0 - float(strategy.settings["eth_fast_atr_buffer"]) * 10.0
+    # A close exactly at EMA100 - buffer * ATR10 must not trigger, even with a falling EMA.
     # With a flat EMA, a price below the threshold must not trigger either.
-    close = 85.0 if falling else 84.0
+    close = threshold if falling else threshold - 1.0
     strategy._eth_timeframe_context = Mock(
         side_effect=[
             _eth_context(close=close, slope=-1.0 if falling else 0.0, falling=falling),
@@ -344,31 +360,244 @@ def test_eth_fast_break_atr_excludes_the_signal_candle() -> None:
     assert context["atr"] == pytest.approx(strategy._wilder_atr(frame.iloc[:-1]))
 
 
-def test_eth_gate_requires_two_15m_closes_and_rising_ema_to_recover() -> None:
-    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("down")))
+@pytest.mark.parametrize(
+    ("close", "expected"),
+    [
+        # 实测(14天/999根15m): 1.5xATR 门槛拦掉的窗口, ETH 后续 8h 反而 +0.94%,
+        # 且 4h 最低仅 -0.78% —— 它拦的是超卖反弹而非崩盘延续。放宽到 3.0xATR。
+        (80.0, True),
+        (65.0, False),
+    ],
+)
+def test_fast_break_calibration_only_blocks_extreme_dislocation(
+    close: float, expected: bool
+) -> None:
+    """EMA100/ATR10 下: 旧门槛 1.5xATR=85.0, 新门槛 3.0xATR=70.0。"""
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("flat")))
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[
+            _eth_context(close=close, slope=-1.0, falling=True),
+            _eth_context(),
+        ]
+    )
+
+    assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp()) is expected
+
+
+def test_eth_cooldown_blocks_a_fixed_number_of_bars_then_resumes() -> None:
+    """急跌后按 eth_cooldown_candles 根固定冷却, 不等待 EMA 斜率转正。
+
+    实测(14天/122币选币池): 等斜率转正会让 27 根急跌事件产生 35% 的拦截时间,
+    而被拦窗口的前10龙头下行分位(p10 -4.08% / p25 -2.34%)与放行窗口
+    (-4.20% / -2.37%)几乎相同, 只把 p90 从 +17.86% 砍到 +14.15%。
+    """
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("flat")))
     strategy._risk_state = {}
-    assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    bars = int(strategy.settings["eth_cooldown_candles"])
+    step = timedelta(minutes=15)
+
+    def context_at_bar(index: int, **values):
+        return _eth_context(date=ETH_TEST_NOW + index * step, **values)
+
+    def recovered(index: int):
+        return context_at_bar(index, close=108.0, ema=100.0, slope=1.0, rising=True)
+
+    # 第 0 根急跌 -> 进入固定长度冷却
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[
+            context_at_bar(0, close=65.0, slope=-1.0, falling=True),
+            context_at_bar(0),
+        ]
+    )
+    assert not strategy._eth_entries_allowed((ETH_TEST_NOW + step).timestamp())
+    assert strategy._eth_trend == "15m急跌"
+    assert strategy._eth_cooldown_until == pytest.approx((ETH_TEST_NOW + bars * step).timestamp())
     assert strategy._risk_state["eth_entry_blocked"] is True
+    assert strategy._risk_state["eth_cooldown_until"] == strategy._eth_cooldown_until
 
-    partial = _eth_trend_closes("flat")
-    partial[-1] = 101.0
-    strategy.dp.get_pair_dataframe = lambda pair, timeframe: _eth_frame(partial)
-    assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
-    assert strategy._eth_trend == "恢复确认中"
+    # 冷却期内即使 ETH 已经恢复上涨, 仍然拦截
+    for index in (1, bars - 1):
+        strategy._eth_timeframe_context = Mock(side_effect=[recovered(index), recovered(index)])
+        assert not strategy._eth_entries_allowed((ETH_TEST_NOW + (index + 1) * step).timestamp())
+        assert strategy._eth_trend == "急跌冷却中"
 
-    strategy.dp.get_pair_dataframe = lambda pair, timeframe: _eth_frame(_eth_trend_closes("up"))
-    assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    # 冷却到期后立即恢复, 不需要额外的 EMA 结构确认
+    expired = bars
+    strategy._eth_timeframe_context = Mock(side_effect=[recovered(expired), recovered(expired)])
+    assert strategy._eth_entries_allowed((ETH_TEST_NOW + (expired + 1) * step).timestamp())
+    assert strategy._eth_cooldown_until is None
     assert strategy._risk_state["eth_entry_blocked"] is False
 
 
+def test_eth_cooldown_is_saved_immediately_and_survives_a_restart(tmp_path) -> None:
+    """冷却状态写进风控状态文件, 重启后不会立刻解除拦截。"""
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("flat")))
+    strategy._state_path = tmp_path / "leader_squeeze_state.live.json"
+    strategy._risk_state = {"account_stopped": False, "peak_equity": 1_000.0}
+    strategy._risk_state_load_failed = False
+    strategy._risk_state_save_failed = False
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[
+            _eth_context(close=65.0, slope=-1.0, falling=True),
+            _eth_context(),
+        ]
+    )
+    assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    persisted = strategy._risk_state["eth_cooldown_until"]
+    assert persisted is not None
+    saved = json.loads(strategy._state_path.read_text())
+    assert saved["eth_entry_blocked"] is True
+    assert saved["eth_cooldown_until"] == pytest.approx(persisted)
+
+    restarted = _eth_gate_strategy(_eth_frame(_eth_trend_closes("flat")))
+    restarted._state_path = strategy._state_path
+    restarted._risk_state_load_failed = False
+    restarted._risk_state = restarted._load_risk_state()
+    restarted._eth_blocked = restarted._risk_state["eth_entry_blocked"]
+    restarted._eth_cooldown_until = float(restarted._risk_state["eth_cooldown_until"])
+    restarted._eth_timeframe_context = Mock(
+        side_effect=[_eth_context(close=108.0, ema=100.0, slope=1.0, rising=True)] * 2
+    )
+
+    assert not restarted._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    assert restarted._eth_trend == "急跌冷却中"
+
+
+def test_eth_cooldown_repeats_extend_the_deadline() -> None:
+    """冷却期内再次急跌, 冷却窗口从新的急跌 K 线重新起算。"""
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("flat")))
+    strategy._risk_state = {}
+    step = timedelta(minutes=15)
+    bars = int(strategy.settings["eth_cooldown_candles"])
+
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[
+            _eth_context(date=ETH_TEST_NOW, close=65.0, slope=-1.0, falling=True),
+            _eth_context(date=ETH_TEST_NOW),
+        ]
+    )
+    assert not strategy._eth_entries_allowed((ETH_TEST_NOW + step).timestamp())
+    first = strategy._eth_cooldown_until
+
+    later = ETH_TEST_NOW + 4 * step
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[
+            _eth_context(date=later, close=60.0, slope=-1.0, falling=True),
+            _eth_context(date=later),
+        ]
+    )
+    assert not strategy._eth_entries_allowed((later + step).timestamp())
+    extended = strategy._eth_cooldown_until
+    assert extended > first
+    assert extended == pytest.approx((later + bars * step).timestamp())
+
+    # 交易所短暂返回更旧的已收盘 K 线时, 不得缩短已经延长的冷却。
+    earlier = ETH_TEST_NOW + 2 * step
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[
+            _eth_context(date=earlier, close=60.0, slope=-1.0, falling=True),
+            _eth_context(date=earlier),
+        ]
+    )
+    assert not strategy._eth_entries_allowed((later + step).timestamp())
+    assert strategy._eth_cooldown_until == extended
+
+
+def test_stale_eth_cooldown_from_state_file_self_heals() -> None:
+    """状态文件里的过期冷却不会永久拦截, 且会被清掉。"""
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("up")))
+    strategy._risk_state = {}
+    strategy._eth_blocked = True
+    strategy._eth_cooldown_until = (ETH_TEST_NOW - timedelta(hours=3)).timestamp()
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[_eth_context(close=108.0, ema=100.0, slope=1.0, rising=True)] * 2
+    )
+
+    assert strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    assert strategy._eth_cooldown_until is None
+    assert strategy._risk_state["eth_cooldown_until"] is None
+    assert strategy._risk_state["eth_entry_blocked"] is False
+
+
+def test_eth_gate_stays_blocked_when_cooldown_clear_cannot_be_saved() -> None:
+    """冷却清除无法落盘时继续拦截, 不得先记录放行再由下单门禁拒绝。"""
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("up")))
+    expired = (ETH_TEST_NOW - timedelta(hours=3)).timestamp()
+    strategy._risk_state = {
+        "account_stopped": False,
+        "peak_equity": 1_000.0,
+        "eth_entry_blocked": True,
+        "eth_cooldown_until": expired,
+    }
+    strategy._eth_blocked = True
+    strategy._eth_cooldown_until = expired
+
+    def fail_save() -> bool:
+        strategy._risk_state_save_failed = True
+        return False
+
+    strategy._save_risk_state = Mock(side_effect=fail_save)
+    strategy._eth_timeframe_context = Mock(
+        side_effect=[_eth_context(close=108.0, ema=100.0, slope=1.0, rising=True)] * 2
+    )
+
+    assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
+    assert strategy._eth_trend == "状态保存失败"
+    assert "保存失败" in strategy._eth_block_reason
+
+
+def test_bot_start_restores_the_eth_cooldown_from_the_state_file(tmp_path) -> None:
+    """冷却截止时间随状态文件恢复, 重启后不会立刻解除拦截。"""
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+    strategy.config = {
+        **PUBLIC_CONFIG,
+        "max_open_trades": 11,
+        "dry_run": False,
+        "runmode": "live",
+        "user_data_dir": str(tmp_path),
+        "stake_currency": "USDT",
+    }
+    deadline = ETH_TEST_NOW.timestamp() + 7_200
+    strategy._load_risk_state = Mock(
+        return_value={"eth_entry_blocked": True, "eth_cooldown_until": deadline}
+    )
+    strategy._sync_external_pairs = Mock()
+    strategy._initialize_rotation_audit = Mock()
+
+    with patch.object(MODULE.threading, "Thread"):
+        strategy.bot_start()
+
+    assert strategy._eth_blocked is True
+    assert strategy._eth_cooldown_until == pytest.approx(deadline)
+
+
+def test_missing_eth_cooldown_candles_fails_at_configuration_time() -> None:
+    """缺少该键必须在启动时报错, 不能落进 _eth_entries_allowed 的 except 里静默封禁。"""
+    from leader_squeeze_helpers import configure_strategy
+
+    config = {
+        **PUBLIC_CONFIG,
+        "leader_squeeze": {
+            key: value
+            for key, value in configured_settings().items()
+            if key != "eth_cooldown_candles"
+        },
+    }
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+
+    with pytest.raises(ValueError, match="eth_cooldown_candles"):
+        configure_strategy(strategy, config)
+
+
 def test_eth_gate_ignores_an_unclosed_candle() -> None:
-    frame = _eth_frame(_eth_trend_closes("down"))
+    frame = _eth_frame(_eth_trend_closes("crash"))
     frame = pd.concat(
         [frame, _eth_frame([1_000.0], latest_offset_minutes=0)],
         ignore_index=True,
     )
     strategy = _eth_gate_strategy(frame)
 
+    # 未收盘的 1000.0 若被计入, 收盘价会远高于阈值而放行; 仍然拦截即证明被忽略。
     assert not strategy._eth_entries_allowed(ETH_TEST_NOW.timestamp())
 
 
@@ -417,7 +646,7 @@ def test_informative_pairs_subscribe_to_eth_outside_the_whitelist() -> None:
 
 
 def test_eth_gate_rejects_existing_signal_and_final_entry_confirmation() -> None:
-    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("down")))
+    strategy = _eth_gate_strategy(_eth_frame(_eth_trend_closes("crash")))
     strategy._entry_pairs = {"BTC/USDT:USDT"}
     signal_frame = pd.DataFrame({"close": [100.0], "enter_long": [1]})
 
@@ -444,7 +673,7 @@ def test_eth_blocked_loop_keeps_risk_checks_but_skips_new_work(caplog) -> None:
     strategy._last_position_sync = time.time()
     strategy._sync_external_pairs = Mock()
     strategy.dp = SimpleNamespace(
-        get_pair_dataframe=Mock(return_value=_eth_frame(_eth_trend_closes("down"))),
+        get_pair_dataframe=Mock(return_value=_eth_frame(_eth_trend_closes("crash"))),
         current_whitelist=list,
         current_selection_whitelist=list,
     )
@@ -489,7 +718,7 @@ def test_eth_blocked_loop_keeps_risk_checks_but_skips_new_work(caplog) -> None:
         ]
 
     assert len(messages()) == 1
-    assert "15m 与 1h 均低于 EMA20" in messages()[0]
+    assert "急跌" in messages()[0]
     assert "已有仓位继续止损和退出" in messages()[0]
     for seconds, expected_count in [(5, 1), (299, 1), (300, 2)]:
         with (
@@ -499,18 +728,26 @@ def test_eth_blocked_loop_keeps_risk_checks_but_skips_new_work(caplog) -> None:
             strategy.bot_loop_start(ETH_TEST_NOW)
         assert len(messages()) == expected_count
 
-    for frame, expected_message in [
-        (pd.DataFrame(), "数据缺失、过期或无效"),
-        (_eth_frame(_eth_trend_closes("up")), "不拦截"),
-    ]:
+    def run_loop(frame, seconds: int) -> None:
         strategy.dp.get_pair_dataframe.return_value = frame
         strategy._next_score_refresh = float("inf")
         with (
             caplog.at_level(logging.INFO, logger="leader_squeeze_strategy"),
-            patch.object(MODULE.time, "time", return_value=ETH_TEST_NOW.timestamp() + 305),
+            patch.object(MODULE.time, "time", return_value=ETH_TEST_NOW.timestamp() + seconds),
         ):
             strategy.bot_loop_start(ETH_TEST_NOW)
-        assert expected_message in messages()[-1]
+
+    run_loop(pd.DataFrame(), 305)
+    assert "数据缺失、过期或无效" in messages()[-1]
+
+    # 急跌冷却未到期时, 即使 ETH 已经转涨也继续拦截。
+    run_loop(_eth_frame(_eth_trend_closes("up")), 305)
+    assert "急跌冷却" in messages()[-1]
+
+    # 冷却到期后才放行。
+    strategy._eth_cooldown_until = None
+    run_loop(_eth_frame(_eth_trend_closes("up")), 305)
+    assert "不拦截" in messages()[-1]
 
 
 @pytest.mark.parametrize(
@@ -601,6 +838,41 @@ def test_missing_risk_state_file_allows_first_initialization_and_save(tmp_path) 
                 "peak_equity": 1_000.0,
                 "account_stopped": False,
                 "eth_entry_blocked": "true",
+            }
+        ),
+        json.dumps(
+            {
+                "peak_equity": 1_000.0,
+                "account_stopped": False,
+                "eth_cooldown_until": "soon",
+            }
+        ),
+        json.dumps(
+            {
+                "peak_equity": 1_000.0,
+                "account_stopped": False,
+                "eth_cooldown_until": float("nan"),
+            }
+        ),
+        json.dumps(
+            {
+                "peak_equity": 1_000.0,
+                "account_stopped": False,
+                "eth_cooldown_until": float("inf"),
+            }
+        ),
+        json.dumps(
+            {
+                "peak_equity": 1_000.0,
+                "account_stopped": False,
+                "eth_cooldown_until": -1.0,
+            }
+        ),
+        json.dumps(
+            {
+                "peak_equity": 1_000.0,
+                "account_stopped": False,
+                "eth_cooldown_until": 1e12,
             }
         ),
     ],

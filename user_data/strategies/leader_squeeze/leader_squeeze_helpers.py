@@ -769,6 +769,7 @@ REQUIRED_SETTINGS = frozenset(
         "trend_ema_candles",
         "eth_confirm_candles",
         "eth_fast_atr_buffer",
+        "eth_cooldown_candles",
         "reversal_pivot_side_candles",
         "momentum_lookback_candles",
         "trend_continuity_candles",
@@ -849,6 +850,7 @@ def validate_runtime_settings(strategy) -> None:
         "atr_period",
         "trend_ema_candles",
         "eth_confirm_candles",
+        "eth_cooldown_candles",
         "reversal_pivot_side_candles",
         "momentum_lookback_candles",
         "trend_continuity_candles",
@@ -2613,6 +2615,17 @@ class LeaderStorageMixin(LeaderMixinContext):
                 raise ValueError("account_stopped缺失或不是布尔值")
             if "eth_entry_blocked" in state and type(state["eth_entry_blocked"]) is not bool:
                 raise ValueError("eth_entry_blocked不是布尔值")
+            eth_cooldown_until = state.get("eth_cooldown_until")
+            max_cooldown_until = time.time() + (
+                int(self.settings["eth_cooldown_candles"]) + 1
+            ) * timeframe_to_seconds(self.timeframe)
+            if eth_cooldown_until is not None and (
+                type(eth_cooldown_until) not in (int, float)
+                or not math.isfinite(eth_cooldown_until)
+                or eth_cooldown_until <= 0
+                or eth_cooldown_until > max_cooldown_until
+            ):
+                raise ValueError("eth_cooldown_until不是有效的近期时间戳")
             for key in ("peak_equity", "day_start_equity", "last_equity"):
                 if key != "peak_equity" and key not in state:
                     continue

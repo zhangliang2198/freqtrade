@@ -76,6 +76,7 @@
   "internals": {
     "process_throttle_secs": 5
   },
+  "logfile": "user_data/logs/leader-squeeze-live.log",
   "add_config_files": [
     "strategies/leader_squeeze/config.json",
     "config-blacklist.json",

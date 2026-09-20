@@ -147,6 +147,8 @@ class LeaderSqueezeStrategy(
         self._eth_last_log_reason: str | None = None
         self._eth_last_log_time = 0.0
         self._eth_blocked = False
+        # 与 _eth_blocked 一同初始化, 随后由状态文件恢复覆盖。
+        self._eth_cooldown_until: float | None = None
         self._last_status_log = -math.inf
         self._last_status_signature: tuple | None = None
         self._entry_block_reason = "尚未评估"
@@ -193,6 +195,8 @@ class LeaderSqueezeStrategy(
                 and self._valid_profit_record(record["pair"], record)
             }
         self._eth_blocked = bool(self._risk_state.get("eth_entry_blocked", False))
+        stored_cooldown = self._risk_state.get("eth_cooldown_until")
+        self._eth_cooldown_until = float(stored_cooldown) if stored_cooldown is not None else None
         self._rotation_state = self._risk_state.get("rotation")
         if self._rotation_state:
             self._rotation_pair = self._rotation_state["weak"]
@@ -631,6 +635,11 @@ class LeaderSqueezeStrategy(
                 logger.warning("⚠️ 仓位同步失败, 暂停新开仓: %s", exc, extra=LOG_WARN)
                 self._position_data_healthy = False
         self._sync_external_pairs()
+        risk_state = getattr(self, "_risk_state", None)
+        if isinstance(risk_state, dict) and "account_stopped" not in risk_state:
+            # 首次运行先建立完整基线, 使随后触发的 ETH 冷却能够立即可靠落盘。
+            self._refresh_risk_state(current_time)
+            self._last_risk_state_checkpoint = -math.inf
         eth_allowed = self._eth_entries_allowed(now)
         eth_reason = self._eth_block_reason if not eth_allowed else self._eth_trend
         if eth_reason != self._eth_last_log_reason or (
@@ -1447,11 +1456,17 @@ class LeaderSqueezeStrategy(
                 fast["ema"] - float(self.settings["eth_fast_atr_buffer"]) * fast["atr"]
             )
             emergency = bool(fast["falling"] and fast["close"] < emergency_threshold)
-            dual_weak = bool(fast["weakening"] and slow["weakening"])
-            recovery = bool(fast["rising"])
-            was_blocked = getattr(self, "_eth_blocked", False)
+            bar_seconds = timeframe_to_seconds(self.timeframe)
+            bar_timestamp = float(fast["date"].timestamp())
+            cooldown_bars = int(self.settings["eth_cooldown_candles"])
+            cooldown_until = getattr(self, "_eth_cooldown_until", None)
 
             if emergency:
+                # 急跌后固定冷却 cooldown_bars 根, 不等待 EMA 斜率转正。
+                # 实测(14天/122币选币池, 剔除预热): 双周期走弱拦截 25.1% 的时间却
+                # 占用 22.5% 期望收益, 急跌只占 1.4%; 故只保留急跌熔断。
+                deadline = bar_timestamp + cooldown_bars * bar_seconds
+                self._eth_cooldown_until = max(float(cooldown_until or 0.0), deadline)
                 self._eth_blocked = True
                 self._eth_trend = f"{self.timeframe}急跌"
                 self._eth_block_reason = (
@@ -1459,23 +1474,16 @@ class LeaderSqueezeStrategy(
                     f"EMA{self.settings['trend_ema_candles']} - "
                     f"{self.settings['eth_fast_atr_buffer']:.1f}xATR ({emergency_threshold:.4f})"
                 )
-            elif dual_weak:
+            elif cooldown_until is not None and bar_timestamp < float(cooldown_until):
+                remaining = int((float(cooldown_until) - bar_timestamp) // bar_seconds)
                 self._eth_blocked = True
-                self._eth_trend = f"{self.timeframe}/{self.settings['holding_timeframe']}双周期走弱"
+                self._eth_trend = "急跌冷却中"
                 self._eth_block_reason = (
-                    f"ETH {self.timeframe} 与 {self.settings['holding_timeframe']} 均低于 "
-                    f"EMA{self.settings['trend_ema_candles']} 且均线向下"
-                )
-            elif was_blocked and not recovery:
-                self._eth_blocked = True
-                self._eth_trend = "恢复确认中"
-                self._eth_block_reason = (
-                    f"ETH 恢复未确认: 最近{self.settings['eth_confirm_candles']}根"
-                    f"{self.timeframe}尚未全部"
-                    f"站上 EMA{self.settings['trend_ema_candles']} 且均线向上"
+                    f"ETH 急跌冷却: 共 {cooldown_bars} 根{self.timeframe}, 剩余 {remaining} 根"
                 )
             else:
                 self._eth_blocked = False
+                self._eth_cooldown_until = None
                 self._eth_block_reason = ""
                 self._eth_trend = (
                     "双周期上涨"
@@ -1486,7 +1494,22 @@ class LeaderSqueezeStrategy(
 
             risk_state = getattr(self, "_risk_state", None)
             if isinstance(risk_state, dict):
+                previous = (
+                    risk_state.get("eth_entry_blocked"),
+                    risk_state.get("eth_cooldown_until"),
+                )
                 risk_state["eth_entry_blocked"] = self._eth_blocked
+                risk_state["eth_cooldown_until"] = self._eth_cooldown_until
+                current = (self._eth_blocked, self._eth_cooldown_until)
+                # 首次启动由同一轮的权益 checkpoint 建立完整状态文件; 之后的
+                # ETH 冷却变化立即落盘, 避免在例行 checkpoint 前重启时丢失。
+                if previous != current and "account_stopped" in risk_state:
+                    self._save_risk_state()
+
+            if getattr(self, "_risk_state_save_failed", False):
+                self._eth_blocked = True
+                self._eth_trend = "状态保存失败"
+                self._eth_block_reason = "ETH 冷却状态保存失败, 暂停新开仓"
 
             current_time = datetime.fromtimestamp(now, UTC)
             age = (current_time - fast["date"]).total_seconds()
