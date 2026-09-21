@@ -185,8 +185,8 @@ def _entry_strategy(scores: dict[str, float]) -> LeaderSqueezeStrategy:
     strategy._trend_reversed = Mock(return_value=False)
     strategy._entry_pair_available = Mock(return_value=True)
     strategy._execution_is_safe = Mock(return_value=True)
-    strategy.settings["max_positions"] = 10
-    strategy.settings["entry_risk_cluster_max_positions"] = 11
+    strategy.settings["max_positions"] = 20
+    strategy.settings["entry_risk_cluster_max_positions"] = 20
     return strategy
 
 
@@ -205,7 +205,7 @@ def test_low_intensity_hard_gates_reject_even_a_100_point_candidate(override) ->
         assert strategy._select_entries() == set()
 
 
-@pytest.mark.parametrize("held_count", range(10))
+@pytest.mark.parametrize("held_count", range(20))
 def test_each_position_uses_its_risk_budget_floor(held_count: int) -> None:
     """With correlation data unavailable the book is charged as concentrated."""
     settings = configured_settings()
@@ -345,9 +345,10 @@ def test_unsubmitted_rotation_is_cancelled_when_score_gap_disappears() -> None:
     strategy._persist_rotation.assert_called_once()
 
 
-@pytest.mark.parametrize("held_count,allowed", [(0, True), (1, True), (10, False)])
+@pytest.mark.parametrize("held_count,allowed", [(0, True), (1, True), (20, False)])
 def test_confirmation_checks_actual_position_count_after_funding_expires(held_count, allowed):
     strategy = _entry_strategy({PAIR: 46.0})
+    strategy.settings["entry_risk_cluster_max_positions"] = 21
     strategy._metrics[PAIR].update(
         {
             "score_funding": 1.0,
@@ -416,8 +417,8 @@ def test_public_config_matches_strategy_policy_and_keeps_margin_and_risk_limits(
     ):
         assert config["leader_squeeze"][key] == configured_settings()[key]
     assert config["margin_mode"] == "cross"
-    assert config["max_open_trades"] == 11
-    assert strategy.settings["max_positions"] == 10
-    assert strategy.settings["stake_ratio"] == 0.08
+    assert config["max_open_trades"] == 21
+    assert strategy.settings["max_positions"] == 20
+    assert strategy.settings["stake_ratio"] == 0.04
     assert strategy.settings["leverage"] == 5.0
     assert "max_drawdown_limit" not in strategy.settings

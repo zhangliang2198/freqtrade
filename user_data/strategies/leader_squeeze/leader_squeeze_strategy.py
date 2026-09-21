@@ -1006,8 +1006,13 @@ class LeaderSqueezeStrategy(
         late_atr = float(self.settings["entry_setup_late_extension_atr"])
         start_atr = float(self.settings["entry_heat_extension_start_atr"])
         launch = bool(heat.get("cooled_breakout"))
-        late = float(extension) >= late_atr
+        hard_limit_atr = (
+            float(self.settings["entry_heat_extension_full_atr"]) if launch else late_atr
+        )
+        late = float(extension) >= hard_limit_atr
         stage = "末端" if late else "启动" if launch else "中继"
+        # Keep shape quality anchored to the normal late-extension threshold;
+        # a cooled breakout only gets a higher hard rejection ceiling.
         extension_quality = self._clamp(
             (late_atr - max(0.0, float(extension))) / max(late_atr - start_atr, 1e-9)
         )
@@ -1034,6 +1039,7 @@ class LeaderSqueezeStrategy(
             "stage": stage,
             "score": score,
             "late": float(late),
+            "hard_limit_atr": hard_limit_atr,
             "extension_atr": float(extension),
             "box_width_atr": float(box_width),
             "breakout_age_candles": float(heat.get("breakout_age_candles", math.nan)),
@@ -1614,9 +1620,12 @@ class LeaderSqueezeStrategy(
         setup_snapshot[pair] = setup
         self._entry_setup_snapshot = setup_snapshot
         if setup["late"]:
+            hard_limit_atr = float(
+                setup.get("hard_limit_atr", self.settings["entry_setup_late_extension_atr"])
+            )
             return (
                 f"末端过热: 偏离{float(setup.get('extension_atr', math.nan)):.1f}ATR >= "
-                f"{float(self.settings['entry_setup_late_extension_atr']):.1f}ATR"
+                f"{hard_limit_atr:.1f}ATR"
             )
         if float(setup["score"]) < float(self.settings["entry_setup_min_score"]):
             return (

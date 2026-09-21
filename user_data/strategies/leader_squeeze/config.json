@@ -24,8 +24,8 @@
   },
   "leader_squeeze": {
     "leverage": 5.0,
-    "stake_ratio": 0.08,
-    "max_positions": 10,
+    "stake_ratio": 0.04,
+    "max_positions": 20,
     "min_absolute_momentum": 0.0,
     "min_trend_continuity": 0.6666666666666666,
     "momentum_full_score": 0.03,

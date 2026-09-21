@@ -943,6 +943,10 @@ class LeaderConfigMixin(LeaderMixinContext):
             raise ValueError("entry_setup_launch_candles must be an integer within [1, 8]")
         if type(late_atr) not in (int, float) or not math.isfinite(late_atr) or late_atr <= start:
             raise ValueError("entry_setup_late_extension_atr must exceed the heat extension start")
+        if full <= late_atr:
+            raise ValueError(
+                "entry_heat_extension_full_atr must exceed entry_setup_late_extension_atr"
+            )
 
     def _validate_tuning_settings(self) -> None:
         """Reject impossible scales and invalid rotation settings before trading."""

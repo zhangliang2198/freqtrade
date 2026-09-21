@@ -193,6 +193,7 @@ def test_rotation_uses_undiscounted_old_holding_and_discounted_new_target():
         ("entry_heat_return_scale", 0),
         ("entry_heat_extension_start_atr", -1),
         ("entry_heat_extension_full_atr", 2),
+        ("entry_heat_extension_full_atr", 5),
         ("entry_heat_extension_full_atr", float("nan")),
     ],
 )
@@ -222,6 +223,68 @@ def test_zero_heat_discount_keeps_setup_and_late_chase_protection_enabled():
     assert setup is not None
     assert setup["late"] == 1
     assert setup["stage"] == "末端"
+
+
+@pytest.mark.parametrize(
+    ("extension", "cooled_breakout", "allowed", "hard_limit"),
+    [
+        (5.0, 0.0, False, 5.0),
+        (5.0, 1.0, True, 6.0),
+        (6.0, 1.0, False, 6.0),
+    ],
+)
+def test_cooled_breakout_uses_separate_hard_extension_limit_for_selection_and_confirmation(
+    extension, cooled_breakout, allowed, hard_limit
+):
+    strategy = _strategy(_frame("cooled"))
+    strategy._entry_heat_metrics = Mock(
+        return_value={
+            "extension_atr": extension,
+            "box_width_atr": 1.0,
+            "cooled_breakout": cooled_breakout,
+            "breakout_age_candles": 0.0 if cooled_breakout else float("nan"),
+            "breakout_distance_atr": 0.0 if cooled_breakout else float("nan"),
+            "penalty": 0.0,
+        }
+    )
+    with (
+        patch.object(MODULE.time, "time", return_value=NOW.timestamp()),
+        patch.object(MODULE.Trade, "get_open_trades", return_value=[]),
+    ):
+        setup = strategy._entry_setup_metrics(PAIR)
+        assert setup is not None
+        assert setup["hard_limit_atr"] == hard_limit
+        assert (strategy._select_entries() == {PAIR}) is allowed
+        assert (
+            strategy.confirm_trade_entry(PAIR, "market", 1, 180, "GTC", NOW, None, "long")
+            is allowed
+        )
+
+    if not allowed:
+        assert f">= {hard_limit:.1f}ATR" in strategy._entry_block_reason
+
+
+@pytest.mark.parametrize(("close", "allowed"), [(184.4, True), (185.5, False)])
+def test_real_cooled_breakout_detection_reaches_the_relaxed_selection_path(close, allowed):
+    frame = _frame("cooled")
+    frame.loc[1439, ["close", "high", "low"]] = [180.0, 180.5, 179.5]
+    frame.loc[1440, ["close", "high", "low"]] = [close, close + 0.5, close - 0.5]
+    strategy = _strategy(frame)
+
+    with (
+        patch.object(MODULE.time, "time", return_value=NOW.timestamp()),
+        patch.object(MODULE.Trade, "get_open_trades", return_value=[]),
+    ):
+        heat = strategy._entry_heat_metrics(PAIR)
+        assert heat is not None
+        assert heat["cooled_breakout"] == 1.0
+        assert (strategy._select_entries() == {PAIR}) is allowed
+
+    if allowed:
+        assert 5.0 <= heat["extension_atr"] < 6.0
+    else:
+        assert heat["extension_atr"] >= 6.0
+        assert ">= 6.0ATR" in strategy._entry_decisions[PAIR]
 
 
 def test_long_history_request_fits_binance_futures_startup_limit(mocker, default_conf):

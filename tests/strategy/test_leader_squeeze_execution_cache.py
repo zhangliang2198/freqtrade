@@ -128,7 +128,7 @@ def test_slow_book_response_is_not_cached_or_used():
     assert "盘口请求耗时超过5秒" in strategy._execution_block_reason
 
 
-@pytest.mark.parametrize("limit", [None, 0, 10, 10.5, True, "11", float("nan")])
+@pytest.mark.parametrize("limit", [None, 0, 20, 20.5, True, "21", float("nan")])
 def test_missing_rotation_slot_fails_before_state_access_or_threads(limit):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {**PUBLIC_CONFIG, "runmode": "live"}
@@ -146,7 +146,7 @@ def test_missing_rotation_slot_fails_before_state_access_or_threads(limit):
     thread.assert_not_called()
 
 
-@pytest.mark.parametrize("limit", [11, 12, -1, float("inf")])
+@pytest.mark.parametrize("limit", [21, 22, -1, float("inf")])
 def test_rotation_slot_accepts_sufficient_or_framework_unlimited_capacity(tmp_path, limit):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {**PUBLIC_CONFIG, "max_open_trades": limit, "user_data_dir": tmp_path}
@@ -154,7 +154,7 @@ def test_rotation_slot_accepts_sufficient_or_framework_unlimited_capacity(tmp_pa
     strategy._sync_external_pairs = Mock()
     strategy._initialize_rotation_audit = Mock()
     strategy.bot_start()
-    assert strategy.settings["max_positions"] == 10
+    assert strategy.settings["max_positions"] == 20
 
 
 @pytest.mark.parametrize("limit", [0, -1, 1.5, True, float("inf")])
@@ -162,7 +162,7 @@ def test_invalid_strategy_capacity_fails_early(limit):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
-        "max_open_trades": 11,
+        "max_open_trades": 21,
         "leader_squeeze": {**configured_settings(), "max_positions": limit},
     }
     with pytest.raises(ValueError, match="max_positions must be a positive integer"):

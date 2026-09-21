@@ -180,7 +180,7 @@ def _entry_ready_strategy(
     strategy.wallets = SimpleNamespace(
         get_total_stake_amount=lambda: 1_000.0,
         get_all_positions=lambda: {
-            trade.pair: SimpleNamespace(collateral=80.0, position=0.0, leverage=5.0)
+            trade.pair: SimpleNamespace(collateral=40.0, position=0.0, leverage=5.0)
             for trade in MODULE.Trade.get_open_trades()
         },
     )
@@ -558,7 +558,7 @@ def test_bot_start_restores_the_eth_cooldown_from_the_state_file(tmp_path) -> No
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
-        "max_open_trades": 11,
+        "max_open_trades": 21,
         "dry_run": False,
         "runmode": "live",
         "user_data_dir": str(tmp_path),
@@ -770,7 +770,7 @@ def test_bot_start_isolates_state_file_by_mode_without_network(
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
-        "max_open_trades": 11,
+        "max_open_trades": 21,
         "dry_run": dry_run,
         "runmode": runmode,
         "user_data_dir": str(tmp_path),
@@ -801,7 +801,7 @@ def test_missing_risk_state_file_allows_first_initialization_and_save(tmp_path) 
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
-        "max_open_trades": 11,
+        "max_open_trades": 21,
         "dry_run": False,
         "runmode": "live",
         "user_data_dir": str(tmp_path),
@@ -967,7 +967,7 @@ def test_legacy_account_stop_is_ignored_on_restart(tmp_path) -> None:
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.config = {
         **PUBLIC_CONFIG,
-        "max_open_trades": 11,
+        "max_open_trades": 21,
         "dry_run": False,
         "runmode": "live",
         "user_data_dir": str(tmp_path),
@@ -1433,7 +1433,7 @@ def test_market_emergency_exits_an_existing_trade() -> None:
 
 @pytest.mark.parametrize(
     ("held_count", "floor"),
-    [(0, 40.0), (1, 40 + 14 / 9), (2, 40 + 14 * 2 / 9), (9, 54.0)],
+    [(0, 40.0), (1, 40 + 14 / 19), (2, 40 + 14 * 2 / 19), (19, 54.0)],
 )
 def test_entry_floor_rises_with_the_open_position_count(held_count: int, floor: float) -> None:
     """Without usable correlation data the book is charged as fully concentrated.
@@ -1447,7 +1447,7 @@ def test_entry_floor_rises_with_the_open_position_count(held_count: int, floor: 
     strategy.settings = configured_settings()
     strategy.settings["entry_heat_max_penalty"] = 0
     strategy.settings["entry_setup_enabled"] = False
-    strategy.settings["entry_risk_cluster_max_positions"] = 10
+    strategy.settings["entry_risk_cluster_max_positions"] = 20
     strategy._entry_pair_available = Mock(return_value=True)
     strategy._candle_metrics = Mock(side_effect=lambda pair: strategy._metrics[pair])
     strategy._trend_reversed = Mock(return_value=False)
@@ -1467,7 +1467,7 @@ def test_entry_floor_rises_with_the_open_position_count(held_count: int, floor: 
     strategy.wallets = SimpleNamespace(
         get_total_stake_amount=lambda: 1_000.0,
         get_all_positions=lambda: {
-            trade.pair: SimpleNamespace(collateral=80.0, position=0.0, leverage=5.0)
+            trade.pair: SimpleNamespace(collateral=40.0, position=0.0, leverage=5.0)
             for trade in MODULE.Trade.get_open_trades()
         },
     )
@@ -1861,7 +1861,7 @@ def test_rotation_target_requires_the_strictest_slot_score() -> None:
     strategy.wallets = SimpleNamespace(
         get_total_stake_amount=lambda: 1_000.0,
         get_all_positions=lambda: {
-            trade.pair: SimpleNamespace(collateral=80.0, position=0.0, leverage=5.0)
+            trade.pair: SimpleNamespace(collateral=40.0, position=0.0, leverage=5.0)
             for trade in MODULE.Trade.get_open_trades()
         },
     )

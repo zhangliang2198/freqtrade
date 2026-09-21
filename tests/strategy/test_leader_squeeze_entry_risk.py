@@ -27,7 +27,7 @@ MODULE = importlib.import_module("leader_squeeze_helpers")
 BASE = 40.0
 PREMIUM = 14.0
 WEIGHT = 0.5
-MAX_POSITIONS = 10
+MAX_POSITIONS = 20
 FULL_WEIGHT = 0.75
 
 
@@ -114,22 +114,22 @@ def test_utilization_is_bounded_for_out_of_range_inputs() -> None:
 def test_stake_amount_targets_fixed_loss_and_respects_the_margin_cap() -> None:
     risk_sized = MODULE.entry_risk_stake_amount(
         capital=1_000,
-        max_stake_ratio=0.08,
+        max_stake_ratio=0.04,
         risk_ratio=0.01,
-        stop_fraction=0.04,
+        stop_fraction=0.06,
         leverage=5,
     )
     capped = MODULE.entry_risk_stake_amount(
         capital=1_000,
-        max_stake_ratio=0.08,
+        max_stake_ratio=0.04,
         risk_ratio=0.01,
         stop_fraction=0.01,
         leverage=5,
     )
 
-    assert risk_sized == pytest.approx(50.0)
-    assert risk_sized * 5 * 0.04 == pytest.approx(10.0)
-    assert capped == pytest.approx(80.0)
+    assert risk_sized == pytest.approx(1000 * 0.01 / (0.06 * 5))
+    assert risk_sized * 5 * 0.06 == pytest.approx(10.0)
+    assert capped == pytest.approx(40.0)
 
 
 def test_cluster_size_counts_the_candidate_plus_its_correlated_holdings() -> None:
@@ -144,8 +144,8 @@ def test_exposure_reason_is_silent_inside_the_ceiling() -> None:
             capital=1_000,
             open_margin=720,
             open_gross=3_600,
-            pending_margin=80,
-            pending_gross=400,
+            pending_margin=40,
+            pending_gross=200,
             max_gross_ratio=4.4,
             max_margin_ratio=0.88,
         )
@@ -158,8 +158,8 @@ def test_exposure_reason_reports_the_breached_ceiling() -> None:
         capital=1_000,
         open_margin=800,
         open_gross=4_000,
-        pending_margin=80,
-        pending_gross=400,
+        pending_margin=40,
+        pending_gross=200,
         max_gross_ratio=4.0,
         max_margin_ratio=0.88,
     )
@@ -170,8 +170,8 @@ def test_exposure_reason_reports_the_breached_ceiling() -> None:
         capital=1_000,
         open_margin=800,
         open_gross=4_000,
-        pending_margin=80,
-        pending_gross=400,
+        pending_margin=40,
+        pending_gross=200,
         max_gross_ratio=10.0,
         max_margin_ratio=0.8,
     )
@@ -241,13 +241,14 @@ SERIES = {
     FREE: _closes(_UNCORRELATED),
 }
 SERIES_DATES = pd.date_range("2026-09-01", periods=len(SERIES[HELD]), freq="15min", tz="UTC")
-# 41.2 clears the independent floor (40 + 14/9/1.5) but not the fully
-# correlated one (40 + 14/9) at the second position.
-BETWEEN_FLOORS = 41.2
+# 40.6 clears the independent floor (40 + 14/19/1.5) but not the fully
+# correlated one (40 + 14/19) at the second position.
+BETWEEN_FLOORS = 40.6
 
 
 def _risk_strategy(scores: dict[str, float], held: tuple[str, ...] = ()) -> object:
     strategy = _entry_strategy(scores)
+    strategy.settings["max_positions"] = MAX_POSITIONS
     for pair in set(scores) | set(held):
         strategy._metrics.setdefault(pair, _metric())
     strategy._closed_candles = Mock(
@@ -328,7 +329,7 @@ def test_the_selected_floor_is_recorded_for_the_confirmation_recheck() -> None:
 
 def test_the_gross_exposure_ceiling_blocks_an_otherwise_strong_entry() -> None:
     strategy = _risk_strategy({FREE: 100.0}, held=(HELD,))
-    strategy.settings["entry_risk_max_gross_ratio"] = 0.4
+    strategy.settings["entry_risk_max_gross_ratio"] = 0.39
 
     with patch.object(STRATEGY_MODULE.Trade, "get_open_trades", return_value=_held_trades((HELD,))):
         assert strategy._select_entries() == set()
@@ -339,7 +340,7 @@ def test_the_gross_exposure_ceiling_blocks_an_otherwise_strong_entry() -> None:
 def test_the_margin_ceiling_blocks_an_otherwise_strong_entry() -> None:
     strategy = _risk_strategy({FREE: 100.0}, held=(HELD,))
     strategy.settings["entry_risk_max_gross_ratio"] = 10.0
-    strategy.settings["entry_risk_max_margin_ratio"] = 0.1
+    strategy.settings["entry_risk_max_margin_ratio"] = 0.07
 
     with patch.object(STRATEGY_MODULE.Trade, "get_open_trades", return_value=_held_trades((HELD,))):
         assert strategy._select_entries() == set()
@@ -349,7 +350,7 @@ def test_the_margin_ceiling_blocks_an_otherwise_strong_entry() -> None:
 
 def test_actual_oversized_position_is_used_by_the_exposure_ceiling() -> None:
     strategy = _risk_strategy({FREE: 100.0}, held=(HELD,))
-    strategy.settings["entry_risk_max_gross_ratio"] = 2.8
+    strategy.settings["entry_risk_max_gross_ratio"] = 2.6
     strategy.settings["entry_risk_max_margin_ratio"] = 0.9
     strategy.wallets = SimpleNamespace(
         get_total_stake_amount=lambda: 1_000.0,

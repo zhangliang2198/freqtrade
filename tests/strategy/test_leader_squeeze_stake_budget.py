@@ -19,24 +19,24 @@ def stake(strategy, maximum=990, minimum=5):
     )
 
 
-def test_ten_entries_and_rotation_use_the_same_fixed_risk_budget():
+def test_twenty_entries_and_rotation_use_the_same_fixed_risk_budget():
     strategy = configured_strategy(LeaderSqueezeStrategy)
     wallets = Wallets.__new__(Wallets)
     wallets._config = {"tradable_balance_ratio": 0.99}
     wallets._stake_currency = "USDT"
     strategy.wallets = wallets
     values = []
-    for count in range(11):
-        tied = count * 79.2
+    for count in range(21):
+        tied = count * 39.6
         wallets.get_free = Mock(return_value=1000 - tied)
         with patch.object(Trade, "total_open_trades_stakes", return_value=tied):
             values.append(stake(strategy, maximum=990 - tied))
-    # ATR risk is 1.5 * 2 = 3% of price. At 5x leverage, 66 margin risks 9.9,
-    # i.e. 1% of the 990 trading-capital base.
-    assert values == [pytest.approx(66.0)] * 11
+    # ATR risk is 1.5 * 2 = 3% of price. At 5x leverage, risk sizing would
+    # allow 66 margin, but the 4% per-position cap limits it to 39.6.
+    assert values == [pytest.approx(39.6)] * 21
 
 
-@pytest.mark.parametrize("maximum,minimum", [(65, 5), (990, 67), (0, 5), (float("nan"), 5)])
+@pytest.mark.parametrize("maximum,minimum", [(39.5, 5), (990, 67), (0, 5), (float("nan"), 5)])
 def test_invalid_or_insufficient_budget_skips_instead_of_small_or_oversized_entry(maximum, minimum):
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.wallets = SimpleNamespace(get_total_stake_amount=lambda: 990)
@@ -58,7 +58,7 @@ def test_low_volatility_size_is_capped_by_the_margin_ratio():
 
     assert strategy.custom_stake_amount(
         "BTC/USDT:USDT", datetime.now(UTC), 100, 165, 5, 990, 5, None, "long"
-    ) == pytest.approx(79.2)
+    ) == pytest.approx(39.6)
 
 
 def test_missing_entry_volatility_blocks_the_order():
