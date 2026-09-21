@@ -222,11 +222,15 @@ class LeaderExecutionMixin(LeaderMixinContext):
             )
             return reference
         frame = self._closed_candles(
-            pair, self.timeframe, self.settings["atr_period"] + 2,
-            columns=("high", "low", "close"), now=now,
+            pair,
+            self.timeframe,
+            self.settings["atr_period"] + 2,
+            columns=("high", "low", "close"),
+            now=now,
         )
+        # Preserve a valid frozen anchor on a temporary feed failure. Otherwise
+        # a retry with corrected same-candle data could lift the original cap.
         if frame is None or len(frame) < self.settings["atr_period"] + 2:
-            self._entry_price_references.pop(pair, None)
             raise ValueError("追价保护: 信号K线或ATR历史缺失、过期或无效")
         signal_date = frame["date"].iloc[-1]
         signal_time = signal_date.timestamp()
@@ -236,12 +240,11 @@ class LeaderExecutionMixin(LeaderMixinContext):
             or signal_time % seconds != 0
             or not signal_time + seconds <= now < signal_time + 2 * seconds
         ):
-            self._entry_price_references.pop(pair, None)
             raise ValueError("追价保护: 信号K线未收盘、未对齐或已过期")
-        if reference is not None and reference["signal_time"] == signal_time:
-            return self._entry_price_reference(pair, refresh=False)
         if ((frame["high"] < frame["close"]) | (frame["low"] > frame["close"])).any():
             raise ValueError("追价保护: K线高低收关系无效")
+        if reference is not None and reference["signal_time"] == signal_time:
+            return self._entry_price_reference(pair, refresh=False)
         frame = frame.tail(max(self.ENTRY_HEAT_HISTORY_CANDLES, self.settings["atr_period"] + 2))
         close = float(frame["close"].iloc[-1])
         # A signal candle's own spike must not inflate its ATR allowance.
@@ -306,7 +309,7 @@ class LeaderExecutionMixin(LeaderMixinContext):
             vwap = cost / amount
             if not math.isfinite(vwap) or vwap <= 0:
                 raise ValueError("预计成交均价无效")
-            if vwap / ask - 1.0 > float(self.settings["max_slippage_ratio"]):
+            if not vwap / ask - 1.0 <= float(self.settings["max_slippage_ratio"]):
                 self._execution_block_reason = (
                     f"预计滑点 {vwap / ask - 1.0:.3%} > 上限 {self.settings['max_slippage_ratio']:.3%}"
                 )
