@@ -1,8 +1,9 @@
 """Shared fixtures for the configurable leader-squeeze strategy tests.
 
-The strategy is intentionally configured from the public runtime configuration
-in these tests.  This keeps test tuning values in ``user_data/config.json``
-and exercises the same configuration path as a freshly constructed strategy.
+Tuning values come from the public runtime configuration. The entry-price guard
+is explicitly disabled in these legacy policy fixtures, which do not construct
+closed OHLC history and frozen candidate signals. Its dedicated regression tests
+exercise hard enforcement, including the enabled-by-default production behavior.
 """
 
 from __future__ import annotations
@@ -27,21 +28,25 @@ T = TypeVar("T")
 
 
 def configured_settings() -> dict[str, Any]:
-    """Return an isolated copy of the strategy settings from public config."""
+    """Isolate existing policies; entry-price tests supply their own signal history."""
 
-    return copy.deepcopy(PUBLIC_CONFIG["leader_squeeze"])
+    settings = copy.deepcopy(PUBLIC_CONFIG["leader_squeeze"])
+    settings["entry_price_guard_enabled"] = False
+    return settings
 
 
 def configured_strategy(cls: type[T]) -> T:
     """Create an uninitialised strategy and apply the production config path.
 
     ``__new__`` is used because most unit tests intentionally avoid starting
-    background workers.  The configuration module is imported lazily so this
+    background workers. The configuration module is imported lazily so this
     helper can be imported before an ``importlib``-loaded strategy module.
+    The price guard is disabled only in the fixture's copied configuration.
     """
 
     instance = cls.__new__(cls)
     config = copy.deepcopy(PUBLIC_CONFIG)
+    config["leader_squeeze"]["entry_price_guard_enabled"] = False
     from leader_squeeze_config import configure_strategy
 
     configure_strategy(instance, config)
