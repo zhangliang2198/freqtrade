@@ -17,6 +17,7 @@ from leader_squeeze_support import (
 )
 
 from freqtrade.constants import BuySell
+from freqtrade.exchange import timeframe_to_seconds
 from freqtrade.persistence import Trade
 
 
@@ -189,11 +190,85 @@ class LeaderExecutionMixin(LeaderMixinContext):
         self._order_book_cache[pair] = (now, book)
         return book
 
+    def _entry_price_reference(self, pair: str, *, refresh: bool) -> dict[str, Any] | None:
+        """Freeze the signal close and pre-signal ATR; confirmation may never rebase."""
+        enabled = self.settings.get("entry_price_guard_enabled", True)
+        multiple = self.settings.get("entry_price_max_deviation_atr", 1.0)
+        if type(enabled) is not bool or (
+            type(multiple) not in (int, float)
+            or not math.isfinite(multiple)
+            or multiple <= 0
+        ):
+            raise ValueError("追价保护配置无效: 开关须为bool, ATR倍数须为正有限数")
+        if not enabled:
+            self._entry_price_references = {}
+            return None
+        now = time.time()
+        seconds = timeframe_to_seconds(self.timeframe)
+        references = getattr(self, "_entry_price_references", {})
+        self._entry_price_references = {
+            key: value
+            for key, value in references.items()
+            if value["timeframe"] == self.timeframe
+            and value["signal_time"] + seconds <= now < value["valid_until"]
+        }
+        reference = self._entry_price_references.get(pair)
+        if not refresh:
+            if reference is None:
+                raise ValueError("追价保护: 信号基准缺失或过期, 等待重新选币")
+            # Runtime tightening is permitted; never lift the frozen cap.
+            reference["max_price"] = min(
+                reference["max_price"], reference["close"] + multiple * reference["atr"]
+            )
+            return reference
+        frame = self._closed_candles(
+            pair, self.timeframe, self.settings["atr_period"] + 2,
+            columns=("high", "low", "close"), now=now,
+        )
+        if frame is None or len(frame) < self.settings["atr_period"] + 2:
+            self._entry_price_references.pop(pair, None)
+            raise ValueError("追价保护: 信号K线或ATR历史缺失、过期或无效")
+        signal_date = frame["date"].iloc[-1]
+        signal_time = signal_date.timestamp()
+        if (
+            signal_date.tzinfo is None
+            or not math.isfinite(signal_time)
+            or signal_time % seconds != 0
+            or not signal_time + seconds <= now < signal_time + 2 * seconds
+        ):
+            self._entry_price_references.pop(pair, None)
+            raise ValueError("追价保护: 信号K线未收盘、未对齐或已过期")
+        if reference is not None and reference["signal_time"] == signal_time:
+            return self._entry_price_reference(pair, refresh=False)
+        if ((frame["high"] < frame["close"]) | (frame["low"] > frame["close"])).any():
+            raise ValueError("追价保护: K线高低收关系无效")
+        frame = frame.tail(max(self.ENTRY_HEAT_HISTORY_CANDLES, self.settings["atr_period"] + 2))
+        close = float(frame["close"].iloc[-1])
+        # A signal candle's own spike must not inflate its ATR allowance.
+        atr = float(self._wilder_atr(frame.iloc[:-1]))
+        max_price = close + multiple * atr
+        if not all(math.isfinite(value) and value > 0 for value in (close, atr, max_price)):
+            raise ValueError("追价保护: 信号价格、参考ATR或买入上限无效")
+        reference = {
+            "timeframe": self.timeframe,
+            "signal_time": signal_time,
+            "close": close,
+            "atr": atr,
+            "max_price": max_price,
+            # No data-grace extension: an old signal expires at the next close.
+            "valid_until": signal_time + 2 * seconds,
+        }
+        self._entry_price_references[pair] = reference
+        return reference
+
     def _execution_is_safe(
         self, pair: str, *, amount: float | None = None, cached_only: bool = False
     ) -> bool:
         self._execution_block_reason = "盘口安全检查未通过"
         try:
+            # Selection/rotation previews establish the signal. Actual-quantity
+            # confirmation must reuse it, before _prepare_rotation_buy is called.
+            reference = self._entry_price_reference(pair, refresh=amount is None)
             book = self._execution_order_book(pair, cached_only=cached_only)
             bid, ask = float(book["bids"][0][0]), float(book["asks"][0][0])
             if not all(math.isfinite(value) and value > 0 for value in (bid, ask)) or bid > ask:
@@ -229,10 +304,29 @@ class LeaderExecutionMixin(LeaderMixinContext):
                 self._execution_block_reason = "前20档卖盘深度不足"
                 return False
             vwap = cost / amount
-            self._execution_block_reason = (
-                f"预计滑点 {vwap / ask - 1.0:.3%} > 上限 {self.settings['max_slippage_ratio']:.3%}"
-            )
-            return vwap / ask - 1.0 <= float(self.settings["max_slippage_ratio"])
+            if not math.isfinite(vwap) or vwap <= 0:
+                raise ValueError("预计成交均价无效")
+            if vwap / ask - 1.0 > float(self.settings["max_slippage_ratio"]):
+                self._execution_block_reason = (
+                    f"预计滑点 {vwap / ask - 1.0:.3%} > 上限 {self.settings['max_slippage_ratio']:.3%}"
+                )
+                return False
+            if reference is not None:
+                # A book request may cross the next close. Expired references
+                # reject the order instead of silently switching to a higher cap.
+                current = self._entry_price_reference(pair, refresh=False)
+                if current is None or current["signal_time"] != reference["signal_time"]:
+                    raise ValueError("追价保护: 盘口检查期间信号已变化")
+                if vwap > current["max_price"]:
+                    self._execution_block_reason = (
+                        f"追价拦截: 预计成交均价 {vwap:.8g} > 买入上限 {current['max_price']:.8g} | "
+                        f"信号收盘={current['close']:.8g} 参考ATR={current['atr']:.8g} "
+                        f"偏离={(vwap - current['close']) / current['atr']:.3f}ATR "
+                        f"信号时间戳={current['signal_time']:.0f}"
+                    )
+                    return False
+            self._execution_block_reason = ""
+            return True
         except Exception as exc:
             self._execution_block_reason = f"盘口检查异常 ({type(exc).__name__}): {exc}"
             logger.warning("⚠️ 盘口安全检查异常 %s: %s", pair, exc, extra=LOG_WARN)
