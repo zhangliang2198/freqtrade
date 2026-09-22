@@ -492,10 +492,10 @@ def test_update_limit_order(
     assert trade.close_profit is None
     assert trade.close_date is None
     assert log_has_re(
-        f"LIMIT_{entry_side.upper()} has been fulfilled for "
+        f"LIMIT_{entry_side.upper()} 已成交, "
         r"Trade\(id=2, pair=ADA/USDT, amount=30, "
         f"is_short={is_short}, leverage={lev}, open_rate={open_rate}, "
-        r"open_since=.*\).",
+        r"open_since=.*\)。",
         caplog,
     )
 
@@ -510,10 +510,10 @@ def test_update_limit_order(
     assert pytest.approx(trade.close_profit) == profit
     assert trade.close_date is not None
     assert log_has_re(
-        f"LIMIT_{exit_side.upper()} has been fulfilled for "
+        f"LIMIT_{exit_side.upper()} 已成交, "
         r"Trade\(id=2, pair=ADA/USDT, amount=30, "
         f"is_short={is_short}, leverage={lev}, open_rate={open_rate}, "
-        r"open_since=.*\).",
+        r"open_since=.*\)。",
         caplog,
     )
     caplog.clear()
@@ -544,9 +544,9 @@ def test_update_market_order(market_buy_order_usdt, market_sell_order_usdt, fee,
     assert trade.close_profit is None
     assert trade.close_date is None
     assert log_has_re(
-        r"MARKET_BUY has been fulfilled for Trade\(id=1, "
+        r"MARKET_BUY 已成交, Trade\(id=1, "
         r"pair=ADA/USDT, amount=30, is_short=False, leverage=1, "
-        r"open_rate=2, open_since=.*\).",
+        r"open_rate=2, open_since=.*\)。",
         caplog,
     )
 
@@ -560,9 +560,9 @@ def test_update_market_order(market_buy_order_usdt, market_sell_order_usdt, fee,
     assert pytest.approx(trade.close_profit) == 0.094513715710723
     assert trade.close_date is not None
     assert log_has_re(
-        r"MARKET_SELL has been fulfilled for Trade\(id=1, "
+        r"MARKET_SELL 已成交, Trade\(id=1, "
         r"pair=ADA/USDT, amount=30, is_short=False, leverage=1, "
-        r"open_rate=2, open_since=.*\).",
+        r"open_rate=2, open_since=.*\)。",
         caplog,
     )
 

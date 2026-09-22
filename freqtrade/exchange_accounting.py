@@ -374,7 +374,7 @@ class ExchangeAccounting:
             self._save(trade, state, fills, funding)
             Trade.commit()
         logger.info(
-            "Exchange ledger reconciled %s trade=%s | new_fills=%s new_funding=%s status=%s",
+            "交易所账本对账完成 %s trade=%s | new_fills=%s new_funding=%s status=%s",
             trade.pair,
             trade.id,
             len(fills) - previous_fills,

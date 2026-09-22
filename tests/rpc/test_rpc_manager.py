@@ -77,7 +77,7 @@ def test_send_msg_telegram_disabled(mocker, default_conf, caplog) -> None:
     rpc_manager = RPCManager(freqtradebot)
     rpc_manager.send_msg({"type": RPCMessageType.STATUS, "status": "test"})
 
-    assert log_has("Sending rpc message: {'type': status, 'status': 'test'}", caplog)
+    assert log_has("正在发送 RPC 消息: {'type': status, 'status': 'test'}", caplog)
     assert telegram_mock.call_count == 0
 
 
@@ -89,7 +89,7 @@ def test_send_msg_telegram_error(mocker, default_conf, caplog) -> None:
     rpc_manager = RPCManager(freqtradebot)
     rpc_manager.send_msg({"type": RPCMessageType.STATUS, "status": "test"})
 
-    assert log_has("Sending rpc message: {'type': status, 'status': 'test'}", caplog)
+    assert log_has("正在发送 RPC 消息: {'type': status, 'status': 'test'}", caplog)
     assert log_has("Exception occurred within RPC module telegram", caplog)
 
 
@@ -119,7 +119,7 @@ def test_send_msg_telegram_enabled(mocker, default_conf, caplog) -> None:
     rpc_manager = RPCManager(freqtradebot)
     rpc_manager.send_msg({"type": RPCMessageType.STATUS, "status": "test"})
 
-    assert log_has("Sending rpc message: {'type': status, 'status': 'test'}", caplog)
+    assert log_has("正在发送 RPC 消息: {'type': status, 'status': 'test'}", caplog)
     assert telegram_mock.call_count == 1
 
 

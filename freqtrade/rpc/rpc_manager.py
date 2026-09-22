@@ -73,7 +73,7 @@ class RPCManager:
         }
         """
         if msg.get("type") not in NO_ECHO_MESSAGES:
-            logger.info(f"Sending rpc message: {msg}")
+            logger.info(f"正在发送 RPC 消息: {msg}")
         for mod in self.registered_modules:
             logger.debug("Forwarding message to rpc.%s", mod.name)
             try:

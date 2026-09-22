@@ -260,7 +260,7 @@ class Wallets:
                 self._update_live()
             else:
                 self._update_dry()
-            self._local_log("Wallets synced.")
+            self._local_log("钱包已同步。")
             self._last_wallet_refresh = dt_now()
 
     def get_all_balances(self) -> dict[str, Wallet]:

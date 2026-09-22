@@ -1393,7 +1393,7 @@ def test_update_trade_state(mocker, default_conf_usdt, limit_order, is_short, ca
     # Assert we call handle_trade() if trade is feasible for execution
     freqtrade.update_trade_state(trade, order_id)
 
-    assert log_has_re("Found open order for.*", caplog)
+    assert log_has_re("发现 .* 的未成交挂单", caplog)
     limit_buy_order_usdt_new = deepcopy(limit_order)
     limit_buy_order_usdt_new["filled"] = 0.0
     limit_buy_order_usdt_new["status"] = "canceled"
@@ -6277,7 +6277,7 @@ def test_check_and_call_adjust_trade_position(mocker, default_conf_usdt, fee, ca
     caplog.clear()
     freqtrade.strategy.adjust_trade_position = MagicMock(return_value=(-0.0005, "partial_exit_c"))
     freqtrade.process_open_trade_positions()
-    assert log_has_re(r"LIMIT_SELL has been fulfilled.*", caplog)
+    assert log_has_re(r"LIMIT_SELL 已成交.*", caplog)
     assert freqtrade.strategy.adjust_trade_position.call_count == 4
     trade = Trade.get_trades(trade_filter=[Trade.id == 5]).first()
     assert trade.orders[-1].ft_order_tag == "partial_exit_c"

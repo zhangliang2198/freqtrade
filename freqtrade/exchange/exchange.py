@@ -1688,8 +1688,8 @@ class Exchange:
             self._log_exchange_response("create_stoploss_order", order)
             order = self._order_contracts_to_amount(order)
             logger.info(
-                f"stoploss {user_order_type} order added for {pair}. "
-                f"stop price: {stop_price}. limit: {limit_rate}"
+                f"已为 {pair} 添加 {user_order_type} 止损单。"
+                f"止损价: {stop_price}, 限价: {limit_rate}"
             )
             return order
         except ccxt.InsufficientFunds as e:

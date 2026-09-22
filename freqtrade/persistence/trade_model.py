@@ -925,7 +925,7 @@ class LocalTrade:
         if order.status == "open" or order.safe_price is None:
             return
 
-        logger.info(f"Updating trade (id={self.id}) ...")
+        logger.info(f"正在更新交易 (id={self.id}) ...")
         if order.ft_order_side != "stoploss" and order.funding_fee is None:
             order.funding_fee = (
                 self.funding_fee_running if self.funding_fee_running is not None else 0.0
@@ -940,14 +940,14 @@ class LocalTrade:
             self.amount = order.safe_amount_after_fee
             if self.is_open:
                 payment = "SELL" if self.is_short else "BUY"
-                logger.info(f"{order_type}_{payment} has been fulfilled for {self}.")
+                logger.info(f"{order_type}_{payment} 已成交, {self}。")
 
             self.recalc_trade_from_orders()
         elif order.ft_order_side == self.exit_side:
             if self.is_open:
                 payment = "BUY" if self.is_short else "SELL"
                 # * On margin shorts, you buy a little bit more than the amount (amount + interest)
-                logger.info(f"{order_type}_{payment} has been fulfilled for {self}.")
+                logger.info(f"{order_type}_{payment} 已成交, {self}。")
 
         elif order.ft_order_side == "stoploss" and order.status not in ("open",):
             self.close_rate_requested = self.stop_loss

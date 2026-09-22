@@ -723,7 +723,7 @@ class Telegram(RPCHandler):
         noti = self._message_loudness(msg)
 
         if noti == "off":
-            logger.info(f"Notification '{msg['type']}' not sent.")
+            logger.info(f"通知 '{msg['type']}' 未发送。")
             # Notification disabled
             return
 

@@ -2269,7 +2269,7 @@ def test_send_msg_enter_notification(
     msg_mock.reset_mock()
     telegram.send_msg(msg)
     assert msg_mock.call_count == 0
-    assert log_has("Notification 'entry' not sent.", caplog)
+    assert log_has("通知 'entry' 未发送。", caplog)
 
     freqtradebot.config["telegram"]["notification_settings"] = {"entry": "silent"}
     caplog.clear()

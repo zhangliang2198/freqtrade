@@ -1298,7 +1298,7 @@ class FreqtradeBot(LoggingMixin):
         # First cancelling stoploss on exchange ...
         for oslo in trade.open_sl_orders:
             try:
-                logger.info(f"Cancelling stoploss on exchange for {trade} order: {oslo.order_id}")
+                logger.info(f"正在取消 {trade} 的挂单止损, 订单号: {oslo.order_id}")
                 co = self.exchange.cancel_stoploss_order_with_result(
                     oslo.order_id, trade.pair, trade.amount
                 )
@@ -1802,8 +1802,8 @@ class FreqtradeBot(LoggingMixin):
             if trade.stoploss_last_update_utc and upd_req >= trade.stoploss_last_update_utc:
                 # cancelling the current stoploss on exchange first
                 logger.info(
-                    f"Cancelling current stoploss on exchange for pair {trade.pair} "
-                    f"(orderid:{order['id']}) in order to add another one ..."
+                    f"正在取消交易对 {trade.pair} 的当前挂单止损 "
+                    f"(orderid:{order['id']}), 以便重新挂单 ..."
                 )
 
                 self.cancel_stoploss_on_exchange(trade)
@@ -2582,7 +2582,7 @@ class FreqtradeBot(LoggingMixin):
 
         # Update trade with order values
         if not stoploss_order:
-            logger.info(f"Found open order for {trade}")
+            logger.info(f"发现 {trade} 的未成交挂单")
         try:
             order = action_order or self.exchange.fetch_order_or_stoploss_order(
                 order_id, trade.pair, stoploss_order

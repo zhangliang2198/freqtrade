@@ -403,7 +403,7 @@ def test_handle_stoploss_on_exchange_partial_cancel_here(
 
     assert freqtrade.handle_stoploss_on_exchange(trade) is False
     # Canceled Stoploss filled partially ...
-    assert log_has_re("Cancelling current stoploss on exchange.*", caplog)
+    assert log_has_re("正在取消交易对 .* 的当前挂单止损.*", caplog)
 
     assert trade.has_open_sl_orders is True
     assert trade.open_sl_orders[-1].order_id == "102"
