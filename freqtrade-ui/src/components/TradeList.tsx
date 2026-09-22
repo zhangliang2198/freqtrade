@@ -324,36 +324,43 @@ export function TradeList({
         </div>
       )}
 
-      <Table<Trade>
-        className="ft-table"
-        columns={columns}
-        dataSource={paged}
-        loading={loading}
-        rowKey="trade_id"
-        size="small"
-        pagination={false}
-        empty={
-          <EmptyState icon={<IconFilter />} title={emptyText} />
-        }
-        onRow={(trade) => ({
-          // Semi types the callback argument as optional; skip rather than crash.
-          onClick: () => trade && onSelectTrade?.(trade),
-          style: {
-            cursor: onSelectTrade ? 'pointer' : 'default',
-            background:
-              trade && selectedTradeId === trade.trade_id ? 'var(--ft-paper-3)' : undefined,
-          },
-        })}
-      />
+      <div className="ft-scroll-x ft-list-viewport">
+        <Table<Trade>
+          className="ft-table"
+          columns={columns}
+          dataSource={paged}
+          loading={loading}
+          rowKey="trade_id"
+          size="small"
+          pagination={false}
+          empty={<EmptyState icon={<IconFilter />} title={emptyText} />}
+          onRow={(trade) => ({
+            // Semi types the callback argument as optional; skip rather than crash.
+            onClick: () => trade && onSelectTrade?.(trade),
+            style: {
+              cursor: onSelectTrade ? 'pointer' : 'default',
+              background:
+                trade && selectedTradeId === trade.trade_id ? 'var(--ft-paper-3)' : undefined,
+            },
+          })}
+        />
+      </div>
 
+      {/* The pager lives *outside* the scroll viewport. Inside it, reaching the
+          next page meant scrolling to the bottom of a 25-row table first. */}
       {!activeTrades && total > pageSize && (
         <div
           className="ft-row"
-          style={{ padding: '8px 10px', justifyContent: 'flex-end', borderTop: '1px solid var(--ft-line)' }}
+          style={{
+            padding: '8px 10px',
+            justifyContent: 'flex-end',
+            borderTop: '1px solid var(--ft-line)',
+            flexShrink: 0,
+          }}
         >
           <Space>
             <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
-              {total} trades
+              每页 {pagination?.pageSize ?? pageSize} 笔 · 共 {total} 笔
             </span>
             <Pagination
               size="small"

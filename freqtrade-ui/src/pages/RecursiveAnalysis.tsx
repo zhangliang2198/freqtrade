@@ -176,66 +176,35 @@ export function RecursiveAnalysis() {
             description="通过比较不同启动K线数量下计算的指标值，检查策略指标是否存在递归公式问题。存在差异的指标很可能受启动数据量影响，从而在回测与实盘之间产生不一致的结果。"
           />
 
-          <div>
-            <div style={{ fontSize: 'var(--ft-font-xs)', color: 'var(--ft-ink-4)', marginBottom: 4 }}>
-              策略
-            </div>
+          <div className="ft-formgrid">
+            <span className="ft-row ft-formlabel">策略</span>
             <StrategySelect api={api} value={strategy} onChange={setStrategy} disabled={running} />
-          </div>
 
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'max-content minmax(0, 1fr)',
-              gap: 'var(--ft-gap-4) var(--ft-gap-5)',
-              alignItems: 'center',
-            }}
-          >
-            <span
-              className="ft-row"
-              style={{
-                justifyContent: 'flex-end',
-                fontSize: 'var(--ft-font-sm)',
-                color: 'var(--ft-ink-3)',
-              }}
-            >
-              时间周期
-            </span>
+            <span className="ft-row ft-formlabel">时间周期</span>
             <TimeframeSelect value={timeframe} onChange={setTimeframe} disabled={running} />
-          </div>
 
-          <div
-            style={{
-              border: '1px solid var(--ft-line)',
-              borderRadius: 'var(--ft-radius)',
-              padding: 'var(--ft-gap-4)',
-            }}
-          >
-            <div className="ft-row" style={{ gap: 'var(--ft-gap-4)' }}>
-              <span style={{ fontWeight: 600, fontSize: 'var(--ft-font-sm)' }}>启动K线数量</span>
+            <span className="ft-row ft-formlabel">
+              启动K线数量
               <Tooltip content="以逗号分隔的启动K线数量列表，留空使用后端默认值。">
                 <span className="ft-faint" style={{ cursor: 'help' }}>
                   ?
                 </span>
               </Tooltip>
+            </span>
+            <div className="ft-col" style={{ gap: 'var(--ft-gap-2)' }}>
+              <Input
+                size="small"
+                value={startupCandleInput}
+                placeholder="例如 199,399,499,999,1999"
+                disabled={running}
+                onChange={setStartupCandleInput}
+              />
               <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
                 解析为 {startupCandles.length} 个数值
               </span>
             </div>
-            <Input
-              size="small"
-              value={startupCandleInput}
-              placeholder="例如 199,399,499,999,1999"
-              disabled={running}
-              onChange={setStartupCandleInput}
-              style={{ width: '100%', marginTop: 'var(--ft-gap-3)' }}
-            />
-          </div>
 
-          <div>
-            <div style={{ fontSize: 'var(--ft-font-xs)', color: 'var(--ft-ink-4)', marginBottom: 4 }}>
-              分析区间
-            </div>
+            <span className="ft-row ft-formlabel">分析区间</span>
             <TimeRangeSelect value={timerange} onChange={setTimerange} disabled={running} />
           </div>
         </div>

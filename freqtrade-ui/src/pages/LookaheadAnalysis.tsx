@@ -197,27 +197,14 @@ export function LookaheadAnalysis() {
             description="通过比较完整数据集与逐步缩短区间上生成的信号，检查策略是否存在未来函数。若指标或信号随未来数据变化，说明存在 lookahead bias，回测结果将不可靠。"
           />
 
-          <div>
-            <div style={{ fontSize: 'var(--ft-font-xs)', color: 'var(--ft-ink-4)', marginBottom: 4 }}>
-              策略
-            </div>
+          <div className="ft-formgrid">
+            <span className="ft-row ft-formlabel">策略</span>
             <StrategySelect api={api} value={strategy} onChange={setStrategy} disabled={running} />
-          </div>
 
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'max-content minmax(0, 1fr)',
-              gap: 'var(--ft-gap-4) var(--ft-gap-5)',
-              alignItems: 'center',
-            }}
-          >
-            <span className="ft-row" style={{ justifyContent: 'flex-end', fontSize: 'var(--ft-font-sm)', color: 'var(--ft-ink-3)' }}>
-              时间周期
-            </span>
+            <span className="ft-row ft-formlabel">时间周期</span>
             <TimeframeSelect value={timeframe} onChange={setTimeframe} disabled={running} />
 
-            <span className="ft-row" style={{ justifyContent: 'flex-end', fontSize: 'var(--ft-font-sm)', color: 'var(--ft-ink-3)' }}>
+            <span className="ft-row ft-formlabel">
               最小交易数
               <Tooltip content="分析在评估偏差前需要达到的最小交易数。">
                 <span className="ft-faint" style={{ cursor: 'help' }}>
@@ -234,7 +221,7 @@ export function LookaheadAnalysis() {
               onChange={(value) => setMinTradeAmount(value === '' ? 1 : Number(value))}
             />
 
-            <span className="ft-row" style={{ justifyContent: 'flex-end', fontSize: 'var(--ft-font-sm)', color: 'var(--ft-ink-3)' }}>
+            <span className="ft-row ft-formlabel">
               目标交易数
               <Tooltip content="分析尝试达到的目标交易数，需大于等于最小交易数。">
                 <span className="ft-faint" style={{ cursor: 'help' }}>
@@ -251,27 +238,24 @@ export function LookaheadAnalysis() {
               onChange={(value) => setTargetedTradeAmount(value === '' ? 1 : Number(value))}
             />
 
-            <span />
-            <span className="ft-row" style={{ gap: 'var(--ft-gap-4)' }}>
-              <Switch
-                size="small"
-                checked={allowLimitOrders}
-                disabled={running}
-                onChange={setAllowLimitOrders}
-              />
-              <span style={{ fontSize: 'var(--ft-font-sm)' }}>允许限价单</span>
+            <span className="ft-row ft-formlabel">
+              允许限价单
               <Tooltip content="在分析中允许限价单（可能导致误报）。">
                 <span className="ft-faint" style={{ cursor: 'help' }}>
                   ?
                 </span>
               </Tooltip>
             </span>
-          </div>
+            <span className="ft-row">
+              <Switch
+                size="small"
+                checked={allowLimitOrders}
+                disabled={running}
+                onChange={setAllowLimitOrders}
+              />
+            </span>
 
-          <div>
-            <div style={{ fontSize: 'var(--ft-font-xs)', color: 'var(--ft-ink-4)', marginBottom: 4 }}>
-              分析区间
-            </div>
+            <span className="ft-row ft-formlabel">分析区间</span>
             <TimeRangeSelect value={timerange} onChange={setTimerange} disabled={running} />
           </div>
         </div>

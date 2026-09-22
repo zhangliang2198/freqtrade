@@ -237,6 +237,28 @@ html[theme-mode='dark'] {
   gap: var(--ft-gap-5);
   flex-wrap: wrap;
 }
+
+/* List-centric pages (a single table and nothing else) stretch that panel into
+   the leftover height. Otherwise a 12-row table sits at the top of a 1176px page
+   with ~650px of empty background under it, and the table shows fewer rows than
+   the window could hold. */
+.ft-page.fill {
+  min-height: 100%;
+}
+.ft-page.fill > .ft-panel {
+  flex: 1;
+  min-height: 0;
+}
+.ft-page.fill .ft-panel-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.ft-page.fill .ft-list-viewport {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
 .ft-page-title {
   margin: 0;
   font-size: var(--ft-font-xl);
@@ -297,6 +319,53 @@ html[theme-mode='dark'] {
 }
 .ft-panel-body.flush {
   padding: 0;
+}
+
+/* Semi's per-component CSS is injected after the entry stylesheets, so an
+   override that merely repeats its class name loses on source order. These
+   selectors mirror Semi's own full-banner chain
+   (`.semi-banner-full .semi-banner-content-wrapper .semi-banner-content`, three
+   classes deep) and add an element, reaching (0,3,1) so the override holds
+   whichever variant class the banner carries. */
+/* Semi lays a banner's title and description out in a row, so a bold title runs
+   straight into the sentence that explains it — "Lookahead analysis通过比较…"
+   reads as one run-on string. It also centres the content, which strands the
+   icon away from the text it belongs to once the description is long. Stack the
+   two and anchor them left. */
+body .semi-banner .semi-banner-content-wrapper .semi-banner-content {
+  justify-content: flex-start;
+}
+body .semi-banner .semi-banner-content-wrapper .semi-banner-content-body {
+  flex-direction: column;
+  align-items: flex-start;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Semi paints every progress bar with `--semi-color-success`, which this theme
+   binds to the profit green — so a neutral ratio (robot share of the account)
+   rendered as if it were a gain. A progress bar measures a quantity, not a
+   profit, so it gets ink. */
+body .semi-progress-track-inner {
+  background-color: var(--ft-ink-2);
+}
+body .semi-progress-circle-ring-inner {
+  stroke: var(--ft-ink-2);
+}
+
+/* Label/control form grid. One shared definition so every row on a form lines up
+   the same way — a form that stacks one label and inlines the rest reads as an
+   accident rather than a decision. */
+.ft-formgrid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--ft-gap-4) var(--ft-gap-5);
+  align-items: center;
+}
+.ft-formgrid > .ft-formlabel {
+  justify-content: flex-end;
+  font-size: var(--ft-font-sm);
+  color: var(--ft-ink-3);
 }
 
 /* Sub-section heading inside a panel. A short block of facts does not deserve a
@@ -609,7 +678,7 @@ body .ft-table .semi-table-tbody > .semi-table-row:hover > .semi-table-row-cell 
   filter: grayscale(1);
 }
 #tv-attr-logo {
-  opacity: 0.4;
+  opacity: 0.3;
   transition: opacity 120ms ease;
 }
 #tv-attr-logo:hover,

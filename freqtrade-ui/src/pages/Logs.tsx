@@ -104,7 +104,7 @@ export function Logs() {
   ]
 
   return (
-    <div className="ft-page">
+    <div className="ft-page fill">
       <div className="ft-page-head">
         <h1 className="ft-page-title">日志</h1>
         <span className="ft-page-sub">

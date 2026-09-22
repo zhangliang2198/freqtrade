@@ -102,7 +102,41 @@ function useChartHost(
   return hostRef
 }
 
-function baseOptions(theme: ChartTheme, height: number) {
+/**
+ * Tick labels in one consistent shape.
+ *
+ * lightweight-charts' default formatter switches between "17日" and "12:01"
+ * depending on whether a tick lands on a day boundary, so a single axis reads
+ * as an incoherent mix. Picking the shape from the visible span instead keeps
+ * every label on the axis comparable.
+ *
+ * The clock is included for anything up to a fortnight because the tick spacing
+ * is then sub-day: a date-only label repeats (`09-20  09-20`) as soon as two
+ * ticks land inside the same day.
+ */
+function tickFormatterFor(spanSeconds: number) {
+  return (time: number) => {
+    const d = new Date(time * 1000)
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    const date = `${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`
+    const clock = `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}`
+    if (spanSeconds > 14 * 86400) return date
+    if (spanSeconds > 86400) return `${date} ${clock}`
+    return clock
+  }
+}
+
+/** Seconds covered by a series, used to pick a tick-label shape. */
+function spanOf(times: number[]): number {
+  if (times.length < 2) return 0
+  return Math.max(...times) - Math.min(...times)
+}
+
+function baseOptions(
+  theme: ChartTheme,
+  height: number,
+  opts: { timeAxis?: boolean; tickFormat?: (time: number) => string } = {},
+) {
   return {
     height,
     layout: {
@@ -115,18 +149,48 @@ function baseOptions(theme: ChartTheme, height: number) {
       vertLines: { color: theme.grid, style: LineStyle.Dotted },
       horzLines: { color: theme.grid, style: LineStyle.Dotted },
     },
-    rightPriceScale: { borderColor: theme.border },
-    timeScale: { borderColor: theme.border, timeVisible: true, secondsVisible: false },
+    // scaleMargins keeps the extreme gridlines off the container edges. Without
+    // it the topmost/bottommost axis label is centred on the edge and gets cut
+    // in half by the chart's own bounding box.
+    rightPriceScale: {
+      borderColor: theme.border,
+      scaleMargins: { top: 0.14, bottom: 0.12 },
+    },
+    timeScale: {
+      borderColor: theme.border,
+      timeVisible: true,
+      secondsVisible: false,
+      // Category-style charts hide this axis entirely: their real labels are
+      // rendered in the DOM below the canvas.
+      visible: opts.timeAxis ?? true,
+      ...(opts.tickFormat ? { tickMarkFormatter: opts.tickFormat } : {}),
+    },
     crosshair: { mode: CrosshairMode.Normal },
     handleScroll: true,
     handleScale: true,
   }
 }
 
+/**
+ * `fitContent()` puts the first and last point flush against the chart edges, so
+ * their axis labels are centred on the edge and drawn half outside the box — a
+ * timestamp like `09-16 03:46` renders as `03:46`, and the last one slides under
+ * the price scale. A half-slot of padding is nowhere near enough for a label
+ * that wide, so the range is inset by a fraction of its own length.
+ *
+ * `padRatio: 0` leaves the range flush, which is what category charts want.
+ */
+function fitWithPadding(chart: IChartApi, count: number, padRatio = 0.08) {
+  chart.timeScale().fitContent()
+  if (count > 1 && padRatio > 0) {
+    const pad = Math.max(0.5, (count - 1) * padRatio)
+    chart.timeScale().setVisibleLogicalRange({ from: -pad, to: count - 1 + pad })
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Candlestick                                                                 */
 /* -------------------------------------------------------------------------- */
-
 export function CandleChart({
   candles,
   trades = [],
@@ -153,7 +217,9 @@ export function CandleChart({
   const hostRef = useChartHost(
     (host, theme) => {
       const chart: IChartApi = createChart(host, {
-        ...baseOptions(theme, height),
+        ...baseOptions(theme, height, {
+          tickFormat: tickFormatterFor(spanOf(candles.map((c) => c.time))),
+        }),
         width: host.clientWidth,
       })
 
@@ -188,6 +254,10 @@ export function CandleChart({
           priceFormat: { type: 'volume' },
           priceScaleId: 'volume',
           color: theme.neutral,
+          // A last-value tag on the volume pane duplicates the axis and, being
+          // tinted, was the loudest thing on the chart.
+          lastValueVisible: false,
+          priceLineVisible: false,
         })
         chart.priceScale('volume').applyOptions({
           scaleMargins: { top: 0.82, bottom: 0 },
@@ -277,7 +347,7 @@ export function CandleChart({
         createSeriesMarkers(candleSeries, markers)
       }
 
-      chart.timeScale().fitContent()
+      fitWithPadding(chart, candles.length)
 
       const onResize = () => chart.applyOptions({ width: host.clientWidth })
       const resizeObserver = new ResizeObserver(onResize)
@@ -331,7 +401,9 @@ export function LineChart({
   const hostRef = useChartHost(
     (host, theme) => {
       const chart = createChart(host, {
-        ...baseOptions(theme, height),
+        ...baseOptions(theme, height, {
+          tickFormat: tickFormatterFor(spanOf(points.map((p) => p.time))),
+        }),
         width: host.clientWidth,
       })
 
@@ -359,7 +431,7 @@ export function LineChart({
         })
       }
 
-      chart.timeScale().fitContent()
+      fitWithPadding(chart, points.length)
 
       const resizeObserver = new ResizeObserver(() =>
         chart.applyOptions({ width: host.clientWidth }),
@@ -405,12 +477,19 @@ export function BarChart({
   const hostRef = useChartHost(
     (host, theme) => {
       const chart = createChart(host, {
-        ...baseOptions(theme, height),
+        // `timeAxis: false` because the keys below are array indices, not times:
+        // the built-in axis would label every bar "00:00" (1s after the epoch).
+        // The component renders the real category labels under the canvas.
+        ...baseOptions(theme, height, { timeAxis: false }),
         width: host.clientWidth,
       })
 
       const series = chart.addSeries(HistogramSeries, {
         priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+        // A per-bar value tag on a histogram is noise, and it is tinted, so it
+        // out-shouted the bars themselves.
+        lastValueVisible: false,
+        priceLineVisible: false,
       })
 
       series.setData(
@@ -425,7 +504,7 @@ export function BarChart({
         })),
       )
 
-      chart.timeScale().fitContent()
+      fitWithPadding(chart, bars.length, 0)
 
       const resizeObserver = new ResizeObserver(() =>
         chart.applyOptions({ width: host.clientWidth }),

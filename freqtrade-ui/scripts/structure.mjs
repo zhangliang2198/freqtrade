@@ -90,6 +90,9 @@ const PROBE = () => {
     viewportW: window.innerWidth,
     pageW: page ? px(page.getBoundingClientRect().width) : 0,
     docScrollW: document.documentElement.scrollWidth,
+    // `.ft-page.fill` deliberately stretches its list panel into the leftover
+    // height, so a tall panel there is the design, not a defect.
+    fill: page ? page.classList.contains('fill') : false,
     panels,
   }
 }
@@ -114,7 +117,7 @@ const ROUTES = [
 const context = await browser.newContext({ viewport: VIEWPORT })
 const page = await context.newPage()
 await page.addInitScript(
-  ([sess, id]) => {
+  ([sess, id, user, pass]) => {
     localStorage.setItem(
       'ftui.bots',
       JSON.stringify([
@@ -122,8 +125,8 @@ await page.addInitScript(
           id,
           name: 'main',
           baseUrl: window.location.origin,
-          username: USER,
-          password: PASS,
+          username: user,
+          password: pass,
         },
       ]),
     )
@@ -134,7 +137,7 @@ await page.addInitScript(
     )
     localStorage.setItem('ftui.theme', 'dark')
   },
-  [session, 'ftbot.0'],
+  [session, 'ftbot.0', USER, PASS],
 )
 
 console.log(`viewport ${VIEWPORT.width}px\n`)
@@ -147,7 +150,7 @@ for (const route of ROUTES) {
   const r = await page.evaluate(PROBE)
   const waste = r.pageW / r.viewportW
   console.log(
-    `--- /${route}   page=${r.pageW}px (${Math.round(waste * 100)}% of viewport)  doc=${r.docScrollW}px  panels=${r.panels.length}`,
+    `--- /${route}   page=${r.pageW}px (${Math.round(waste * 100)}% of viewport)  doc=${r.docScrollW}px  panels=${r.panels.length}${r.fill ? '  [fill]' : ''}`,
   )
 
   // A page that rendered no panels must never read as "ok" — that is how a
@@ -158,7 +161,7 @@ for (const route of ROUTES) {
   }
 
   const interesting = r.panels
-    .filter((p) => p.dead > 40 || p.h > 700 || p.overflowX > 0)
+    .filter((p) => p.dead > 40 || (!r.fill && p.h > 700) || p.overflowX > 0)
     .sort((a, b) => b.dead - a.dead)
 
   if (interesting.length === 0) {
@@ -167,7 +170,7 @@ for (const route of ROUTES) {
   for (const p of interesting.slice(0, 8)) {
     const bits = [`w=${p.w}`, `h=${p.h}`]
     if (p.dead > 40) bits.push(`DEAD=${p.dead}px`)
-    if (p.h > 700) bits.push('OVERSIZED')
+    if (!r.fill && p.h > 700) bits.push('OVERSIZED')
     if (p.rows) bits.push(`rows=${p.rows}`)
     if (p.overflowX > 0) bits.push(`overflowX=${p.overflowX}`)
     console.log(`    ${p.title.padEnd(18)} ${bits.join('  ')}`)

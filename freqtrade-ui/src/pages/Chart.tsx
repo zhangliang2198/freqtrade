@@ -536,7 +536,6 @@ export function Chart() {
           icon={<IconList />}
           sub={focusPair ? `${(tradesByPair[focusPair] ?? []).length} 笔` : undefined}
           flush
-          bodyClassName="ft-scroll-x ft-list-viewport"
         >
           {focusPair ? (
             <TradeList

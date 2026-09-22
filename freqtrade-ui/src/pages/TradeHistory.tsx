@@ -126,7 +126,7 @@ export function TradeHistory() {
   const pageProfit = trades.reduce((sum, trade) => sum + (trade.profit_abs ?? 0), 0)
 
   return (
-    <div className="ft-page">
+    <div className="ft-page fill">
       <header className="ft-page-head">
         <h1 className="ft-page-title">交易历史</h1>
         <span className="ft-page-sub">
@@ -160,7 +160,6 @@ export function TradeHistory() {
         title="已平仓交易"
         icon={<IconHistory />}
         flush
-        bodyClassName="ft-scroll-x ft-list-viewport"
       >
         <TradeList
           trades={trades}
@@ -236,16 +235,6 @@ export function TradeHistory() {
           </div>
         )}
       </SideSheet>
-
-      <div className="ft-row ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
-        <span>
-          服务端分页：每页 {PAGE_SIZE} 笔，共 {total} 笔
-        </span>
-        <span style={{ marginLeft: 'auto' }}>
-          本页 {trades.length} 笔
-          {state.refreshing ? ' · 同步中…' : ''}
-        </span>
-      </div>
     </div>
   )
 }

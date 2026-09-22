@@ -156,7 +156,7 @@ for (const theme of ['dark', 'light']) {
   const context = await browser.newContext({ viewport: { width: 1680, height: 1050 } })
   const page = await context.newPage()
   await page.addInitScript(
-    ([session, theme, id]) => {
+    ([session, theme, id, user, pass]) => {
       localStorage.setItem(
         'ftui.bots',
         JSON.stringify([
@@ -164,8 +164,8 @@ for (const theme of ['dark', 'light']) {
             id,
             name: 'main',
             baseUrl: window.location.origin,
-            username: USER,
-            password: PASS,
+            username: user,
+            password: pass,
           },
         ]),
       )
@@ -176,7 +176,7 @@ for (const theme of ['dark', 'light']) {
       )
       localStorage.setItem('ftui.theme', theme)
     },
-    [session, theme, 'ftbot.0'],
+    [session, theme, 'ftbot.0', USER, PASS],
   )
 
   for (const route of ROUTES) {

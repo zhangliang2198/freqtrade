@@ -120,7 +120,7 @@ export function OpenTrades() {
   )
 
   return (
-    <div className="ft-page">
+    <div className="ft-page fill">
       <header className="ft-page-head">
         <h1 className="ft-page-title">未平仓交易</h1>
         <span className="ft-page-sub">

@@ -825,7 +825,6 @@ export function Trade() {
           icon={<IconActivity />}
           sub={`${openTrades.length} 笔`}
           flush
-          bodyClassName="ft-scroll-x ft-list-viewport"
         >
           <TradeList
             trades={openTrades}
@@ -856,7 +855,6 @@ export function Trade() {
           icon={<IconHistory />}
           sub={`最近 ${closedTrades.length} 笔`}
           flush
-          bodyClassName="ft-scroll-x ft-list-viewport"
         >
           <TradeList
             trades={closedTrades}
