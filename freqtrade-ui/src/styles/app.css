@@ -1,0 +1,758 @@
+/* =============================================================================
+   Freqtrade Console — layout & component styling
+   Dense by default: hairline rules, tabular figures, small type, tight rows.
+   ========================================================================== */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ft-paper-0);
+  color: var(--ft-ink-1);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', Roboto, Helvetica, Arial, sans-serif;
+  font-size: var(--ft-font-md);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Scrollbars -----------------------------------------------------------
+   `color-scheme` on the root is what makes the browser paint its *own*
+   scrollbars to match the theme — without it the dark theme keeps bright light
+   scrollbars, which is glaring under any wide table. The explicit rules below
+   then slim them down and bind the colours to the monochrome ramp. */
+html[theme-mode='light'] {
+  color-scheme: light;
+}
+html[theme-mode='dark'] {
+  color-scheme: dark;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ft-line-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ft-line-strong);
+  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ft-ink-4);
+  background-clip: content-box;
+}
+
+/* Numeric data always aligns in a column */
+.ft-num {
+  font-family: var(--ft-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+.ft-up {
+  color: var(--ft-up);
+}
+.ft-down {
+  color: var(--ft-down);
+}
+.ft-flat {
+  color: var(--ft-ink-3);
+}
+.ft-muted {
+  color: var(--ft-ink-3);
+}
+.ft-faint {
+  color: var(--ft-ink-4);
+}
+
+/* =============================================================================
+   Shell
+   ========================================================================== */
+.ft-shell {
+  display: grid;
+  grid-template-columns: var(--ft-sidebar-w) 1fr;
+  grid-template-rows: var(--ft-topbar-h) 1fr;
+  grid-template-areas:
+    'brand topbar'
+    'sidebar main';
+  height: 100%;
+  transition: grid-template-columns 0.12s ease;
+}
+.ft-shell[data-collapsed='true'] {
+  grid-template-columns: var(--ft-sidebar-w-collapsed) 1fr;
+}
+
+.ft-brand {
+  grid-area: brand;
+  display: flex;
+  align-items: center;
+  gap: var(--ft-gap-4);
+  padding: 0 var(--ft-gap-5);
+  border-right: 1px solid var(--ft-line);
+  border-bottom: 1px solid var(--ft-line);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ft-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border-radius: var(--ft-radius-sm);
+  background: var(--ft-ink-0);
+  color: var(--ft-paper-0);
+  font-size: var(--ft-font-sm);
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+.ft-brand-name {
+  font-size: var(--ft-font-md);
+  font-weight: 600;
+  color: var(--ft-ink-0);
+  letter-spacing: -0.01em;
+}
+
+.ft-topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  gap: var(--ft-gap-5);
+  padding: 0 var(--ft-gap-5);
+  border-bottom: 1px solid var(--ft-line);
+  background: var(--ft-paper-1);
+  min-width: 0;
+}
+.ft-topbar-spacer {
+  flex: 1 1 auto;
+}
+
+.ft-sidebar {
+  grid-area: sidebar;
+  border-right: 1px solid var(--ft-line);
+  background: var(--ft-paper-1);
+  padding: var(--ft-gap-4) var(--ft-gap-3);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.ft-main {
+  grid-area: main;
+  overflow-y: auto;
+  padding: var(--ft-gap-5);
+  background: var(--ft-paper-0);
+}
+
+/* =============================================================================
+   Sidebar nav — grouped, with icon block + label
+   ========================================================================== */
+.ft-navgroup + .ft-navgroup {
+  margin-top: var(--ft-gap-5);
+}
+.ft-navgroup-label {
+  font-size: var(--ft-font-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ft-ink-4);
+  padding: 0 var(--ft-gap-4) var(--ft-gap-3);
+  font-weight: 600;
+}
+.ft-shell[data-collapsed='true'] .ft-navgroup-label {
+  display: none;
+}
+
+.ft-navitem {
+  display: flex;
+  align-items: center;
+  gap: var(--ft-gap-4);
+  height: 30px;
+  padding: 0 var(--ft-gap-4);
+  border-radius: var(--ft-radius);
+  color: var(--ft-ink-2);
+  text-decoration: none;
+  font-size: var(--ft-font-md);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ft-navitem:hover {
+  background: var(--ft-paper-2);
+  color: var(--ft-ink-0);
+}
+.ft-navitem.is-active {
+  background: var(--ft-ink-0);
+  color: var(--ft-paper-0);
+  font-weight: 500;
+}
+.ft-navitem-icon {
+  flex: 0 0 16px;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+}
+.ft-navitem-badge {
+  margin-left: auto;
+  font-size: var(--ft-font-xs);
+  font-family: var(--ft-mono);
+  color: inherit;
+  opacity: 0.75;
+}
+.ft-shell[data-collapsed='true'] .ft-navitem {
+  justify-content: center;
+  padding: 0;
+}
+.ft-shell[data-collapsed='true'] .ft-navitem-label,
+.ft-shell[data-collapsed='true'] .ft-navitem-badge {
+  display: none;
+}
+
+/* =============================================================================
+   Panels — the unit of page composition
+   ========================================================================== */
+.ft-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ft-gap-5);
+  min-width: 0;
+}
+.ft-page-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ft-gap-5);
+  flex-wrap: wrap;
+}
+.ft-page-title {
+  margin: 0;
+  font-size: var(--ft-font-xl);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--ft-ink-0);
+}
+.ft-page-sub {
+  font-size: var(--ft-font-sm);
+  color: var(--ft-ink-3);
+}
+
+.ft-panel {
+  border: 1px solid var(--ft-line);
+  border-radius: var(--ft-radius-lg);
+  background: var(--ft-paper-1);
+  min-width: 0;
+  overflow: hidden;
+}
+.ft-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ft-gap-4);
+  padding: var(--ft-gap-4) var(--ft-gap-5);
+  border-bottom: 1px solid var(--ft-line);
+  min-height: 38px;
+}
+.ft-panel-icon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border-radius: var(--ft-radius-sm);
+  background: var(--ft-paper-3);
+  color: var(--ft-ink-1);
+  font-size: 13px;
+}
+.ft-panel-title {
+  font-size: var(--ft-font-md);
+  font-weight: 600;
+  color: var(--ft-ink-0);
+  letter-spacing: -0.01em;
+}
+.ft-panel-sub {
+  font-size: var(--ft-font-xs);
+  color: var(--ft-ink-4);
+}
+.ft-panel-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--ft-gap-4);
+}
+.ft-panel-body {
+  padding: var(--ft-gap-5);
+  min-width: 0;
+}
+.ft-panel-body.flush {
+  padding: 0;
+}
+
+/* Sub-section heading inside a panel. A short block of facts does not deserve a
+   disclosure control — hiding four rows behind a click costs more than it saves. */
+.ft-subhead {
+  display: flex;
+  align-items: center;
+  gap: var(--ft-gap-3);
+  margin: var(--ft-gap-5) 0 var(--ft-gap-3);
+  padding-top: var(--ft-gap-4);
+  border-top: 1px solid var(--ft-line);
+  font-size: var(--ft-font-xs);
+  font-weight: 600;
+  color: var(--ft-ink-3);
+}
+.ft-subhead:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* Grid helpers */
+.ft-grid {
+  display: grid;
+  gap: var(--ft-gap-5);
+  /* Panels size to their content instead of stretching to the tallest sibling.
+     With `stretch` a short panel (e.g. Bot status beside the 24-row performance
+     table) becomes a tall empty box — up to 945px of dead space measured on the
+     dashboard. Uneven bottoms read as ordinary whitespace; a hollow panel does
+     not. Stat tiles are naturally equal height, so they are unaffected. */
+  align-items: start;
+}
+.ft-grid.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.ft-grid.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.ft-grid.cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.ft-grid.cols-6 {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+@media (max-width: 1280px) {
+  .ft-grid.cols-6 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .ft-grid.cols-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 860px) {
+  .ft-grid.cols-2,
+  .ft-grid.cols-3,
+  .ft-grid.cols-4,
+  .ft-grid.cols-6 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* =============================================================================
+   Stat tiles — icon block, label, value, delta
+   ========================================================================== */
+.ft-stat {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ft-gap-5);
+  padding: var(--ft-gap-5);
+  border: 1px solid var(--ft-line);
+  border-radius: var(--ft-radius-lg);
+  background: var(--ft-paper-1);
+  min-width: 0;
+}
+.ft-stat-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: var(--ft-radius);
+  background: var(--ft-paper-3);
+  color: var(--ft-ink-1);
+  font-size: 15px;
+}
+.ft-stat-body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.ft-stat-label {
+  font-size: var(--ft-font-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ft-ink-4);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ft-stat-value {
+  font-size: var(--ft-font-xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ft-ink-0);
+  margin-top: var(--ft-gap-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ft-stat-value.sm {
+  font-size: var(--ft-font-lg);
+}
+.ft-stat-meta {
+  font-size: var(--ft-font-xs);
+  color: var(--ft-ink-3);
+  margin-top: var(--ft-gap-2);
+  display: flex;
+  gap: var(--ft-gap-4);
+  flex-wrap: wrap;
+}
+
+/* =============================================================================
+   Key/value rows — used in detail drawers and config views
+   ========================================================================== */
+.ft-kv {
+  display: grid;
+  grid-template-columns: minmax(90px, max-content) minmax(0, 1fr);
+  gap: var(--ft-gap-3) var(--ft-gap-5);
+  align-items: baseline;
+  font-size: var(--ft-font-sm);
+}
+.ft-kv dt {
+  color: var(--ft-ink-4);
+  white-space: nowrap;
+}
+.ft-kv dd {
+  margin: 0;
+  color: var(--ft-ink-1);
+  overflow-wrap: anywhere;
+}
+
+/* Section rule with label */
+.ft-rule {
+  display: flex;
+  align-items: center;
+  gap: var(--ft-gap-4);
+  color: var(--ft-ink-4);
+  font-size: var(--ft-font-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  margin: var(--ft-gap-2) 0;
+}
+.ft-rule::after {
+  content: '';
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--ft-line);
+}
+
+/* =============================================================================
+   Tags / badges
+   ========================================================================== */
+.ft-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--ft-radius-sm);
+  border: 1px solid var(--ft-line-strong);
+  background: var(--ft-paper-2);
+  color: var(--ft-ink-2);
+  font-size: var(--ft-font-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.ft-tag.solid {
+  background: var(--ft-ink-0);
+  border-color: var(--ft-ink-0);
+  color: var(--ft-paper-0);
+}
+.ft-tag.up {
+  border-color: color-mix(in srgb, var(--ft-up) 40%, transparent);
+  background: var(--ft-up-bg);
+  color: var(--ft-up);
+}
+.ft-tag.down {
+  border-color: color-mix(in srgb, var(--ft-down) 40%, transparent);
+  background: var(--ft-down-bg);
+  color: var(--ft-down);
+}
+.ft-tag.warn {
+  border-color: color-mix(in srgb, var(--ft-warn) 40%, transparent);
+  background: var(--ft-warn-bg);
+  color: var(--ft-warn);
+}
+.ft-tag.plain {
+  background: transparent;
+}
+
+/* Live connection dot */
+.ft-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 7px;
+  background: var(--ft-ink-4);
+}
+.ft-dot.on {
+  background: var(--ft-up);
+}
+.ft-dot.off {
+  background: var(--ft-down);
+}
+.ft-dot.idle {
+  background: var(--ft-ink-4);
+}
+
+/* =============================================================================
+   Dense tables — tighten Semi's default row metrics
+   ========================================================================== */
+/* The `body` prefix is load-bearing: Semi ships
+   `.semi-table-small .semi-table-tbody .semi-table-row .semi-table-row-cell`,
+   which ties with a plain `.ft-table …` selector at (0,4,0) and wins on source
+   order because Semi's per-component CSS is injected after the entry
+   stylesheets. The extra element tips specificity to (0,4,1). */
+body .ft-table .semi-table-thead > .semi-table-row > .semi-table-row-head {
+  background: var(--ft-paper-2);
+  font-size: var(--ft-font-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ft-ink-3);
+  font-weight: 600;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--ft-line);
+  white-space: nowrap;
+}
+body .ft-table .semi-table-tbody > .semi-table-row > .semi-table-row-cell {
+  padding: 5px 10px;
+  font-size: var(--ft-font-sm);
+  border-bottom: 1px solid var(--ft-line);
+  /* Timestamps are the widest cell. Left to wrap they take two lines, which on
+     its own made every row 57px instead of 36px and pushed the closed-trades
+     panel to ~1600px. Panels scroll horizontally, so nowrap is the right trade. */
+  white-space: nowrap;
+}
+body .ft-table .semi-table-tbody > .semi-table-row:hover > .semi-table-row-cell {
+  background: var(--ft-paper-2);
+}
+.ft-table .semi-table-row-expand-icon-cell {
+  padding-left: 6px !important;
+  padding-right: 0 !important;
+  width: 24px;
+}
+.ft-table .semi-table-placeholder {
+  background: transparent;
+  border-bottom: none;
+}
+.ft-table .semi-table-body {
+  scrollbar-width: thin;
+}
+
+/* Clickable pair / link cells */
+.ft-link {
+  color: var(--ft-ink-0);
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+  border-bottom: 1px solid var(--ft-line-strong);
+}
+.ft-link:hover {
+  border-bottom-color: var(--ft-ink-0);
+}
+
+/* Empty state */
+.ft-empty {
+  display: grid;
+  place-items: center;
+  gap: var(--ft-gap-4);
+  padding: var(--ft-gap-7);
+  color: var(--ft-ink-4);
+  font-size: var(--ft-font-sm);
+  text-align: center;
+}
+.ft-empty-icon {
+  font-size: 22px;
+  color: var(--ft-ink-5);
+}
+
+/* Chart host */
+.ft-chart {
+  width: 100%;
+  min-height: 220px;
+}
+.ft-chart-tall {
+  min-height: 420px;
+}
+
+/* lightweight-charts injects a TradingView attribution link into every chart.
+   Its Apache-2.0 licence requires keeping the notice, so it is de-saturated and
+   dimmed rather than hidden — the default link blue is the only unstyled colour
+   the library would otherwise leak into the monochrome theme. */
+#tv-attr-logo,
+#tv-attr-logo svg,
+#tv-attr-logo svg * {
+  color: var(--ft-ink-3);
+  fill: var(--ft-ink-3);
+  filter: grayscale(1);
+}
+#tv-attr-logo {
+  opacity: 0.4;
+  transition: opacity 120ms ease;
+}
+#tv-attr-logo:hover,
+#tv-attr-logo:focus-visible {
+  opacity: 0.85;
+}
+
+/* Login screen */
+.ft-login {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  background:
+    repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 9px,
+      var(--ft-line) 9px,
+      var(--ft-line) 10px
+    ),
+    var(--ft-paper-0);
+  padding: var(--ft-gap-6);
+}
+.ft-login-card {
+  width: 100%;
+  max-width: 380px;
+  border: 1px solid var(--ft-line-strong);
+  border-radius: var(--ft-radius-lg);
+  background: var(--ft-paper-1);
+  padding: var(--ft-gap-6);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 18%);
+}
+.ft-login-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--ft-gap-4);
+  margin-bottom: var(--ft-gap-2);
+}
+.ft-login-title {
+  font-size: var(--ft-font-lg);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--ft-ink-0);
+}
+.ft-login-hint {
+  font-size: var(--ft-font-xs);
+  color: var(--ft-ink-4);
+  margin-bottom: var(--ft-gap-6);
+}
+
+/* Scrollbars kept unobtrusive in both modes */
+.ft-main::-webkit-scrollbar,
+.ft-sidebar::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.ft-main::-webkit-scrollbar-thumb,
+.ft-sidebar::-webkit-scrollbar-thumb {
+  background: var(--ft-line-strong);
+  border-radius: 5px;
+  border: 2px solid var(--ft-paper-0);
+}
+.ft-main::-webkit-scrollbar-track,
+.ft-sidebar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Utility */
+.ft-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ft-gap-4);
+}
+.ft-row.wrap {
+  flex-wrap: wrap;
+}
+.ft-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ft-gap-4);
+}
+.ft-right {
+  text-align: right;
+}
+.ft-nowrap {
+  white-space: nowrap;
+}
+.ft-mono-sm {
+  font-family: var(--ft-mono);
+  font-size: var(--ft-font-xs);
+}
+.ft-scroll-x {
+  overflow-x: auto;
+}
+
+/* A long table scrolls inside a bounded viewport rather than growing its panel
+   without limit. Measured before this: the closed-trades panel reached 1589px
+   and the performance table 2333px, each leaving a matching blank beside it. */
+.ft-list-viewport {
+  max-height: var(--ft-list-max-h);
+  overflow-y: auto;
+}
+
+/* Pairs tile across the available width. As one column they formed a 54-row list
+   with the pair name and its profit pinned to opposite ends of an 1800px row —
+   sparse to read and 1473px tall. */
+.ft-pair-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  border-top: 1px solid var(--ft-line);
+}
+.ft-pair-grid > button {
+  min-width: 0;
+}
+.ft-pair-grid > button > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Two-up table layout for long, narrow-row lists: fills the width and halves the
+   height instead of leaving one wide column stretched across the panel. */
+.ft-perf-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.ft-perf-split > * + * {
+  border-left: 1px solid var(--ft-line);
+}
+@media (max-width: 1100px) {
+  .ft-perf-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ft-perf-split > * + * {
+    border-left: 0;
+    border-top: 1px solid var(--ft-line);
+  }
+}
+.ft-pre {
+  font-family: var(--ft-mono);
+  font-size: var(--ft-font-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: var(--ft-ink-2);
+}

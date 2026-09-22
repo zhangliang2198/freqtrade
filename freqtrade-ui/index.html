@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Freqtrade Console</title>
+  </head>
+  <body>
+    <script>
+      // Apply the persisted theme before first paint to avoid a flash of the wrong mode.
+      // Semi Design scopes its dark variables to body[theme-mode=dark]; the root
+      // element carries the same attribute so `color-scheme` can follow it and the
+      // browser paints its own scrollbars and form controls to match.
+      (function () {
+        var mode = 'dark';
+        try {
+          mode = localStorage.getItem('ftui.theme') || 'dark';
+        } catch (e) {
+          /* localStorage unavailable — fall back to dark */
+        }
+        document.documentElement.setAttribute('theme-mode', mode);
+        document.body.setAttribute('theme-mode', mode);
+      })();
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
