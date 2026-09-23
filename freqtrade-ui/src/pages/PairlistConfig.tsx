@@ -641,6 +641,8 @@ export function PairlistConfig() {
       const { job_id: jobId } = await pairlistApi.evaluate(api, payload)
       track(jobId, 'pairlist')
       const status = await waitFor(jobId)
+      // null means the job was dismissed from the tracking panel.
+      if (!status) return
       if (status.status === 'failed') {
         Toast.error(status.error || status.pollError || 'Pairlist 评估失败')
         return
@@ -723,14 +725,7 @@ export function PairlistConfig() {
         </Panel>
       )}
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(220px, 280px) minmax(0, 1fr) minmax(280px, 360px)',
-          gap: 'var(--ft-gap-5)',
-          alignItems: 'start',
-        }}
-      >
+      <div className="ft-panes-3">
         {/* Available handlers --------------------------------------------- */}
         <Panel
           title="可用处理器"
@@ -744,11 +739,14 @@ export function PairlistConfig() {
             </div>
           ) : (
             <div style={{ maxHeight: 620, overflowY: 'auto' }}>
-              {available.map((info) => {
+              {available.map((info, index) => {
                 const disabled = working.pairlists.length === 0 && !info.is_pairlist_generator
                 return (
                   <div
-                    key={info.name}
+                    // The backend can list a handler name more than once (the
+                    // pairlist pipeline itself reports two PairInformationFilter
+                    // entries), so the name alone is not a safe key.
+                    key={`${info.name}-${index}`}
                     className="ft-row"
                     style={{
                       gap: 'var(--ft-gap-4)',

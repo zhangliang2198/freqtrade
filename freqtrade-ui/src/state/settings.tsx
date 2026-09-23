@@ -43,7 +43,6 @@ export interface Settings {
   /** 'UTC' or 'local' — consumed by `formatTimestamp`. */
   timezone: string
   confirmDialog: boolean
-  multiPaneButtonsShowText: boolean
   chartLabelSide: ChartLabelSide
   useHeikinAshiCandles: boolean
   useReducedPairCalls: boolean
@@ -62,7 +61,6 @@ export const DEFAULT_SETTINGS: Settings = {
   openTradesInTitle: 'showPill',
   timezone: 'UTC',
   confirmDialog: true,
-  multiPaneButtonsShowText: false,
   chartLabelSide: 'right',
   useHeikinAshiCandles: false,
   useReducedPairCalls: true,
@@ -127,10 +125,6 @@ function normalize(raw: unknown): Settings {
         ? input.timezone
         : DEFAULT_SETTINGS.timezone,
     confirmDialog: bool(input.confirmDialog, DEFAULT_SETTINGS.confirmDialog),
-    multiPaneButtonsShowText: bool(
-      input.multiPaneButtonsShowText,
-      DEFAULT_SETTINGS.multiPaneButtonsShowText,
-    ),
     chartLabelSide: pick(input.chartLabelSide, LABEL_SIDES, DEFAULT_SETTINGS.chartLabelSide),
     useHeikinAshiCandles: bool(
       input.useHeikinAshiCandles,
@@ -208,6 +202,17 @@ function subscribe(listener: () => void): () => void {
 }
 
 function getSnapshot(): Settings {
+  return current
+}
+
+/**
+ * The current settings, readable outside React.
+ *
+ * `formatTimestamp` is a plain function with ~23 call sites; threading a hook
+ * through every one of them would be churn, and the settings page promises the
+ * timezone affects *all* timestamps — not just the log viewer's.
+ */
+export function currentSettings(): Settings {
   return current
 }
 

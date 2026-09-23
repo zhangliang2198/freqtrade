@@ -108,8 +108,22 @@ for (const theme of THEMES) {
     await page.goto(`${ORIGIN}/${route}`, { waitUntil: 'domcontentloaded' })
     await page.waitForSelector('.ft-shell', { timeout: 15000 })
 
-    // Wait for the content to stop growing rather than guessing a duration:
-    // several pages fetch in two stages and a fixed sleep captures them half-drawn.
+    // A stability check alone is not enough: a loading spinner has a constant
+    // height, so "stopped growing" was satisfied immediately and several pages
+    // were captured mid-load. Require real content first, then wait for it to
+    // settle (pages fetch in two stages).
+    await page
+      .waitForFunction(
+        () => {
+          const main = document.querySelector('.ft-main')
+          if (!main) return false
+          if (!document.querySelector('.ft-panel')) return false
+          return (main.innerText || '').trim().length > 120
+        },
+        { timeout: 25000 },
+      )
+      .catch(() => {})
+
     let last = -1
     for (let i = 0; i < 30; i += 1) {
       await page.waitForTimeout(700)

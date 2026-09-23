@@ -6,6 +6,8 @@
  * settings (mixed separators in a trading table are worse than consistency).
  */
 
+import { currentSettings } from '../state/settings'
+
 const LOCALE = 'en-US'
 
 /** `undefined`/`null` guard used throughout the formatters. */
@@ -84,7 +86,15 @@ export function formatTimestamp(
   ts: number | null | undefined,
   options: { timezone?: string; dateOnly?: boolean; seconds?: boolean; fallback?: string } = {},
 ): string {
-  const { timezone = 'UTC', dateOnly = false, seconds = true, fallback = 'N/A' } = options
+  // Default to the user's configured zone rather than a hard-coded 'UTC': the
+  // setting advertises that it affects every timestamp, and defaulting here is
+  // what makes that true for the ~22 call sites that pass no options.
+  const {
+    timezone = currentSettings().timezone,
+    dateOnly = false,
+    seconds = true,
+    fallback = 'N/A',
+  } = options
   if (!isSet(ts) || ts <= 0) return fallback
 
   const date = new Date(ts)

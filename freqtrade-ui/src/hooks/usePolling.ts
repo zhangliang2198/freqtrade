@@ -78,11 +78,26 @@ export function usePolling<T>(
 
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
 
+  // `deps` are the fetch's identity. When they change, the payload on screen
+  // belongs to a different query — another bot, another page — so it must not
+  // linger. Without this a bot switch kept showing the previous bot's trades and
+  // profit, and would keep showing them forever if the new request failed, while
+  // the snapshot provider had already reset (so shell and page disagreed).
+  // Comparing element identity means a manual refresh (nonce) does not clear,
+  // which would otherwise flash on every poll.
+  const prevDeps = useRef<unknown[] | null>(null)
+
   // Initial fetch + re-fetch whenever deps change.
   useEffect(() => {
     if (!enabled || !fetcherRef.current) {
       setLoading(false)
       return
+    }
+    const prev = prevDeps.current
+    prevDeps.current = deps
+    if (prev && (deps.length !== prev.length || deps.some((d, i) => !Object.is(d, prev[i])))) {
+      setData(undefined)
+      setError(undefined)
     }
     hasData.current = false
     void run()

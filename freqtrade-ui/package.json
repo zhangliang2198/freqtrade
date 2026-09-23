@@ -13,7 +13,10 @@
     "shots": "node scripts/shots.mjs",
     "audit": "node scripts/audit.mjs",
     "structure": "node scripts/structure.mjs",
-    "gen:palette": "python3 scripts/gen_semi_palette.py"
+    "gen:palette": "python3 scripts/gen_semi_palette.py",
+    "contrast": "node scripts/contrast.mjs",
+    "review": "node scripts/review.mjs",
+    "focus": "node scripts/focus.mjs"
   },
   "dependencies": {
     "@douyinfe/semi-icons": "^2.103.0",

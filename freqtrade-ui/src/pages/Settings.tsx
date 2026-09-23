@@ -7,10 +7,11 @@
  * diagnostics pulled from the active bot.
  */
 
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Button, InputNumber, RadioGroup, Select, Slider, Toast } from '@douyinfe/semi-ui'
 import {
   IconAlertTriangle,
+  IconBellStroked,
   IconCandlestickChartStroked,
   IconConfigStroked,
   IconInfoCircle,
@@ -88,6 +89,58 @@ const TIME_PROFIT_PREFERENCES: { value: TimeProfitPreference; label: string }[] 
 /* -------------------------------------------------------------------------- */
 /* Layout helpers                                                              */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The four switches below only fire once the browser has granted notification
+ * permission, which it will not do without a user gesture — so the panel has to
+ * offer one. Hidden once permission is granted or denied.
+ */
+function NotificationPermissionRow() {
+  const [permission, setPermission] = useState<NotificationPermission | 'unsupported'>(
+    typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+  )
+
+  if (permission === 'granted') {
+    return (
+      <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
+        浏览器通知已授权
+      </span>
+    )
+  }
+  if (permission === 'unsupported') {
+    return (
+      <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
+        当前浏览器不支持桌面通知，以下开关不会生效。
+      </span>
+    )
+  }
+  if (permission === 'denied') {
+    return (
+      <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
+        通知已被拒绝，需在浏览器站点设置中重新允许。
+      </span>
+    )
+  }
+  return (
+    <div className="ft-row" style={{ gap: 'var(--ft-gap-4)' }}>
+      {/* Not `borderless`: this is the one action the panel needs the user to
+          take, and a borderless button reads as a section heading. */}
+      <Button
+        size="small"
+        theme="light"
+        icon={<IconBellStroked />}
+        onClick={() => {
+          void Notification.requestPermission().then(setPermission)
+        }}
+      >
+        允许桌面通知
+      </Button>
+      <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
+        以下开关需要先授权
+      </span>
+    </div>
+  )
+}
 
 function SettingRow({
   label,
@@ -181,19 +234,13 @@ export function Settings() {
               checked={settings.confirmDialog}
               onChange={(checked) => update({ confirmDialog: checked })}
             />
-
-            <SwitchRow
-              label="多窗格按钮显示文字"
-              help="关闭后按钮只显示图标，界面更紧凑"
-              checked={settings.multiPaneButtonsShowText}
-              onChange={(checked) => update({ multiPaneButtonsShowText: checked })}
-            />
           </div>
         </Panel>
 
         {/* 通知 ----------------------------------------------------------- */}
         <Panel title="通知" icon={<IconAlertTriangle />} sub="WebSocket 事件提示">
           <div className="ft-col" style={{ gap: 'var(--ft-gap-4)' }}>
+            <NotificationPermissionRow />
             {NOTIFICATION_ROWS.map((row) => (
               <SwitchRow
                 key={row.key}
@@ -237,20 +284,26 @@ export function Settings() {
 
             <SettingRow label="默认显示K线数量" hint="新打开图表时请求的K线根数">
               <div className="ft-row" style={{ gap: 'var(--ft-gap-5)' }}>
-                <Slider
-                  min={100}
-                  max={2000}
-                  step={50}
-                  value={settings.chartDefaultCandleCount}
-                  onChange={(value) =>
-                    update({
-                      chartDefaultCandleCount: Array.isArray(value)
-                        ? Number(value[0])
-                        : Number(value),
-                    })
-                  }
-                  style={{ flex: '1 1 auto', minWidth: 0 }}
-                />
+                {/* Semi's Slider forwards `style` to its inner
+                    `.semi-slider-wrapper`, not to the `.semi-slider` root that is
+                    the real flex item. Putting the flex on the root therefore did
+                    nothing and the wrapper collapsed to 0px — a floating handle
+                    with no rail. The wrapper div carries the flex instead. */}
+                <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+                  <Slider
+                    min={100}
+                    max={2000}
+                    step={50}
+                    value={settings.chartDefaultCandleCount}
+                    onChange={(value) =>
+                      update({
+                        chartDefaultCandleCount: Array.isArray(value)
+                          ? Number(value[0])
+                          : Number(value),
+                      })
+                    }
+                  />
+                </div>
                 <InputNumber
                   size="small"
                   min={100}

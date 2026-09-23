@@ -65,6 +65,8 @@ export function RecursiveAnalysis() {
       })
       track(job.job_id, 'recursive_analysis')
       const status = await waitFor(job.job_id)
+      // null means the job was dismissed from the tracking panel.
+      if (!status) return
       if (status.status === 'failed') {
         Toast.error(status.error || '递归公式分析失败')
         return

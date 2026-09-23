@@ -6,7 +6,7 @@
  * panels and stat tiles are the app's own visual language.
  */
 
-import type { ReactNode } from 'react'
+import { forwardRef, type ReactNode } from 'react'
 
 /* -------------------------------------------------------------------------- */
 /* Panel                                                                       */
@@ -25,19 +25,17 @@ export interface PanelProps {
   children: ReactNode
 }
 
-export function Panel({
-  title,
-  icon,
-  sub,
-  actions,
-  flush,
-  className,
-  bodyClassName,
-  children,
-}: PanelProps) {
+/**
+ * `ref` is forwarded so a page can scroll a panel into view — selecting a row in
+ * a table above the fold otherwise updates a panel the user cannot see.
+ */
+export const Panel = forwardRef<HTMLElement, PanelProps>(function Panel(
+  { title, icon, sub, actions, flush, className, bodyClassName, children },
+  ref,
+) {
   const hasHead = title !== undefined || actions !== undefined || icon !== undefined
   return (
-    <section className={`ft-panel${className ? ` ${className}` : ''}`}>
+    <section ref={ref} className={`ft-panel${className ? ` ${className}` : ''}`}>
       {hasHead && (
         <header className="ft-panel-head">
           {icon !== undefined && <span className="ft-panel-icon">{icon}</span>}
@@ -51,7 +49,7 @@ export function Panel({
       </div>
     </section>
   )
-}
+})
 
 /* -------------------------------------------------------------------------- */
 /* Stat tile                                                                   */

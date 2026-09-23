@@ -45,7 +45,7 @@ interface BalanceRow {
 }
 
 export function Balance() {
-  const { config, balance, loading, lastUpdated, refresh } = useSnapshot()
+  const { config, balance, loading, refreshing, slowUpdated, refresh } = useSnapshot()
 
   const [showBotOnly, setShowBotOnly] = useState(true)
   const [hideSmall, setHideSmall] = useState(true)
@@ -175,7 +175,7 @@ export function Balance() {
         <span className="ft-row" style={{ marginLeft: 'auto', gap: 'var(--ft-gap-4)' }}>
           {config && <DryRunTag dryRun={config.dry_run} />}
           <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
-            更新于 {lastUpdated ? formatTimestamp(lastUpdated, { seconds: false }) : '—'}
+            更新于 {slowUpdated ? formatTimestamp(slowUpdated, { seconds: false }) : '—'}
           </span>
           <Tooltip content="立即刷新">
             <Button
@@ -243,6 +243,7 @@ export function Balance() {
           icon={<IconCoinMoney />}
           sub={`${rows.length} 种货币`}
           flush
+          bodyClassName="ft-scroll-x ft-list-viewport"
           actions={
             <div className="ft-row" style={{ gap: 'var(--ft-gap-5)' }}>
               <Checkbox
@@ -268,7 +269,7 @@ export function Balance() {
             rowKey="currency"
             size="small"
             pagination={false}
-            loading={loading}
+            loading={loading || refreshing}
             empty={<EmptyState icon={<IconCoinMoney />} title="没有余额记录" />}
             footer={() => (
               <div

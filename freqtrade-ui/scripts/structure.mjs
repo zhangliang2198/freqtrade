@@ -27,7 +27,14 @@ if (!USER || !PASS) {
   console.error('Set SMOKE_USER and SMOKE_PASSWORD before running this script.')
   process.exit(2)
 }
-const VIEWPORT = { width: 2040, height: 1200 }
+// The app has breakpoints at 1280 and 1100 that a single wide-viewport sweep
+// never exercises, so the width and theme are configurable.
+const WIDTHS = (process.env.STRUCTURE_WIDTHS ?? '2040,1440,1100')
+  .split(',')
+  .map((n) => Number(n.trim()))
+  .filter((n) => Number.isFinite(n) && n > 0)
+const THEMES = (process.env.STRUCTURE_THEMES ?? 'dark,light').split(',').map((t) => t.trim())
+const HEIGHT = Number(process.env.STRUCTURE_HEIGHT ?? 1200)
 
 const executablePath = [
   process.env.SMOKE_CHROME,
@@ -86,10 +93,43 @@ const PROBE = () => {
     }
   })
 
+  // Text that is silently cut off. An element that clips its own overflow
+  // without an ellipsis hides content with no cue at all — the classic failure
+  // mode of a dense table (a wrapped timestamp, a truncated pair name). Elements
+  // inside a scroll container are skipped: there the clipping is reachable.
+  const clipped = []
+  const inScroller = (el) => {
+    let n = el.parentElement
+    while (n && n !== document.body) {
+      const ox = getComputedStyle(n).overflowX
+      if (ox === 'auto' || ox === 'scroll') return true
+      n = n.parentElement
+    }
+    return false
+  }
+  for (const el of document.querySelectorAll('.ft-main *')) {
+    const own = [...el.childNodes]
+      .filter((n) => n.nodeType === 3)
+      .map((n) => n.textContent.trim())
+      .join('')
+    if (!own) continue
+    const cs = getComputedStyle(el)
+    if (cs.textOverflow === 'ellipsis') continue
+    if (cs.overflowX !== 'hidden' && cs.overflowX !== 'clip') continue
+    if (el.clientWidth === 0 || el.scrollWidth <= el.clientWidth + 1) continue
+    if (inScroller(el)) continue
+    clipped.push({
+      text: own.slice(0, 28),
+      cls: (el.className || '').toString().slice(0, 34),
+      cut: px(el.scrollWidth - el.clientWidth),
+    })
+  }
+
   return {
     viewportW: window.innerWidth,
     pageW: page ? px(page.getBoundingClientRect().width) : 0,
     docScrollW: document.documentElement.scrollWidth,
+    clipped: clipped.slice(0, 6),
     // `.ft-page.fill` deliberately stretches its list panel into the leftover
     // height, so a tall panel there is the design, not a defect.
     fill: page ? page.classList.contains('fill') : false,
@@ -114,10 +154,11 @@ const ROUTES = [
   'settings',
 ]
 
-const context = await browser.newContext({ viewport: VIEWPORT })
-const page = await context.newPage()
-await page.addInitScript(
-  ([sess, id, user, pass]) => {
+async function makePage(theme, width) {
+    const context = await browser.newContext({ viewport: { width, height: HEIGHT } })
+    const page = await context.newPage()
+    await page.addInitScript(
+    ([sess, id, user, pass, t]) => {
     localStorage.setItem(
       'ftui.bots',
       JSON.stringify([
@@ -135,13 +176,23 @@ await page.addInitScript(
       `ftui.tokens.${id}`,
       JSON.stringify({ access: sess.access_token, refresh: sess.refresh_token }),
     )
-    localStorage.setItem('ftui.theme', 'dark')
-  },
-  [session, 'ftbot.0', USER, PASS],
-)
+    localStorage.setItem('ftui.theme', t)
+    },
+    [session, 'ftbot.0', USER, PASS, theme],
+    )
+    return { context, page }
+}
 
-console.log(`viewport ${VIEWPORT.width}px\n`)
+for (const theme of THEMES) {
+  for (const width of WIDTHS) {
+    console.log(`\n${'='.repeat(70)}\nTHEME ${theme}  ·  viewport ${width}px\n${'='.repeat(70)}`)
+    const { context, page } = await makePage(theme, width)
+    await sweep(page)
+    await context.close()
+  }
+}
 
+async function sweep(page) {
 for (const route of ROUTES) {
   await page.goto(`${ORIGIN}/${route}`, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.ft-shell', { timeout: 15000 })
@@ -160,6 +211,10 @@ for (const route of ROUTES) {
     continue
   }
 
+  for (const c of r.clipped) {
+    console.log(`    CLIPPED ${c.cut}px  "${c.text}"  [${c.cls}]`)
+  }
+
   const interesting = r.panels
     .filter((p) => p.dead > 40 || (!r.fill && p.h > 700) || p.overflowX > 0)
     .sort((a, b) => b.dead - a.dead)
@@ -175,6 +230,7 @@ for (const route of ROUTES) {
     if (p.overflowX > 0) bits.push(`overflowX=${p.overflowX}`)
     console.log(`    ${p.title.padEnd(18)} ${bits.join('  ')}`)
   }
+}
 }
 
 await browser.close()

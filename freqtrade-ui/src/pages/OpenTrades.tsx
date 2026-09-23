@@ -29,7 +29,7 @@ import { displayPair, formatTimestamp } from '../utils/format'
 
 export function OpenTrades() {
   const api = useApi()
-  const { config, openTrades, loading, lastUpdated, refresh } = useSnapshot()
+  const { config, openTrades, loading, refreshing, fastUpdated, refresh } = useSnapshot()
 
   const [selected, setSelected] = useState<Trade | null>(null)
   const [exitTarget, setExitTarget] = useState<Trade | null>(null)
@@ -130,7 +130,7 @@ export function OpenTrades() {
           {config && <StateTag state={config.state} />}
           {config && <DryRunTag dryRun={config.dry_run} />}
           <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
-            更新于 {lastUpdated ? formatTimestamp(lastUpdated, { seconds: false }) : '—'}
+            更新于 {fastUpdated ? formatTimestamp(fastUpdated, { seconds: false }) : '—'}
           </span>
           <Tooltip content="立即刷新">
             <Button
@@ -148,7 +148,7 @@ export function OpenTrades() {
         <TradeList
           trades={openTrades}
           activeTrades
-          loading={loading}
+          loading={loading || refreshing}
           stakeCurrency={stakeCurrency}
           stakeCurrencyDecimals={stakeDecimals}
           tradingMode={tradingMode}

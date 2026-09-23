@@ -200,16 +200,7 @@ function BacktestComparison({
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <>
-      <span
-        className="ft-row"
-        style={{
-          fontSize: 'var(--ft-font-sm)',
-          color: 'var(--ft-ink-3)',
-          justifyContent: 'flex-end',
-          gap: 4,
-          whiteSpace: 'nowrap',
-        }}
-      >
+      <span className="ft-row ft-formlabel" style={{ gap: 4, whiteSpace: 'nowrap' }}>
         {label}
         {hint && (
           <Tooltip content={hint}>
@@ -241,6 +232,7 @@ export function Backtest() {
   const [showSidebar, setShowSidebar] = useState(true)
   const [results, setResults] = useState<Record<string, BacktestResultInMemory>>({})
   const [selectedKey, setSelectedKey] = useState('')
+  const [historyRevision, setHistoryRevision] = useState(0)
   const [wrongState, setWrongState] = useState(false)
 
   // Run form.
@@ -409,8 +401,12 @@ export function Backtest() {
     try {
       const data = await backtestApi.abort(api)
       applyStatus(data)
-      stopPolling()
-      Toast.warning('已请求停止回测')
+      // Abort only *requests* a stop; the backend can still report running for a
+      // while. Stopping the poller unconditionally left the progress bar frozen
+      // on "回测运行中" and the result was never fetched. Keep polling until the
+      // status actually settles.
+      if (!data.running) stopPolling()
+      Toast.warning(data.running ? '已请求停止回测，等待其结束…' : '已请求停止回测')
     } catch (err) {
       handleError(err, '无法停止回测')
     }
@@ -438,10 +434,15 @@ export function Backtest() {
   }
 
   const handleHistoryLoad = (_entry: BacktestHistoryEntry, response: BacktestResponse) => {
-    storeResult(response)
+    // The poll path switches to the results tab; this one did not, so loading
+    // from history appeared to do nothing.
+    if (storeResult(response)) setTab('results')
   }
 
   const handleNotesSaved = (key: string, notes: string) => {
+    // The history list is fetched by its own poller, so the edited text has to
+    // be pushed to it as well.
+    setHistoryRevision((n) => n + 1)
     setResults((prev) => {
       const entry = prev[key]
       if (!entry) return prev
@@ -496,24 +497,17 @@ export function Backtest() {
       }
     >
       <div className="ft-col" style={{ gap: 'var(--ft-gap-5)' }}>
-        <div>
-          <div style={{ fontSize: 'var(--ft-font-xs)', color: 'var(--ft-ink-4)', marginBottom: 4 }}>
-            策略
-          </div>
-          <StrategySelect api={api} value={strategy} onChange={setStrategy} disabled={running} />
-        </div>
-
         <div
+          className="ft-formgrid"
           style={{
-            display: 'grid',
-            gridTemplateColumns: 'max-content minmax(0, 1fr)',
-            gap: 'var(--ft-gap-4) var(--ft-gap-5)',
-            alignItems: 'center',
             border: '1px solid var(--ft-line)',
             borderRadius: 'var(--ft-radius)',
             padding: 'var(--ft-gap-5)',
           }}
         >
+          <Field label="策略">
+            <StrategySelect api={api} value={strategy} onChange={setStrategy} disabled={running} />
+          </Field>
           <Field label="时间周期">
             <TimeframeSelect
               value={selectedTimeframe}
@@ -707,6 +701,7 @@ export function Backtest() {
             <TabPane tab="载入结果" itemKey="history">
               {api ? (
                 <BacktestHistoryLoad
+            revision={historyRevision}
                   api={api}
                   onLoad={handleHistoryLoad}
                   loadedRunIds={resultKeys}

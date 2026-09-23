@@ -93,6 +93,10 @@ function PairGrid({
         display: 'grid',
         gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))',
         gap: 'var(--ft-gap-2)',
+        // Bounded like every other list: the whitelist is not a fixed size and
+        // reached 322 pairs, which made this grid 1253px tall at 1100px wide.
+        maxHeight: 'var(--ft-list-max-h)',
+        overflowY: 'auto',
       }}
     >
       {pairs.map((pair) => {
@@ -135,7 +139,7 @@ function PairGrid({
 
 export function Pairlist() {
   const api = useApi()
-  const { whitelist, pairlistMethods, blacklist, refresh, loading } = useSnapshot()
+  const { whitelist, pairlistMethods, blacklist, refresh, loading, refreshing } = useSnapshot()
 
   const [newPair, setNewPair] = useState('')
   const [busy, setBusy] = useState(false)
@@ -197,7 +201,7 @@ export function Pairlist() {
           {expandedCount > blacklistPairs.length ? `（展开后 ${expandedCount}）` : ''}
         </span>
         <div style={{ marginLeft: 'auto' }} className="ft-row">
-          <Button size="small" icon={<IconRefresh spin={loading} />} onClick={refresh}>
+          <Button size="small" icon={<IconRefresh spin={loading || refreshing} />} onClick={refresh}>
             刷新
           </Button>
         </div>
@@ -208,8 +212,11 @@ export function Pairlist() {
           <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
             黑名单来源
           </span>
-          {blacklist.method.map((method) => (
-            <Tag key={method} variant="plain">
+          {blacklist.method.map((method, index) => (
+            // Keyed by position: the backend legitimately reports the same
+            // filter twice (two PairInformationFilter entries share a name), so
+            // the method name alone is not unique.
+            <Tag key={`${method}-${index}`} variant="plain">
               {method}
             </Tag>
           ))}

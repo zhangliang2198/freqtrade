@@ -3,7 +3,7 @@
  * topbar carrying bot identity, live state and global controls.
  */
 
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { Button, Dropdown, Select, Tooltip } from '@douyinfe/semi-ui'
 import {
@@ -32,6 +32,8 @@ import {
 
 import { useBots } from '../state/bots'
 import { useLive } from '../state/live'
+import { useSettings } from '../state/settings'
+import { useTradeNotifications } from '../hooks/useTradeNotifications'
 import { useSnapshot } from '../state/snapshot'
 import { useTheme } from '../state/theme'
 import { DryRunTag, LiveDot, StateTag, Tag } from '../components/primitives'
@@ -93,6 +95,17 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { bots, activeBotId, setActiveBotId, disconnect } = useBots()
   const { status: liveStatus, reconnect } = useLive()
   const { config, openTrades, profit, refresh, loading, whitelist } = useSnapshot()
+  const { settings } = useSettings()
+  useTradeNotifications()
+
+  // "显示在标题中" — the count moves to the browser tab instead of the pill.
+  useEffect(() => {
+    const base = 'Freqtrade Console'
+    document.title =
+      settings.openTradesInTitle === 'asTitle'
+        ? `(${openTrades.length}${config ? `/${config.max_open_trades}` : ''}) ${base}`
+        : base
+  }, [settings.openTradesInTitle, openTrades.length, config])
   const navigate = useNavigate()
 
   const liveDotState = liveStatus === 'connected' ? 'on' : liveStatus === 'connecting' ? 'idle' : 'off'
@@ -137,14 +150,24 @@ export function AppShell({ children }: { children: ReactNode }) {
             <>
               <StateTag state={config.state} />
               <DryRunTag dryRun={config.dry_run} />
-              <Tag variant="plain" title="Trading mode">
-                {config.trading_mode}
-                {config.margin_mode ? ` · ${config.margin_mode}` : ''}
-              </Tag>
-              <Tag variant="plain" title="Exchange">
-                {config.exchange}
-              </Tag>
-              <span className="ft-faint ft-mono-sm" title="Strategy / timeframe">
+              {/* Marked so the narrow-viewport rules can drop them: at 1100px
+                  the bar ran out of room and the strategy wrapped to two lines
+                  while the 持仓/收益 figures collided. */}
+              <span className="ft-topbar-optional">
+                <Tag variant="plain" title="Trading mode">
+                  {config.trading_mode}
+                  {config.margin_mode ? ` · ${config.margin_mode}` : ''}
+                </Tag>
+              </span>
+              <span className="ft-topbar-optional">
+                <Tag variant="plain" title="Exchange">
+                  {config.exchange}
+                </Tag>
+              </span>
+              <span
+                className="ft-faint ft-mono-sm ft-topbar-optional"
+                title="Strategy / timeframe"
+              >
                 {config.strategy} · {config.timeframe}
               </span>
             </>
@@ -155,17 +178,22 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         {profit && (
           <div className="ft-row ft-num" style={{ gap: 'var(--ft-gap-5)' }}>
-            <Tooltip content="未平仓交易">
-              <span className="ft-row" style={{ gap: 4 }}>
-                <span className="ft-muted" style={{ fontSize: 'var(--ft-font-xs)' }}>
-                  持仓
+            {/* "顶部栏持仓显示" offers three modes; only showPill renders the
+                pill here. asTitle moves the count to the document title and
+                noOpenTrades drops it entirely. */}
+            {settings.openTradesInTitle === 'showPill' && (
+              <Tooltip content="未平仓交易">
+                <span className="ft-row" style={{ gap: 4 }}>
+                  <span className="ft-muted" style={{ fontSize: 'var(--ft-font-xs)' }}>
+                    持仓
+                  </span>
+                  <strong>
+                    {openTrades.length}
+                    {config ? ` / ${config.max_open_trades}` : ''}
+                  </strong>
                 </span>
-                <strong>
-                  {openTrades.length}
-                  {config ? ` / ${config.max_open_trades}` : ''}
-                </strong>
-              </span>
-            </Tooltip>
+              </Tooltip>
+            )}
             <Tooltip content="总收益">
               <span
                 className={`ft-row ${(profit.profit_all_ratio ?? 0) >= 0 ? 'ft-up' : 'ft-down'}`}

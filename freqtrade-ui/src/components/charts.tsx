@@ -198,6 +198,7 @@ export function CandleChart({
   showVolume = true,
   pricePrecision,
   maxMarkedTrades = 40,
+  priceScaleSide = 'right',
 }: {
   candles: Candle[]
   /** Trades drawn as entry/exit markers. */
@@ -205,6 +206,8 @@ export function CandleChart({
   height?: number
   showVolume?: boolean
   pricePrecision?: number
+  /** Which edge carries the price axis — the "价格轴位置" preference. */
+  priceScaleSide?: 'left' | 'right'
   /**
    * Cap on how many trades get markers. Each trade contributes two labelled
    * markers; with a few hundred closed trades the labels overlap into an
@@ -216,10 +219,19 @@ export function CandleChart({
 
   const hostRef = useChartHost(
     (host, theme) => {
+      const onLeft = priceScaleSide === 'left'
       const chart: IChartApi = createChart(host, {
         ...baseOptions(theme, height, {
           tickFormat: tickFormatterFor(spanOf(candles.map((c) => c.time))),
         }),
+        // lightweight-charts keeps both scales; only one is shown at a time and
+        // the series has to be attached to the matching one.
+        leftPriceScale: { visible: onLeft, borderColor: theme.border },
+        rightPriceScale: {
+          visible: !onLeft,
+          borderColor: theme.border,
+          scaleMargins: { top: 0.14, bottom: 0.12 },
+        },
         width: host.clientWidth,
       })
 
@@ -229,6 +241,7 @@ export function CandleChart({
           : { type: 'price' as const, precision: 6, minMove: 1e-6 }
 
       const candleSeries: ISeriesApi<'Candlestick'> = chart.addSeries(CandlestickSeries, {
+        priceScaleId: onLeft ? 'left' : 'right',
         upColor: theme.up,
         downColor: theme.down,
         borderUpColor: theme.up,
@@ -358,7 +371,7 @@ export function CandleChart({
         chart.remove()
       }
     },
-    [candles, markerKey, height, showVolume, pricePrecision],
+    [candles, markerKey, height, showVolume, pricePrecision, priceScaleSide],
   )
 
   if (!candles.length) {
@@ -532,8 +545,10 @@ export function BarChart({
         className="ft-row ft-mono-sm ft-faint"
         style={{ gap: 'var(--ft-gap-5)', overflowX: 'auto', padding: '0 8px 6px' }}
       >
-        {bars.slice(-12).map((bar) => (
-          <span key={bar.label} className="ft-nowrap">
+        {bars.slice(-12).map((bar, index) => (
+          // Position in the key: adjacent bins round to the same one-decimal
+          // label when the value range is narrow, which would collide.
+          <span key={`${bar.label}-${index}`} className="ft-nowrap">
             {bar.label}
           </span>
         ))}
@@ -598,8 +613,17 @@ export function DonutChart({
   }
 
   return (
-    <div className="ft-row" style={{ gap: 'var(--ft-gap-6)', alignItems: 'center' }}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img">
+    // Wraps and lets the legend shrink: the donut is a fixed 190px, so in a
+    // narrow column (the dashboard's 3-up row is 289px at a 1100px viewport)
+    // the legend had no room and overflowed the panel.
+    <div className="ft-row wrap" style={{ gap: 'var(--ft-gap-6)', alignItems: 'center' }}>
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        role="img"
+        style={{ flex: '0 0 auto' }}
+      >
         <g transform={`rotate(-90 ${size / 2} ${size / 2})`}>
           {arcs.map((arc) => (
             <circle
@@ -638,7 +662,7 @@ export function DonutChart({
 
       <div className="ft-col" style={{ gap: 5, minWidth: 0, flex: '1 1 auto' }}>
         {arcs.map((arc) => (
-          <div className="ft-row" key={arc.label} style={{ gap: 'var(--ft-gap-4)' }}>
+          <div className="ft-row" key={arc.label} style={{ gap: 'var(--ft-gap-4)', minWidth: 0 }}>
             <span
               style={{
                 width: 9,

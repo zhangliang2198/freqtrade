@@ -237,9 +237,30 @@ export const tradingApi = {
 
   pairCandles: (
     api: BotApi,
-    params: { pair: string; timeframe: string; limit?: number; timerange?: string },
+    params: {
+      pair: string
+      timeframe: string
+      limit?: number
+      timerange?: string
+      /**
+       * Restrict the returned columns. Only the POST variant accepts this — the
+       * GET endpoint's signature is `(pair, timeframe, limit)` and silently
+       * ignores anything else.
+       */
+      columns?: string[]
+    },
     signal?: AbortSignal,
-  ) => api.request<PairHistory>('/pair_candles', { params, signal }),
+  ) => {
+    const { columns, ...query } = params
+    if (columns?.length) {
+      return api.request<PairHistory>('/pair_candles', {
+        method: 'POST',
+        body: { ...query, columns },
+        signal,
+      })
+    }
+    return api.request<PairHistory>('/pair_candles', { params: query, signal })
+  },
 
   pairHistory: (
     api: BotApi,

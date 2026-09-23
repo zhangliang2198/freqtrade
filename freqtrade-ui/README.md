@@ -79,15 +79,31 @@ export SMOKE_PASSWORD='<api_server.password>'
 npm run smoke        # 走完全部 15 条路由，检查白屏 / 控制台报错
 npm run audit        # 测量渲染后的计算样式，校验配色与信息密度
 npm run shots        # 输出 8 页 × 深浅两主题的截图到 /tmp/ftui-shots
+npm run review       # 整页长图（按内容高度调整视口），用于逐页审查
+npm run contrast     # WCAG 对比度审计，两个主题各跑一次
 ```
+
+`npm run review` 会先把视口拉到内容高度再截图——应用滚动在 `.ft-main` 内部，`fullPage: true`
+只能拿到视口。它先等真实内容出现（面板存在且文字超过阈值）再等高度稳定：**只等"高度不再变化"
+是不够的，加载中的 spinner 高度恒定，会立刻满足条件**，早先就因此把若干页拍成了加载态。
+
+`npm run contrast` 遍历所有可见文本，向上找到第一个非透明背景算出 WCAG 对比度。
+禁用控件按 WCAG 豁免跳过（Semi 把它们渲染成 35% 透明），否则会淹没真正的发现。
+
+`npm run focus` 逐页 Tab 走一遍，把每个聚焦元素的绘制样式与**它未聚焦时**对比。
+关键是这个对比：只查 `outline-style` 会误报，因为 Semi 的焦点画在边框色上
+（Select 从透明边框变成墨色边框）。
 
 `npm run audit` 是这套黑白设计的回归防线：它遍历可见节点，把所有绘制出来的颜色
 分成「无彩色」和「语义色」两类，任何第三种有彩色都会判 FAIL 并列出具体色值与属性。
 语义色只允许 8 个：`--ft-up/-down/-warn/-info` 及其 `-bg`。
 
-`npm run structure` 在 2040px 视口下逐页报告页面宽度占比、每个面板的高度与其内容的
-自然高度之差（死区）、以及面板内的横向溢出。它同时会打印面板数量——**渲染出 0 个面板
-会直接判 FAIL**，否则一个白屏路由会被静默当成「没问题」。
+`npm run structure` 逐页报告页面宽度占比、每个面板的高度与其内容的自然高度之差（死区）、
+以及面板内的横向溢出。默认扫 **2 个主题 × 3 个宽度**（2040 / 1440 / 1100，覆盖应用的
+1280 与 1100 断点）；可用 `STRUCTURE_THEMES` / `STRUCTURE_WIDTHS` 收窄。
+
+它同时会打印面板数量——**渲染出 0 个面板会直接判 FAIL**，否则一个白屏路由会被静默当成
+「没问题」。
 
 ---
 
@@ -103,6 +119,46 @@ npm run shots        # 输出 8 页 × 深浅两主题的截图到 /tmp/ftui-sho
 | 宽而窄的表用 `.ft-perf-split` 拆两栏 | Semi 表格必然撑满 100%，全宽单表会让标签列被拉到 1500px、数字散到两端 |
 | 短内容不要用折叠面板 | 藏四行数据要多点一次，不如直接展开（`更多明细` / `策略参数` / `订单`） |
 | 暗色 token 挂在 `html[theme-mode='dark']` | 只挂 `body` 的话 `html` 拿不到，根滚动条会用浅色值（暗色下白滚动条） |
+| 覆盖 Semi 类要写成 `body .semi-a .semi-b …` | Semi 的组件 CSS 在入口样式表**之后**注入，同优先级会因顺序输掉；类名层数也要对齐（`.semi-banner-full .semi-banner-content-wrapper .semi-banner-content` 是 3 层） |
+| 别给 Semi 组件传 `style={{ flex }}` 当 flex 项 | `Slider` 把 `style` 转给内层 `.semi-slider-wrapper`，真正的 flex 项是外层 `.semi-slider`（`flex: 0 1 auto`）——轨道被压成 0px，只剩一个悬浮手柄。要用一层 div 承载 flex |
+| 图表 `time` 不能用数组下标 | lightweight-charts 把数字当 Unix 时间戳，下标 1/2/3… 会让时间轴永远显示 `00:00`；类别轴应设 `timeScale.visible: false`，把标签渲染在 canvas 下方 |
+| 表单标签统一用 `.ft-formgrid` + `.ft-formlabel` | 同一个表单里混用「标签在上」「右对齐网格」「带边框分组」三种排法，看起来像没做完 |
+| `/trades` 没有 `pair` 参数 | 后端签名只有 `limit/offset/order_by_id`，传 `pair` 会被**静默忽略**并返回全局历史——按交易对分组只能在前端做 |
+| 长列表页用 `.ft-page.fill` | 让面板吃掉剩余高度；否则 12 行表格下方留 650px 空白，可见行数还少一半 |
+| 分页器放在滚动视口**外面** | 放里面的话，翻页前得先把 25 行表格滚到底 |
+| 进度条 / 开关不用 `--semi-color-success` | Semi 的 `Progress` 和 `Switch` 默认都取该 token，而它被绑定到盈亏绿——中性比例和控件开关会被渲染成「盈利」色 |
+| 灰阶要满足 4.5:1 | 原先 `--ft-ink-4: #a3a3a3` 在 paper-1 上只有 **2.42:1**，而它承担 11px 的说明文字、面板副标题、导航分组标签——审计一次报了 108 处 |
+| `usePolling` 的 `deps` 变化要清空 data | `deps` 是这次请求的「身份」。不清空的话切换机器人会继续显示上一个机器人的持仓和盈亏，请求失败还会永远留着，而 snapshot 已经重置，外壳和页面各说各话。按元素身份比较，手动刷新（nonce）不清，否则每次轮询都闪 |
+| `fetchFast` 失败要保留旧值 | 用 `.catch(() => [])` 代替旧值，一次瞬时错误就会把顶栏、导航徽标和所有持仓表渲染成空仓 |
+| 改单后要把该页**所有**派生轮询都刷新 | `afterMutation` 原先只刷 snapshot 和已平仓，`表现`/`时段`/`K线` 会继续显示改动前的数字，最长 2 分钟 |
+| 详情面板的选中项要按当前列表**重新解析** | 面板持有的是被传入的对象；删除成交后它会继续渲染一个已经不存在的交易。改为每次从列表里按 id 查 |
+| 列表窗口不一致要用按 id 兜底 | 仪表盘取 500 行、交易台 200 行，点第 201–500 名会跳到 `/trade` 显示「未选择交易」且无任何提示。用一直闲置的 `GET /trade/{id}` 兜底，而不是对齐两个魔法数字 |
+| 设置项必须真的有效果 | 审计发现 **9 项设置只有设置页自己读**：`openTradesInTitle`/`confirmDialog`/`multiPaneButtonsShowText`/`chartLabelSide`/`useReducedPairCalls`/`showMarkArea`/`profitDistributionBins`/`timeProfitPeriod`/`timeProfitPreference`/`backtestAdditionalMetrics`/`notifications`。一个不起作用的开关比没有更糟 |
+| `formatTimestamp` 默认读 `currentSettings().timezone` | 原先默认写死 `'UTC'`，只有日志页传了设置值——设置页宣称「影响所有时间戳」是假的，23 处调用里 22 处无视它 |
+| `GET /pair_candles` 不能过滤列，要用 POST | GET 的签名只有 `(pair, timeframe, limit)`；POST 变体才接受 `columns`。这一条同时修好了「只请求必要的列」设置和绘图配置里选了却从未发出的列 |
+| 没有落点的设置要删掉，不是留着 | `多窗格按钮显示文字` 的「多窗格」在源码里只出现在设置页自己——它是 freqUI 遗留，本实现没有对应概念，已删除 |
+| 会调用浏览器 API 的设置必须带授权入口 | `notifications` 四个开关依赖 `Notification.permission`，而浏览器只在用户手势里授权。没有「允许桌面通知」按钮时，开关永远是死的 |
+| WS 主题订阅了就必须消费 | `whitelist`/`status` 被订阅、被计数却从不读取，导致推送的交易对轮换要等 60 秒慢轮询才出现 |
+| 后台任务被丢弃要 resolve 等待方 | `dismiss` 停轮询、移除任务，但从不 resolve `waitFor`，`await` 永久挂起 → 按钮一直禁用。现在 resolve `null` 表示「已取消」 |
+| 快慢两个轮询的时间戳要分开 | 一个 `lastUpdated` 无法诚实：快轮询 5s、慢轮询 60s，用一个值会让余额/收益（60s 数据）显示成 5 秒前更新 |
+| 选中行要让它对应的面板可见 | 交易台详情面板在两张表下方，选中后什么都不动，看起来像没反应。用 `Panel` 的 ref + `scrollIntoView`（K 线图页早有此模式） |
+| 后端会返回重复的「名字」 | 黑名单来源里 `PairInformationFilter` 出现两次，`key={method}` 直接触发 React 重复 key。凡 key 取自后端字符串，都要拼上下标 |
+| 列表上限要假设数据量会变 | 白名单一轮刷新从 57 涨到 322，交易对网格瞬间变成 1246px 高的面板——`max-height` 不是可选项 |
+| 中止是「请求」不是「完成」 | `abort` 之后后端可能仍报 `running: true`；无条件 `stopPolling()` 会让进度条永久冻结在「回测运行中」且结果永远不加载。要等状态真正落定 |
+| 同一份数据的第二个副本要一起刷新 | 备注保存后只更新了内存副本，历史列表是**自己单独拉取**的，所以还显示旧文本。用 revision 推动它刷新 |
+| 异步动作的每个分支都要走完 | 回测中止、历史载入这类路径要保证 `finally` 一定执行，否则按钮永久禁用（见「丢弃任务要 resolve 等待方」） |
+| 审计脚本本身也要验证 | `structure` 的主题曾被硬编码成 `dark`，于是「浅色」那几轮实际跑的是深色——**会静默产出假的通过结果**。加参数后先确认日志里的 THEME 真的变了 |
+| 布局要在多个宽度下测 | 2040px 全绿的三处问题（白名单网格 1253px、余额表无上限、环形图图例溢出 13px）都只在 1100px 才暴露。断点 1280/1100 必须纳入扫描 |
+| 图表设置要在每个画图的地方生效 | 交易台的 K 线硬编码 `limit: 300` 且忽略 Heikin-Ashi，而 K 线图页两项都遵守。蜡烛变换提到 `utils/candles.ts` 共享，避免再次分叉 |
+| 顶栏放不下时要「按优先级丢弃」 | 1100px 下策略名折成两行、持仓与收益数字互相挤压。给可选项加 `.ft-topbar-optional`，1320px 以下先丢掉身份详情（每个页头都重复） |
+| `cols-2` 在 1280px 就该塌成单列 | 两张十列的成交表并排时各只有约 440px，大部分列被切掉。原先到 860px 才塌 |
+| 静默裁切要能被审计发现 | 加了 `CLIPPED` 检测：元素自身 `overflow: hidden` 且 `scrollWidth > clientWidth` 而没有 `text-overflow: ellipsis`、又不在滚动容器内，就是无提示地藏了内容 |
+| 面板头要能换行，标题不能断字 | Pairlist 配置页在 1100px 下标题被压成竖排单字（「配/置/0/个…」）。`.ft-panel-head` 加 `flex-wrap`，`.ft-panel-title` 加 `white-space: nowrap` |
+| 多列布局不要写成内联固定轨道 | 该页原是三列内联网格，中间列在 1100px 只剩 230px。抽成 `.ft-panes-3` 并在 1500/1100px 逐级塌陷 |
+| 需要用户点的按钮不能用 `borderless` | 「允许桌面通知」是无边框按钮，渲染出来像小标题。它恰恰是那块面板唯一需要用户执行的动作 |
+| 覆盖 Semi 必须**实测计算样式**，不能只看写了规则 | 进度条的覆盖写了 `body .semi-progress-track-inner`，但真正生效的是 `.semi-progress-horizontal .semi-progress-track-inner`（两个类）——规则在样式表里、看着没错，实际一直没生效，绿色进度条留了 9 轮才被发现 |
+| 覆盖前先查 Semi 的实际选择器链 | 用 `document.styleSheets` 把所有命中该元素的规则打出来，确认赢的那条的类名层数，再照着写 |
+| 焦点检查要和「未聚焦」比对 | 只查 `outline-style` 会误报：Semi 的焦点画在边框色上（Select 从透明边框变墨色边框）。`npm run focus` 逐个元素对比聚焦/未聚焦的绘制样式 |
 
 
 ### 关于 Semi 的配色覆盖

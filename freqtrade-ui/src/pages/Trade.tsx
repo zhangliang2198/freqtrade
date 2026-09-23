@@ -10,7 +10,7 @@
  * defaults to `config.timeframe` and degrades to an empty state for others.
  */
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import {
   Banner,
@@ -50,6 +50,7 @@ import type {
 } from '../api/types'
 import { decodeCandles, pairlistApi, tradingApi } from '../api/endpoints'
 import { useApi } from '../state/bots'
+import { useSettings } from '../state/settings'
 import { useSnapshot } from '../state/snapshot'
 import { describeError, usePolling } from '../hooks/usePolling'
 import { CandleChart, DonutChart, LineChart, type LinePoint } from '../components/charts'
@@ -79,6 +80,7 @@ import {
   parseTradeDate,
   signClass,
 } from '../utils/format'
+import { applyCandleStyle } from '../utils/candles'
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
@@ -128,6 +130,7 @@ export function Trade() {
     blacklist,
     refresh,
   } = useSnapshot()
+  const { settings, update } = useSettings()
 
   const navigationState = (location.state ?? null) as
     | { tradeId?: number; pair?: string }
@@ -137,10 +140,19 @@ export function Trade() {
   const [selectedTradeState, setSelectedTrade] = useState<TradeType | null>(null)
   const [pairSort, setPairSort] = useState<PairSortMethod>('normal')
   const [perfTab, setPerfTab] = useState<PerfTab>('performance')
-  const [period, setPeriod] = useState<Period>('daily')
+  // Reads and writes the persisted preference: keeping a page-local copy let the
+  // settings page and this selector disagree about the same concept.
+  const period = settings.timeProfitPeriod
+  const setPeriod = useCallback(
+    (next: Period) => update({ timeProfitPeriod: next }),
+    [update],
+  )
   const [chartTimeframe, setChartTimeframe] = useState('')
   const [exitTarget, setExitTarget] = useState<TradeType | null>(null)
   const [entryTarget, setEntryTarget] = useState<{ pair: string; increase: boolean } | null>(null)
+
+  /** The detail panel sits below both tables; selecting a row has to reveal it. */
+  const detailRef = useRef<HTMLDivElement | null>(null)
 
   const pendingTradeId = navigationState?.tradeId ?? null
 
@@ -172,7 +184,49 @@ export function Trade() {
     [pendingTradeId, allTrades],
   )
 
-  const selectedTrade = selectedTradeState ?? pendingTrade
+  /**
+   * The dashboard fetches 500 closed trades, this page only 200, so a click on a
+   * row outside that window used to land here showing "未选择交易" with no
+   * explanation. Fetch the exact trade when it is in neither list.
+   */
+  const pendingInList = useMemo(
+    () => pendingTradeId !== null && pendingTrade !== null,
+    [pendingTradeId, pendingTrade],
+  )
+  // Keyed by id so a result for a previous id can never be mistaken for the
+  // current one — which removes the need to clear it synchronously in an effect.
+  const [fetched, setFetched] = useState<{ id: number; trade: TradeType } | null>(null)
+  useEffect(() => {
+    if (pendingTradeId === null || pendingInList) return
+    let cancelled = false
+    tradingApi
+      .trade(api, pendingTradeId)
+      .then((trade) => {
+        if (!cancelled && trade) setFetched({ id: pendingTradeId, trade })
+      })
+      .catch(() => {
+        /* leave it unresolved; the detail panel shows its empty state */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, pendingTradeId, pendingInList])
+  const pendingResolved =
+    pendingTrade ?? (fetched && fetched.id === pendingTradeId ? fetched.trade : null)
+
+  /**
+   * Re-resolve the selection against the current lists rather than holding the
+   * object we were handed. A trade that has been deleted (or that a bot switch
+   * moved out of the data set) must stop rendering in the detail panel; keeping
+   * the stale object meant the panel described a trade that no longer existed.
+   */
+  const selectedTrade = useMemo(() => {
+    if (!selectedTradeState) return pendingResolved
+    return (
+      allTrades.find((t) => t.trade_id === selectedTradeState.trade_id) ??
+      (pendingResolved?.trade_id === selectedTradeState.trade_id ? pendingResolved : null)
+    )
+  }, [selectedTradeState, allTrades, pendingResolved])
   const effectivePair = selectedPair || selectedTrade?.pair || whitelist[0] || ''
   const effectiveTimeframe = chartTimeframe || config?.timeframe || ''
 
@@ -202,17 +256,26 @@ export function Trade() {
       ? (signal) =>
           tradingApi.pairCandles(
             api,
-            { pair: effectivePair, timeframe: effectiveTimeframe, limit: 300 },
+            {
+              pair: effectivePair,
+              timeframe: effectiveTimeframe,
+              // "默认显示K线数量" is a chart preference; this chart hard-coded
+              // 300 while the chart page honoured the setting.
+              limit: settings.chartDefaultCandleCount,
+            },
             signal,
           )
       : null,
-    [api, effectivePair, effectiveTimeframe],
+    [api, effectivePair, effectiveTimeframe, settings.chartDefaultCandleCount],
     { enabled: Boolean(effectivePair && effectiveTimeframe), intervalMs: 60_000 },
   )
 
   const candles = useMemo(
-    () => (candleState.data ? decodeCandles(candleState.data) : []),
-    [candleState.data],
+    () =>
+      candleState.data
+        ? applyCandleStyle(decodeCandles(candleState.data), settings.useHeikinAshiCandles)
+        : [],
+    [candleState.data, settings.useHeikinAshiCandles],
   )
 
   const pairTrades = useMemo(
@@ -223,30 +286,59 @@ export function Trade() {
   /* ---- mutations -------------------------------------------------------- */
 
   const afterMutation = useCallback(() => {
+    // Everything on this page derives from a trade: the tables, the performance
+    // table, the period breakdown and the candles. Refreshing only the snapshot
+    // and the closed list left the other three showing pre-mutation numbers for
+    // up to 60–120s.
     refresh()
     closedState.refresh()
-  }, [refresh, closedState])
+    perfState.refresh()
+    periodState.refresh()
+    candleState.refresh()
+  }, [refresh, closedState, perfState, periodState, candleState])
 
   const confirmAction = useCallback(
-    (title: string, content: string, action: () => Promise<unknown>, success: string) => {
+    (
+      title: string,
+      content: string,
+      action: () => Promise<unknown>,
+      success: string,
+      onDone?: () => void,
+    ) => {
+      const run = async () => {
+        try {
+          await action()
+          Toast.success({ content: success, duration: 2 })
+          onDone?.()
+          afterMutation()
+        } catch (err) {
+          Toast.error({ content: describeError(err as Error) ?? String(err) })
+        }
+      }
+      // Settings offers "平仓前显示确认对话框"; always confirming made that
+      // switch inert. Turning it off runs the action straight away.
+      if (!settings.confirmDialog) {
+        void run()
+        return
+      }
       Modal.confirm({
         title,
         content,
         okText: '确认',
         cancelText: '取消',
-        onOk: async () => {
-          try {
-            await action()
-            Toast.success({ content: success, duration: 2 })
-            afterMutation()
-          } catch (err) {
-            Toast.error({ content: describeError(err as Error) ?? String(err) })
-          }
-        },
+        onOk: run,
       })
     },
-    [afterMutation],
+    [afterMutation, settings.confirmDialog],
   )
+
+  // Selecting a row updated the detail panel below the fold, so nothing
+  // appeared to happen. Chart already scrolls to its panel; this matches it.
+  const selectTrade = useCallback((trade: TradeType) => {
+    setSelectedTrade(trade)
+    setSelectedPair(trade.pair)
+    detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
 
   const handleForceExit = useCallback(
     (trade: TradeType, orderType?: string) => {
@@ -297,6 +389,11 @@ export function Trade() {
         `永久删除 #${trade.trade_id} ${displayPair(trade.pair)}？未平仓交易会被同时取消挂单。`,
         () => tradingApi.deleteTrade(api, trade.trade_id),
         '交易已删除',
+        // Drop the selection deterministically instead of waiting for the
+        // refetch to remove the row; if that refetch fails the stale entry
+        // would otherwise keep the detail panel alive.
+        () =>
+          setSelectedTrade((prev) => (prev?.trade_id === trade.trade_id ? null : prev)),
       )
     },
     [api, confirmAction],
@@ -399,10 +496,14 @@ export function Trade() {
     )) {
       const time = periodTime(row.date)
       if (time === null) continue
-      points.push({ time, value: row.abs_profit })
+      // "收益统计口径" chooses which of the two the chart plots.
+      points.push({
+        time,
+        value: settings.timeProfitPreference === 'rel_profit' ? row.rel_profit : row.abs_profit,
+      })
     }
     return points
-  }, [periodState.data])
+  }, [periodState.data, settings.timeProfitPreference])
 
   const lockColumns = useMemo<ColumnProps<PairLock>[]>(
     () => [
@@ -834,10 +935,7 @@ export function Trade() {
             tradingMode={tradingMode}
             forceEntryEnable={config?.force_entry_enable}
             selectedTradeId={selectedTrade?.trade_id ?? null}
-            onSelectTrade={(trade) => {
-              setSelectedTrade(trade)
-              setSelectedPair(trade.pair)
-            }}
+            onSelectTrade={selectTrade}
             onForceExit={handleForceExit}
             onForceExitPartial={setExitTarget}
             onCancelOpenOrder={handleCancelOpenOrder}
@@ -864,10 +962,7 @@ export function Trade() {
             stakeCurrencyDecimals={stakeDecimals}
             tradingMode={tradingMode}
             selectedTradeId={selectedTrade?.trade_id ?? null}
-            onSelectTrade={(trade) => {
-              setSelectedTrade(trade)
-              setSelectedPair(trade.pair)
-            }}
+            onSelectTrade={selectTrade}
             emptyText="暂无已平仓交易。"
           />
         </Panel>
@@ -879,6 +974,7 @@ export function Trade() {
           title="交易详情"
           icon={<IconTemplate />}
           sub={selectedTrade ? `#${selectedTrade.trade_id}` : undefined}
+          ref={detailRef}
         >
           {selectedTrade ? (
             <TradeDetail
@@ -918,7 +1014,7 @@ export function Trade() {
               hint={describeError(candleState.error) ?? '请确认交易对在白名单内。'}
             />
           ) : (
-            <CandleChart candles={candles} trades={pairTrades} height={360} />
+            <CandleChart priceScaleSide={settings.chartLabelSide} candles={candles} trades={pairTrades} height={360} />
           )}
         </Panel>
       </div>

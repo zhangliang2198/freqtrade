@@ -10,6 +10,7 @@ import { Table } from '@douyinfe/semi-ui'
 import type { ColumnProps } from '@douyinfe/semi-ui/lib/es/table'
 import { IconBeaker, IconInfoCircle, IconLoopTextStroked } from '@douyinfe/semi-icons'
 
+import { useSettings } from '../state/settings'
 import { Panel } from './primitives'
 import { BacktestResultPeriodBreakdown } from './BacktestResultPeriodBreakdown'
 import { BacktestResultTablePer } from './BacktestResultTablePer'
@@ -39,8 +40,11 @@ export function BacktestResultAnalysis({
   stakeCurrency,
   stakeCurrencyDecimals,
 }: BacktestResultAnalysisProps) {
+  const { settings } = useSettings()
   // Shared across every per-group table, mirroring freqUI's settings store.
-  const [extraMetrics, setExtraMetrics] = useState<string[]>([])
+  // Seeded from the settings page, which offers this exact list; starting
+  // from [] made that control inert.
+  const [extraMetrics, setExtraMetrics] = useState<string[]>(settings.backtestAdditionalMetrics)
 
   const settingRows = useMemo<KeyValueRow[]>(
     () => generateBacktestSettingRows(result).map((row, i) => ({ ...row, __id: `s-${i}` })),

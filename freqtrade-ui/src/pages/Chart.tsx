@@ -40,6 +40,7 @@ import { useTopicTick } from '../state/live'
 import { useSettings } from '../state/settings'
 import { useSnapshot } from '../state/snapshot'
 import { formatNumber, formatTimestamp, timeAgo } from '../utils/format'
+import { toHeikinAshi } from '../utils/candles'
 
 const MAX_COMPARE_PAIRS = 4
 
@@ -59,25 +60,6 @@ function errorText(err: unknown): string {
   return String(err)
 }
 
-/** Heikin-Ashi candles, derived client-side from the raw OHLCV series. */
-function toHeikinAshi(candles: Candle[]): Candle[] {
-  const out: Candle[] = []
-  for (let i = 0; i < candles.length; i += 1) {
-    const candle = candles[i]
-    const close = (candle.open + candle.high + candle.low + candle.close) / 4
-    const previous = out[i - 1]
-    const open = previous ? (previous.open + previous.close) / 2 : (candle.open + candle.close) / 2
-    out.push({
-      ...candle,
-      open,
-      close,
-      high: Math.max(candle.high, open, close),
-      low: Math.min(candle.low, open, close),
-    })
-  }
-  return out
-}
-
 /** Fetches candles for every selected pair; one failure never sinks the rest. */
 function usePairDatasets(
   api: ReturnType<typeof useApi>,
@@ -85,8 +67,11 @@ function usePairDatasets(
   timeframe: string,
   limit: number,
   revision: number,
+  /** When set, only these columns are requested (POST /pair_candles). */
+  columns?: string[],
 ): { datasets: Record<string, PairDataset>; loading: boolean } {
   const pairsKey = pairs.join('|')
+  const columnsKey = columns?.join(',') ?? ''
   const [datasets, setDatasets] = useState<Record<string, PairDataset>>({})
   const [loading, setLoading] = useState(false)
 
@@ -103,7 +88,7 @@ function usePairDatasets(
       const results = await Promise.all(
         pairs.map(async (pair): Promise<[string, PairDataset]> => {
           try {
-            const history = await tradingApi.pairCandles(api, { pair, timeframe, limit })
+            const history = await tradingApi.pairCandles(api, { pair, timeframe, limit, columns })
             return [pair, { history, candles: decodeCandles(history) }]
           } catch (err) {
             return [pair, { candles: [], error: errorText(err) }]
@@ -120,7 +105,8 @@ function usePairDatasets(
     }
     // `pairsKey` stands in for the array identity of `pairs`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, pairsKey, timeframe, limit, revision])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, pairsKey, timeframe, limit, revision, columnsKey])
 
   return { datasets, loading }
 }
@@ -142,17 +128,22 @@ function usePairTrades(
     let cancelled = false
 
     void (async () => {
-      const results = await Promise.all(
-        pairs.map(async (pair): Promise<[string, Trade[]]> => {
-          try {
-            const response = await tradingApi.trades(api, { pair, limit: 200 })
-            return [pair, response?.trades ?? []]
-          } catch {
-            return [pair, []]
-          }
-        }),
-      )
-      if (!cancelled) setByPair(Object.fromEntries(results))
+      try {
+        // `/trades` takes only limit/offset/order_by_id — it has no `pair`
+        // parameter and silently ignores one, returning the whole history. The
+        // panel therefore used to label 168 global trades as the focused pair's
+        // records. Fetch once and split here instead of asking per pair.
+        const response = await tradingApi.trades(api, { limit: 500 })
+        if (cancelled) return
+        const grouped: Record<string, Trade[]> = {}
+        for (const pair of pairs) grouped[pair] = []
+        for (const trade of response?.trades ?? []) {
+          if (grouped[trade.pair]) grouped[trade.pair].push(trade)
+        }
+        setByPair(grouped)
+      } catch {
+        if (!cancelled) setByPair(Object.fromEntries(pairs.map((pair) => [pair, []])))
+      }
     })()
 
     return () => {
@@ -181,7 +172,6 @@ export function Chart() {
   const [pairsUnavailable, setPairsUnavailable] = useState(false)
   const [selectedPairs, setSelectedPairs] = useState<string[]>([])
   const [showVolume, setShowVolume] = useState(true)
-  const [showMarkers, setShowMarkers] = useState(true)
   const [selectedTradeId, setSelectedTradeId] = useState<number | null>(null)
   const [plotConfigOpen, setPlotConfigOpen] = useState(false)
   const [plotConfig, setPlotConfig] = useState(() => loadActivePlotConfig())
@@ -254,12 +244,18 @@ export function Chart() {
   const candleTick = useTopicTick(['new_candle'])
   const tradeTick = useTopicTick(['entry', 'entry_fill', 'exit', 'exit_fill'])
 
+  const usedColumns = useMemo(() => plotConfigColumns(plotConfig), [plotConfig])
+
   const { datasets, loading } = usePairDatasets(
     api,
     chartPairs,
     timeframe,
     settings.chartDefaultCandleCount,
     candleTick + nonce,
+    // "只请求必要的列" — the GET endpoint cannot filter columns, so the setting
+    // switches to the POST variant. This also finally sends the plot
+    // configurator's column selection, which was displayed but never requested.
+    settings.useReducedPairCalls && usedColumns.length ? usedColumns : undefined,
   )
   const closedTrades = usePairTrades(api, chartPairs, tradeTick + nonce)
 
@@ -275,7 +271,6 @@ export function Chart() {
 
   const focusDataset = focusPair ? datasets[focusPair] : undefined
   const history = focusDataset?.history
-  const usedColumns = useMemo(() => plotConfigColumns(plotConfig), [plotConfig])
   const datasetColumns = useMemo(() => history?.all_columns ?? history?.columns ?? [], [history])
 
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
@@ -411,7 +406,11 @@ export function Chart() {
                   多交易对
                 </label>
                 <label className="ft-row" style={{ gap: 6, fontSize: 'var(--ft-font-sm)' }}>
-                  <Switch size="small" checked={showMarkers} onChange={setShowMarkers} />
+                  <Switch
+                    size="small"
+                    checked={settings.showMarkArea}
+                    onChange={(checked) => update({ showMarkArea: checked })}
+                  />
                   显示标记
                 </label>
               </div>
@@ -519,8 +518,9 @@ export function Chart() {
                     <Banner type="danger" bordered title="加载K线失败" description={dataset.error} />
                   ) : (
                     <CandleChart
+                      priceScaleSide={settings.chartLabelSide}
                       candles={candles}
-                      trades={showMarkers ? (tradesByPair[pair] ?? []) : []}
+                      trades={settings.showMarkArea ? (tradesByPair[pair] ?? []) : []}
                       height={chartPairs.length > 1 ? 260 : 460}
                       showVolume={showVolume}
                     />

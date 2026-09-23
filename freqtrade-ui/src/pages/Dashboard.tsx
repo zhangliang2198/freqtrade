@@ -30,6 +30,7 @@ import {
 import type { EntryExitTag, PerformanceEntry, StrategyResponse, Trade } from '../api/types'
 import { decodeWalletHistory, tradingApi } from '../api/endpoints'
 import { useApi } from '../state/bots'
+import { useSettings } from '../state/settings'
 import { useSnapshot } from '../state/snapshot'
 import { usePolling } from '../hooks/usePolling'
 import { BarChart, DonutChart, LineChart, type BarDatum, type LinePoint } from '../components/charts'
@@ -106,13 +107,12 @@ function cumulativePoints(trades: Trade[]): LinePoint[] {
 }
 
 /** Histogram of trade profit ratios (as percentages) across ~20 bins. */
-function distributionBars(trades: Trade[]): BarDatum[] {
+function distributionBars(trades: Trade[], binCount = 20): BarDatum[] {
   const ratios = trades
     .map((t) => t.profit_ratio)
     .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
   if (ratios.length === 0) return []
 
-  const binCount = 20
   const min = Math.min(...ratios)
   const max = Math.max(...ratios)
   const span = max - min || Math.abs(max) || 1
@@ -165,8 +165,9 @@ const PERF_OPTIONS = [
 export function Dashboard() {
   const api = useApi()
   const navigate = useNavigate()
-  const { config, openTrades, count, profit, balance, loading, error, lastUpdated, refresh } =
+  const { config, openTrades, count, profit, balance, loading, error, slowUpdated, refresh } =
     useSnapshot()
+  const { settings } = useSettings()
 
   const [profitScope, setProfitScope] = useState<'all' | 'long' | 'short'>('all')
   const [perfTab, setPerfTab] = useState<PerfTab>('performance')
@@ -233,7 +234,10 @@ export function Dashboard() {
   /* ---- series ----------------------------------------------------------- */
 
   const cumPoints = useMemo(() => cumulativePoints(closedTrades), [closedTrades])
-  const distBars = useMemo(() => distributionBars(closedTrades), [closedTrades])
+  const distBars = useMemo(
+    () => distributionBars(closedTrades, settings.profitDistributionBins),
+    [closedTrades, settings.profitDistributionBins],
+  )
   const tradeBars = useMemo(() => perTradeBars(closedTrades), [closedTrades])
 
   const donutSlices = useMemo(
@@ -495,7 +499,7 @@ export function Dashboard() {
           {config && <StateTag state={config.state} />}
           {config && <DryRunTag dryRun={config.dry_run} />}
           <span className="ft-faint" style={{ fontSize: 'var(--ft-font-xs)' }}>
-            更新于 {lastUpdated ? formatTimestamp(lastUpdated, { seconds: false }) : '—'}
+            更新于 {slowUpdated ? formatTimestamp(slowUpdated, { seconds: false }) : '—'}
           </span>
           <Tooltip content="立即刷新">
             <Button

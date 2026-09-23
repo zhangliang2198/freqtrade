@@ -59,6 +59,8 @@ export function LookaheadAnalysis() {
       })
       track(job.job_id, 'lookahead_analysis')
       const status = await waitFor(job.job_id)
+      // null means the job was dismissed from the tracking panel.
+      if (!status) return
       if (status.status === 'failed') {
         Toast.error(status.error || '未来函数分析失败')
         return

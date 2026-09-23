@@ -140,6 +140,15 @@ html[theme-mode='dark'] {
   background: var(--ft-paper-1);
   min-width: 0;
 }
+/* The topbar carries more than a 1100px window can show. Drop the identity
+   detail first (it is repeated on every page header), then the exchange tag,
+   rather than letting the strategy name wrap and the figures collide. */
+@media (max-width: 1320px) {
+  .ft-topbar-optional {
+    display: none;
+  }
+}
+
 .ft-topbar-spacer {
   flex: 1 1 auto;
 }
@@ -285,6 +294,9 @@ html[theme-mode='dark'] {
   padding: var(--ft-gap-4) var(--ft-gap-5);
   border-bottom: 1px solid var(--ft-line);
   min-height: 38px;
+  /* A head whose actions do not fit used to squeeze the title to one character
+     per line ("配/置/0/个…"). Let the actions wrap to a second row instead. */
+  flex-wrap: wrap;
 }
 .ft-panel-icon {
   display: grid;
@@ -302,6 +314,8 @@ html[theme-mode='dark'] {
   font-weight: 600;
   color: var(--ft-ink-0);
   letter-spacing: -0.01em;
+  /* Never break mid-word; a squeezed title is still one line. */
+  white-space: nowrap;
 }
 .ft-panel-sub {
   font-size: var(--ft-font-xs);
@@ -346,11 +360,27 @@ body .semi-banner .semi-banner-content-wrapper .semi-banner-content-body {
    binds to the profit green — so a neutral ratio (robot share of the account)
    rendered as if it were a gain. A progress bar measures a quantity, not a
    profit, so it gets ink. */
-body .semi-progress-track-inner {
+/* Mirror Semi's own descendant chain: the winning rule is
+   `.semi-progress-horizontal .semi-progress-track-inner` (two classes), so a
+   single-class override silently lost and the bar stayed profit-green. */
+body .semi-progress-horizontal .semi-progress-track-inner,
+body .semi-progress-vertical .semi-progress-track-inner {
   background-color: var(--ft-ink-2);
 }
 body .semi-progress-circle-ring-inner {
   stroke: var(--ft-ink-2);
+}
+
+/* Same token, same problem: a checked Switch is painted with
+   `--semi-color-success`. In a trading console green has to stay readable as
+   "profit" at a glance, so a control's on-state uses ink instead. */
+body .semi-switch-checked,
+body .semi-switch-checked:hover,
+body .semi-switch-loading.semi-switch-checked {
+  background-color: var(--ft-ink-3);
+}
+body .semi-switch-disabled.semi-switch-checked {
+  background-color: var(--ft-ink-5);
 }
 
 /* Label/control form grid. One shared definition so every row on a form lines up
@@ -388,6 +418,25 @@ body .semi-progress-circle-ring-inner {
 }
 
 /* Grid helpers */
+/* The pairlist builder's three panes (handlers / config / preview) were an
+   inline grid with a 280px floor, which left the middle pane ~230px at a 1100px
+   viewport. Collapses to two, then one. */
+.ft-panes-3 {
+  display: grid;
+  gap: var(--ft-gap-5);
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(280px, 360px);
+}
+@media (max-width: 1500px) {
+  .ft-panes-3 {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+@media (max-width: 1100px) {
+  .ft-panes-3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .ft-grid {
   display: grid;
   gap: var(--ft-gap-5);
@@ -416,6 +465,12 @@ body .semi-progress-circle-ring-inner {
   }
   .ft-grid.cols-4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  /* A two-up row of ten-column trade tables gives each table ~440px at 1100px,
+     which cuts most columns. Stack them so each gets the full width; the old
+     threshold only collapsed at 860px. */
+  .ft-grid.cols-2 {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 @media (max-width: 860px) {
@@ -789,6 +844,11 @@ body .ft-table .semi-table-tbody > .semi-table-row:hover > .semi-table-row-cell 
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   border-top: 1px solid var(--ft-line);
+  /* Bounded like every other list: the whitelist is not a fixed size — it grew
+     from 57 to 324 pairs in one rotation, which turned this grid into a
+     1246px-tall panel. */
+  max-height: var(--ft-list-max-h);
+  overflow-y: auto;
 }
 .ft-pair-grid > button {
   min-width: 0;

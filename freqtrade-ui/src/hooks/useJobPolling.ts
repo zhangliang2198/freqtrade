@@ -40,14 +40,16 @@ export interface UseJobPolling {
   /** Forgets every finished job. */
   clearFinished: () => void
   /** Resolves with the final status once the job settles. */
-  waitFor: (jobId: string) => Promise<TrackedJob>
+  waitFor: (jobId: string) => Promise<TrackedJob | null>
 }
 
 export function useJobPolling(api: BotApi | null, enabled = true): UseJobPolling {
   const [jobs, setJobs] = useState<TrackedJob[]>([])
 
   const timers = useRef(new Map<string, number>())
-  const waiters = useRef(new Map<string, (job: TrackedJob) => void>())
+  // `null` means the job was dismissed before it settled, so an awaiting
+  // caller can stop rather than hang forever.
+  const waiters = useRef(new Map<string, (job: TrackedJob | null) => void>())
   // Guards against starting two loops for the same job id.
   const polling = useRef(new Set<string>())
 
@@ -112,7 +114,7 @@ export function useJobPolling(api: BotApi | null, enabled = true): UseJobPolling
 
   const waitFor = useCallback(
     (jobId: string) =>
-      new Promise<TrackedJob>((resolve) => {
+      new Promise<TrackedJob | null>((resolve) => {
         const existing = jobs.find((j) => j.job_id === jobId)
         if (existing && !existing.running) {
           resolve(existing)
@@ -126,6 +128,10 @@ export function useJobPolling(api: BotApi | null, enabled = true): UseJobPolling
   const dismiss = useCallback(
     (jobId: string) => {
       stopPolling(jobId)
+      // Resolve any waiter, otherwise `await waitFor(id)` never settles and the
+      // caller's `finally` never runs — the action button stayed disabled.
+      waiters.current.get(jobId)?.(null)
+      waiters.current.delete(jobId)
       setJobs((prev) => prev.filter((j) => j.job_id !== jobId))
     },
     [stopPolling],

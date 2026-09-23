@@ -50,12 +50,6 @@ const browser = await chromium.launch({
   args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
 })
 
-/** Distance from grey; >12 means the colour carries real hue. */
-function chromaticity(rgb) {
-  const [r, g, b] = rgb
-  return Math.max(r, g, b) - Math.min(r, g, b)
-}
-
 const AUDIT = () => {
   const results = {
     unexpected: {},

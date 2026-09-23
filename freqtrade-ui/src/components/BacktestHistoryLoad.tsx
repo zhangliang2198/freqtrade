@@ -40,6 +40,8 @@ export interface BacktestHistoryLoadProps {
   /** `run_id`s already held in memory — those rows are marked as loaded. */
   loadedRunIds?: string[]
   onUnload?: (runId: string) => void
+  /** Bump to force a refetch (e.g. after notes were saved). */
+  revision?: number
 }
 
 /** freqUI's `timestampToTimeRangeString`: compact "20260101" / "20260101T1200". */
@@ -58,13 +60,16 @@ export function BacktestHistoryLoad({
   onLoad,
   loadedRunIds = [],
   onUnload,
+  revision = 0,
 }: BacktestHistoryLoadProps) {
   const [filter, setFilter] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
 
+  // `revision` lets the page force a refetch — saving notes edits the backend
+  // copy, and this list is fetched separately, so it kept the old text.
   const { data, error, loading, refresh } = usePolling<HistoryEntry[]>(
     (signal) => backtestApi.history(api, signal),
-    [api],
+    [api, revision],
   )
 
   const entries = useMemo(() => (Array.isArray(data) ? data : []), [data])
