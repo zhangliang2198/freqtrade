@@ -25,7 +25,7 @@ from tests.strategy.leader_squeeze_test_helpers import configured_settings
 MODULE = importlib.import_module("leader_squeeze_helpers")
 
 BASE = 40.0
-PREMIUM = 14.0
+PREMIUM = 20.0
 WEIGHT = 0.5
 MAX_POSITIONS = 20
 FULL_WEIGHT = 0.75
@@ -241,14 +241,15 @@ SERIES = {
     FREE: _closes(_UNCORRELATED),
 }
 SERIES_DATES = pd.date_range("2026-09-01", periods=len(SERIES[HELD]), freq="15min", tz="UTC")
-# 40.6 clears the independent floor (40 + 14/19/1.5) but not the fully
-# correlated one (40 + 14/19) at the second position.
-BETWEEN_FLOORS = 40.6
+# With the current 20-point risk premium, 40.8 clears the independent floor
+# but not the fully correlated floor at the second position.
+BETWEEN_FLOORS = 40.8
 
 
 def _risk_strategy(scores: dict[str, float], held: tuple[str, ...] = ()) -> object:
     strategy = _entry_strategy(scores)
     strategy.settings["max_positions"] = MAX_POSITIONS
+    strategy._candidate_pairs = list(scores)
     for pair in set(scores) | set(held):
         strategy._metrics.setdefault(pair, _metric())
     strategy._closed_candles = Mock(
@@ -310,8 +311,7 @@ def test_correlation_uses_matching_candle_timestamps() -> None:
 
     correlations = strategy._entry_risk_correlations(
         CLONE,
-        [HELD],
-        {HELD: strategy._entry_close_series(HELD)},
+        (HELD,),
     )
 
     assert correlations == pytest.approx([1.0])

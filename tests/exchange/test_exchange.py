@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import logging
 import re
@@ -2774,6 +2775,27 @@ def test_refresh_latest_ohlcv(mocker, default_conf_usdt, caplog, candle_type) ->
         assert log_has_re(r"Cannot download \(IOTA\/USDT, 3m, \S+\).*", caplog)
     else:
         assert len(res) == 1
+
+
+def test_refresh_latest_ohlcv_limits_concurrent_requests(mocker, default_conf_usdt) -> None:
+    exchange = get_patched_exchange(mocker, default_conf_usdt)
+    active = peak = 0
+
+    async def candle_job(index: int):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return f"PAIR{index}/USDT", "5m", CandleType.FUTURES, [], False
+
+    jobs = [candle_job(index) for index in range(21)]
+    mocker.patch.object(exchange, "_build_ohlcv_dl_jobs", return_value=(jobs, []))
+    mocker.patch.object(exchange, "_process_ohlcv_df", return_value=DataFrame())
+
+    exchange.refresh_latest_ohlcv([])
+
+    assert peak <= 20
 
 
 @pytest.mark.parametrize("candle_type", [CandleType.FUTURES, CandleType.SPOT])

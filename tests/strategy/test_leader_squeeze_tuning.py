@@ -8,8 +8,10 @@ from tests.strategy.leader_squeeze_test_helpers import (
     PUBLIC_CONFIG,
     configured_settings,
 )
-from tests.strategy.test_leader_squeeze_entry_heat import PAIR, _frame, _heat, _strategy
 from tests.strategy.test_leader_squeeze_score_policy import _apply, _metric, _score_strategy
+
+
+PAIR = "BTC/USDT:USDT"
 
 
 @pytest.mark.parametrize(
@@ -38,16 +40,15 @@ def test_scoring_scale_changes_only_its_expected_contribution(key, value, expect
         ("momentum_return_weight", 1.1),
         ("entry_heat_box_candles", 0),
         ("entry_heat_ema_candles", 2000),
-        ("entry_heat_cooled_breakout_factor", -1),
         ("replacement_fast_enabled", "false"),
-        ("replacement_fast_entry_score", 40),
+        ("replacement_score_gap", -1),
         ("replacement_fast_score_gap", 9),
-        ("replacement_fast_core_score", 98),
-        ("replacement_weak_bottom_ratio", 0),
-        ("replacement_target_top_ratio", 1.1),
+        ("replacement_fast_core_score", 101),
+        ("replacement_candidate_hysteresis", 101),
         ("replacement_confirmations", 1.5),
         ("replacement_fast_close_location", 2),
-        ("replacement_fast_volume_baseline_candles", 1),
+        ("replacement_fast_breakout_candles", 1),
+        ("replacement_fast_confirmations", 11),
         ("replacement_cooldown_minutes", -1),
         ("replacement_fast_min_age_minutes", float("inf")),
     ],
@@ -59,13 +60,23 @@ def test_invalid_tuning_fails_validation(key, value):
         strategy._validate_tuning_settings()
 
 
-def test_heat_breakout_relief_and_base_fraction_are_configurable():
-    strategy = _strategy(_frame("cooled"))
-    assert _heat(strategy)["penalty"] == pytest.approx(0.01)
-    strategy.settings["entry_heat_cooled_breakout_factor"] = 1
-    assert _heat(strategy)["penalty"] == pytest.approx(0.04)
-    strategy.settings["entry_heat_base_fraction"] = 0.5
-    assert _heat(strategy)["penalty"] == pytest.approx(0.08)
+def test_late_extension_setting_controls_the_hard_entry_limit():
+    strategy = _score_strategy()
+    strategy.settings["entry_setup_enabled"] = True
+    strategy.settings["entry_heat_extension_start_atr"] = 2.0
+    strategy.settings["entry_setup_late_extension_atr"] = 4.0
+    strategy.settings["entry_heat_extension_full_atr"] = 6.0
+    strategy.settings["entry_heat_box_max_width_atr"] = 2.0
+    strategy._entry_heat_metrics = lambda pair: {
+        "extension_atr": 3.0,
+        "box_width_atr": 1.0,
+        "cooled_breakout": 0.0,
+        "breakout_age_candles": float("nan"),
+    }
+
+    assert strategy._entry_setup_metrics("BELOW-LIMIT")["late"] == 0.0
+    strategy.settings["entry_setup_late_extension_atr"] = 2.5
+    assert strategy._entry_setup_metrics("ABOVE-LIMIT")["late"] == 1.0
 
 
 def test_all_public_settings_validate_and_weights_remain_unchanged():
@@ -98,8 +109,7 @@ def test_all_public_settings_validate_and_weights_remain_unchanged():
         ("entry_risk_cluster_correlation", 1.5),
         ("entry_risk_cluster_max_positions", 0),
         ("entry_setup_min_score", 101),
-        ("entry_setup_shortlist_ratio", 0),
-        ("entry_setup_min_candidates", 0),
+        ("entry_risk_correlation_unknown", -0.1),
         ("entry_setup_enabled", "true"),
         ("entry_setup_score_points", {"launch": 101}),
         (
@@ -135,7 +145,8 @@ def test_exposure_ceiling_that_cannot_fund_one_position_is_rejected() -> None:
     [("entry_setup_launch_candles", 0), ("entry_setup_late_extension_atr", 2.0)],
 )
 def test_invalid_entry_setup_window_is_rejected(key, value):
-    strategy = _strategy(_frame("cooled"))
+    strategy = _score_strategy()
+    strategy.settings["entry_setup_enabled"] = False
     strategy.settings[key] = value
     with pytest.raises(ValueError):
         strategy._validate_entry_heat_settings()
@@ -153,6 +164,7 @@ def test_new_channel_plan_rechecks_breakout_and_full_capacity_before_buy():
     )
 
     strategy, trades = _rotation_strategy(weak_score=55, target_score=75, fast_quality=True)
+    strategy._entry_setup_snapshot = {}
     _plan(strategy, trades, NOW.timestamp())
     assert strategy._rotation_state["channel"] == "fast"
     with patch.object(MODULE.Trade, "get_open_trades", return_value=trades):
@@ -170,6 +182,7 @@ def test_skipped_bar_restarts_confirmation_instead_of_completing_rotation():
     from tests.strategy.test_leader_squeeze_dual_rotation import NOW, _plan, _rotation_strategy
 
     strategy, trades = _rotation_strategy()
+    strategy._entry_setup_snapshot = {}
     _plan(strategy, trades, NOW.timestamp())
     strategy._rotation_bar.return_value += 1800
     strategy._last_score_refresh += 1800
@@ -186,18 +199,25 @@ def test_candidate_hysteresis_keeps_near_equal_challenger_across_bars():
         _rotation_strategy,
     )
 
-    strategy, trades = _rotation_strategy(target_score=55)
+    strategy, trades = _rotation_strategy(target_score=60)
+    strategy.settings["replacement_fast_enabled"] = False
+    strategy.settings["replacement_confirmations"] = 3
+    strategy._entry_setup_snapshot = {}
     _plan(strategy, trades, NOW.timestamp())
-    strategy._scores["NEW"] = 57
+    strategy._scores["NEW"] = 62
     strategy._metrics["NEW"] = strategy._metrics[TARGET].copy()
     for index in range(9):
         pair = f"MID-{index}"
         strategy._scores[pair] = 50
         strategy._metrics[pair] = strategy._metrics[TARGET].copy()
+    strategy._candidate_pairs = [*strategy._candidate_pairs, "NEW"] + [
+        f"MID-{index}" for index in range(9)
+    ]
     strategy._rotation_bar.return_value += 900
     strategy._last_score_refresh += 900
     _plan(strategy, trades, NOW.timestamp() + 900)
-    assert strategy._rotation_state["target"] == TARGET
+    assert strategy._rotation_candidate == (trades[0].pair, TARGET)
+    assert strategy._rotation_seen == 2
 
 
 def test_rotated_out_pair_cannot_reenter_during_persisted_cooldown():

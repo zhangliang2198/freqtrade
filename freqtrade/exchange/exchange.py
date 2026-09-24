@@ -2739,8 +2739,8 @@ class Exchange:
         ]
 
         data: list = []
-        # Chunk requests into batches of 100 to avoid overwhelming ccxt Throttling
-        for input_coro in chunks(input_coroutines, 100):
+        # Bound concurrent candle requests so a single proxy tunnel is not overwhelmed.
+        for input_coro in chunks(input_coroutines, 20):
             results = await asyncio.gather(*input_coro, return_exceptions=True)
             for res in results:
                 if isinstance(res, BaseException):
@@ -2978,8 +2978,8 @@ class Exchange:
         ohlcv_dl_jobs, cached_pairs = self._build_ohlcv_dl_jobs(pair_list, since_ms, cache)
 
         results_df = {}
-        # Chunk requests into batches of 100 to avoid overwhelming ccxt Throttling
-        for dl_jobs_batch in chunks(ohlcv_dl_jobs, 100):
+        # Bound concurrent candle requests so a single proxy tunnel is not overwhelmed.
+        for dl_jobs_batch in chunks(ohlcv_dl_jobs, 20):
 
             async def gather_coroutines(coro):
                 return await asyncio.gather(*coro, return_exceptions=True)

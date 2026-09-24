@@ -44,7 +44,7 @@ def _status_table(caplog, title: str):
 
 def test_status_tables_show_heat_price_and_opening_scores_without_side_effects(caplog) -> None:
     strategy = _status_strategy()
-    strategy.settings["entry_heat_max_penalty"] = 0.20
+    strategy._candidate_pairs = [PAIR]
     strategy._entry_pairs = {PAIR}
     strategy._entry_decisions = {PAIR: "入选"}
     strategy._scores = {PAIR: 80.0}
@@ -87,7 +87,8 @@ def test_status_tables_show_heat_price_and_opening_scores_without_side_effects(c
         side_effect={
             PAIR: {
                 "return_15d": 0.42,
-                "penalty": 0.125,
+                "extension_atr": 2.5,
+                "cooled_breakout": 0.0,
             },
             EXTERNAL_PAIR: None,
             OLD_PAIR: None,
@@ -121,8 +122,8 @@ def test_status_tables_show_heat_price_and_opening_scores_without_side_effects(c
         )
     }
     assert selection[PAIR]["15日涨幅"] == "+42.0%"
-    assert selection[PAIR]["热度折扣"] == "12.5%"
-    assert selection[PAIR]["买入评分"] == "70.0"
+    assert selection[PAIR]["偏离ATR"] == "+2.5"
+    assert selection[PAIR]["买入评分"] == "80.0"
     assert selection_table.columns[0].header == "排名"
 
     holding_record = next(
@@ -138,7 +139,7 @@ def test_status_tables_show_heat_price_and_opening_scores_without_side_effects(c
         OLD_PAIR,
     ]
     assert holding[PAIR]["15日涨幅"] == "+42.0%"
-    assert holding[PAIR]["热度折扣"] == "12.5%"
+    assert holding[PAIR]["偏离ATR"] == "+2.5"
     assert holding[PAIR]["当前价(标记)"] == "123.45(旧)"
     assert holding[PAIR]["本金(USDT)"] == "40.00"
     assert holding[PAIR]["涨幅"] == "+117.2%(旧)"
@@ -160,20 +161,20 @@ def test_status_tables_show_heat_price_and_opening_scores_without_side_effects(c
     assert holding[MISSING_PAIR]["框架对账"] == "已接管"
     assert holding[EXTERNAL_PAIR]["框架对账"] == "等待框架导入"
     assert holding[EXTERNAL_PAIR]["15日涨幅"] == "未知"
-    assert holding[EXTERNAL_PAIR]["热度折扣"] == "未知"
+    assert holding[EXTERNAL_PAIR]["偏离ATR"] == "未知"
     assert holding[MISSING_PAIR]["15日涨幅"] == "未知"
-    assert holding[MISSING_PAIR]["热度折扣"] == "未知"
+    assert holding[MISSING_PAIR]["偏离ATR"] == "未知"
     assert all(
         value != "0.0%"
         for row in holding.values()
         for key, value in row.items()
-        if key in {"15日涨幅", "热度折扣"} and row["交易对"] in {EXTERNAL_PAIR, MISSING_PAIR}
+        if key in {"15日涨幅", "偏离ATR"} and row["交易对"] in {EXTERNAL_PAIR, MISSING_PAIR}
     )
 
     expected_headers = [
+        "#",
         "交易对",
         "来源",
-        "方向",
         "数量",
         "杠杆",
         "开仓价",
@@ -184,7 +185,7 @@ def test_status_tables_show_heat_price_and_opening_scores_without_side_effects(c
         "资金费",
         "框架保护价",
         "开仓分数",
-        "热度折扣",
+        "偏离ATR",
         "15日涨幅",
         "止损单",
         "框架对账",

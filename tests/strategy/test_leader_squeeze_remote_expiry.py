@@ -95,6 +95,7 @@ def _consume_strategy(now: float = NOW) -> LeaderSqueezeStrategy:
     strategy = configured_strategy(LeaderSqueezeStrategy)
     strategy.settings = configured_settings()
     strategy._score_result_lock = threading.Lock()
+    strategy._occupied_pairs = Mock(return_value=set())
     strategy._exit_metrics = {}
     strategy._data_healthy = True
     strategy._market_data_healthy = True
@@ -266,6 +267,7 @@ def _entry_gate_strategy(now: float = NOW) -> LeaderSqueezeStrategy:
     strategy._risk_state_load_failed = False
     strategy._account_stopped = False
     strategy._market_data_healthy = True
+    strategy._market_valid_until = now + 60
     strategy._market_down = False
     return strategy
 
@@ -274,6 +276,7 @@ def test_entries_allowed_requires_eighty_percent_of_current_score_metrics() -> N
     strategy = _entry_gate_strategy()
     leaders = [f"L{index}" for index in range(5)]
     strategy._score_leaders = leaders
+    strategy._candidate_pairs = leaders
     strategy._metrics = {pair: _metric() for pair in leaders[:4]}
 
     assert strategy._entries_allowed(NOW)
@@ -286,6 +289,7 @@ def test_select_entries_rejects_pair_with_expired_remote_score() -> None:
     strategy = _entry_gate_strategy()
     strategy._entries_allowed = lambda now: True
     strategy._scores = {PAIR: 100.0}
+    strategy._candidate_pairs = [PAIR]
     strategy._metrics = {PAIR: _metric(score_age=-1.0, exit_age=60.0)}
     strategy._external_pairs = set()
     strategy._rotation_target = None

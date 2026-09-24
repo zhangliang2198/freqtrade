@@ -183,10 +183,11 @@ def test_hourly_weakness_is_required_for_rotation_and_recovery_revokes_it():
 def test_weak_hourly_entry_requires_actual_fast_launch_but_4h_is_observation_only():
     frame = hourly_source([100.0] * 120 + [99.5, 99.0, 98.5])
     strategy = strategy_for(frame)
-    strategy._entry_score = Mock(return_value=59.99)
+    strategy._current_score = Mock(return_value=59.99)
+    strategy._rotation_floor = Mock(return_value=60.0)
     strategy._fast_rotation_quality = Mock(return_value=True)
     assert strategy._higher_entry_reason(PAIR)
-    strategy._entry_score.return_value = 60
+    strategy._current_score.return_value = 60
     assert strategy._higher_entry_reason(PAIR) == ""
     assert strategy._higher_entry_details[PAIR]["fast_exception"]
     strategy._fast_rotation_quality.return_value = False
@@ -281,7 +282,7 @@ def test_confirmed_hourly_exit_cannot_be_bypassed_by_a_high_entry_score():
     strategy.__dict__.pop("_higher_entry_reason", None)
     strategy.dp = SimpleNamespace(get_pair_dataframe=Mock(return_value=frame))
     strategy._candle_metrics = Mock(return_value={"momentum": 0.05, "trend_continuity": 1.0})
-    strategy._entry_score = Mock(return_value=90)
+    strategy._current_score = Mock(return_value=90)
     strategy._fast_rotation_quality = Mock(return_value=True)
     reason = strategy._entry_quality_reason(PAIR, 50)
     assert reason == f"趋势退出: {strategy._trend_exit_rule(PAIR)}, 禁止开仓"

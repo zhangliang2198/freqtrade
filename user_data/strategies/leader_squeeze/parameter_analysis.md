@@ -11,7 +11,6 @@
 | 动量 | 44 分 | `momentum_return_weight` × clamp（动量涨幅/`momentum_full_score`）+（1 − `momentum_return_weight`）×上涨连续性；当前为 80% / 3% |
 | 放量 | 27 分 | 70% 持续活跃度（45m 均量/此前 7 天均量，3 倍满分）+ 30% 新增放量（45m 均量/此前 5h 均量，2 倍满分）；基准均排除最近 3 根 |
 | 主动买 | 26 分 | clamp（（主动买卖比 − 1）/（`taker_score_full_ratio` − 1））；普通比值取最近三根已收盘 15m 的 ΣbuyVol / ΣsellVol，1.5 达满分 |
-| 强平 | 0 分 | 当前停用；不启动强平流，也不作为开仓门禁 |
 | OI 参考 | 0 分 | 当前停用；不请求 OI 接口 |
 | 资金费率 | ±3 分 | 负费率按该币负下限归一化并加分；正费率按正上限归一化并扣分 |
 
@@ -19,24 +18,23 @@
 
 ## 分层入场漏斗
 
-入场不再用一个总分门槛让强度和位置相互抵消。前 50 个候选依次经过：
+入场不再用一个总分门槛让强度和位置相互抵消。候选池（核心池动量达标票 + 侦察票）依次经过：
 
 1. 硬条件：数据时效、趋势、流动性、交易资格、市场状态和末端过热检查；任何一项失败都淘汰。
-2. 形态阶段：形态评分至少 `entry_setup_min_score=50`；普通候选偏离 EMA 达 `entry_setup_late_extension_atr=5.0 ATR` 时直接淘汰。最近 `entry_setup_launch_candles=2` 根 15m 属于新鲜启动窗口；已确认的整理后突破使用 `entry_heat_cooled_breakout_factor=0.25` 降低热度惩罚，并单独放宽到 `< entry_heat_extension_full_atr=6.0 ATR`，但不额外提高形态评分。
-3. 形态短名单：按形态评分保留前 `entry_setup_shortlist_ratio=0.40`，但至少保留 `entry_setup_min_candidates=10` 个有效候选（不足时保留全部）。
-4. 强度排名：短名单按热度折扣后的买入评分排序，逐个计算风险预算门槛 `entry_risk_base_score + entry_risk_premium × 风险占用`。先令仓位利用率 `slot=(仓位数-1)/(max_positions-1)`，再按 `风险占用 = slot × (1 + entry_risk_correlation_weight × 相关性浓度) / (1 + entry_risk_correlation_weight)` 计算并截断到 [0,1]。相关性浓度 = 候选与现有持仓最近 `entry_risk_correlation_window=96` 根 15m 收益的平均相关系数 ÷ `entry_risk_correlation_full_weight=0.75`（截断到 [0,1]）。重叠不足 `entry_risk_correlation_min_overlap=48` 时取 `entry_risk_correlation_unknown=1.0`，即按完全同向保守处理。
-5. 硬上限：总名义敞口超过 `entry_risk_max_gross_ratio=4.4`、总保证金占用超过 `entry_risk_max_margin_ratio=0.88`，或候选与现有持仓相关性达到 `entry_risk_cluster_correlation=0.85` 的簇超过 `entry_risk_cluster_max_positions=5` 个时直接淘汰，强度分不能越过。已有仓位优先使用交易所钱包的实际保证金与名义价值，框架交易作为模拟盘及同步间隙的回退；同轮待开候选按每仓最大保证金和配置杠杆预留，无法可靠估值时拒绝新开仓。
-6. 最终复核：发出信号、取得盘口和实际下单前再次检查硬条件、形态阶段、排名、仓位槽位、按实时仓位重算的风险门槛、硬上限和交易资格；选择时与复核时取更严的门槛。
+2. 形态阶段：先要求整理突破有放量确认（`entry_setup_breakout_volume_multiple=1.5`，突破根量 ≥ 20 根均量 1.5 倍），否则不算"启动"；形态评分至少 `entry_setup_min_score=50`；普通候选偏离 EMA 达 `entry_setup_late_extension_atr=5.0 ATR` 时直接淘汰。最近 `entry_setup_launch_candles=2` 根 15m 属于新鲜启动窗口；确认的整理突破会影响形态评分和启动优先序，并单独将末端拒绝上限放宽至 `< entry_heat_extension_full_atr=6.0 ATR`，不改变买入评分。
+3. 优先序选股：通过硬条件和形态门槛的候选按 `_entry_priority_key` 排序 —— 启动新鲜度（本轮突破 > 上一根突破 > 中继）→ 整理突破 → 45m/7d 相对放量 → 强度分 → 交易对；综合评分在这里**只作最低门槛**，不再决定先后。随后逐个计算风险预算门槛 `entry_risk_base_score + entry_risk_premium × 风险占用`。先令仓位利用率 `slot=(仓位数-1)/(max_positions-1)`，再按 `风险占用 = slot × (1 + entry_risk_correlation_weight × 相关性浓度) / (1 + entry_risk_correlation_weight)` 计算并截断到 [0,1]。相关性浓度 = 候选与现有持仓最近 `entry_risk_correlation_window=96` 根 15m 收益的平均相关系数 ÷ `entry_risk_correlation_full_weight=0.75`（截断到 [0,1]）。重叠不足 `entry_risk_correlation_min_overlap=48` 时取 `entry_risk_correlation_unknown=1.0`，即按完全同向保守处理。
+4. 硬上限：总名义敞口超过 `entry_risk_max_gross_ratio=4.4`、总保证金占用超过 `entry_risk_max_margin_ratio=0.88`，或候选与现有持仓相关性达到 `entry_risk_cluster_correlation=0.85` 的簇超过 `entry_risk_cluster_max_positions=5` 个时直接淘汰，强度分不能越过。已有仓位优先使用交易所钱包的实际保证金与名义价值，框架交易作为模拟盘及同步间隙的回退；同轮待开候选按每仓最大保证金和配置杠杆预留，无法可靠估值时拒绝新开仓。
+5. 最终复核：发出信号、取得盘口和实际下单前再次检查硬条件、形态阶段、仓位槽位、按实时仓位重算的风险门槛、硬上限和交易资格；选择时与复核时取更严的门槛。
 
-当前配置下第 1 仓门槛 40.0；满仓且完全同向时收满 54.0；满仓但彼此独立时约为 49.3，因为分散化本身就是风险下降。常规最多 20 个仓位；先买后卖轮换最多临时使用第 21 个仓位。所有仓位均不超过 4% 保证金和 5 倍杠杆时，两个敞口上限可容纳 21 个仓位；实际旧仓或手动仓更大时会更早拦截。轮换普通目标的有效最低门槛取模型最严门槛 54 与原始 `replacement_entry_score=50` 的较大值，即 54；快速轮换仍使用 60。该漏斗保留能够通过筛选的候选，任何一层都不会因候选数量不足而降低硬条件或形态最低分。
+当前配置下第 1 仓门槛 40.0；满仓且完全同向时达到 `entry_risk_base_score + entry_risk_premium = 60.0`；满仓但彼此独立（相关性 0）时约为 53.3，因为分散化本身就是风险下降。形态门槛是绝对值，不再按池子百分位截断。常规最多 20 个仓位；先买后卖轮换最多临时使用第 21 个仓位。所有仓位均不超过 4% 保证金和 5 倍杠杆时，两个敞口上限可容纳 21 个仓位；实际旧仓或手动仓更大时会更早拦截。轮换目标与普通新仓共用同一个按风险占用计算的评分门槛，不另设普通/快速通道固定分数；满仓下当前配置约为 53.3–60。该漏斗保留能够通过筛选的候选，任何一层都不会因候选数量不足而降低硬条件或形态最低分。
 
 仓位金额不再固定使用 4% 保证金，而是先把单笔计划损失限制为可交易资金的 `entry_risk_per_trade=1%`：以入场时冻结的 `1.5 × ATR1h` 作为 1R，并夹在价格的 0.8% 到 12%，再用 `保证金 = 资金 × 1% ÷ (1R价格比例 × 实际杠杆)` 反推仓位。`stake_ratio=4%` 只作为单仓保证金上限。成交后同一个 1R 同时成为初始保护止损，因此“风险预算”与真实退出边界采用同一口径；跳空、滑点、费用和止损建单失败仍可能使实际损失超过计划值。
 
-候选池由 `PercentChangePairList.number_assets=50` 控制；前置池最多取 200 个、要求 24 小时 USDT 成交额超过 2000 万，再执行黑名单、上市时间和价差过滤，尽量保留 50 个最终候选。符合条件不足时实际候选可少于 50。榜外持仓不参与候选覆盖率和市场普跌分母，只保留评分用于持仓监控与轮换。市场覆盖按实际候选数量计算：50 个候选时，普通市场覆盖 80% 为 40 个，严重普跌 60% 为 30 个。
+候选宇宙由 `pairlists` 决定：`VolumePairList(min_value=3000000, number_assets=1000)` 之后用两个 `PairInformationFilter` 白名单要求 `info.contractType=PERPETUAL` 与 `info.underlyingType=COIN`（fail-closed），再过 `AgeFilter(min_days_listed=15)` 与 `SpreadFilter(max_spread_ratio=0.0015)`；`min_value` 高于 `liquidity_discovery_min_quote_volume` 会提前滤掉部分发现池，因此配置值应小于或等于该发现池下限。已删除 `PercentChangePairList`。策略按已收盘 15m K 线拆池：核心池 ≥ `liquidity_core_min_quote_volume`（1000 万）定义市场宽度并贡献动量达标候选；发现池 ≥ `liquidity_discovery_min_quote_volume`（300 万）中满足动量 > 0、连续性 ≥ 2/3、45m/5h > 1、45m/7d > 1 的票取本地分前 `scout_max_candidates`（30）个进入侦察池；候选池 = 核心达标票 + 侦察票；评分池 = 候选池 + 持仓。榜外持仓不参与市场普跌分母，只保留评分用于持仓监控与轮换。市场覆盖按核心池计算（80%），候选远端指标覆盖率按 `candidate_min_metric_ratio`（80%）单独计算。
 
 ## 多周期行为
 
-多周期阈值是当前实现的待验证起点，不能称为最优盈利设置。入场评分仍在 15m 上按原权重计算；4h 只作为背景观察，既不加权，也不单独拦截。正常入场要求 1h 持仓数据可用；1h 处于早期走弱时，只有热度调整后的买入评分达到快速门槛 60 且满足现有 15m 快速突破条件，才允许 `earlyweak` 例外；确认的退出条件始终拒绝入场。
+多周期阈值是当前实现的待验证起点，不能称为最优盈利设置。入场评分仍在 15m 上按原权重计算；4h 只作为背景观察，既不加权，也不单独拦截。正常入场要求 1h 持仓数据可用；1h 处于早期走弱时，只有启用快速通道、买入评分达到按风险占用计算的当前门槛，并通过 15m 快速突破质量检查才允许例外。快速质量检查包括突破、放量、主动买和核心分至少 `replacement_fast_core_score=75/97`；确认的退出条件始终拒绝入场。
 
 | 配置键 | 当前值 | 作用 |
 |---|---:|---|
@@ -49,7 +47,7 @@
 
 1h 普通结构退出仍使用最近 2 根 1h 收盘和 `reversal_atr_buffer=0.5 × ATR1h`，1h 急跌分支使用 `reversal_fast_atr_buffer=1.5 × ATR1h`；慢跌确认使用 5 根 1h，即 5 小时，EMA20 走弱和连续弱势段累计跌幅规则不变。历史破位从可用 1h 历史重算并要求未收复原支撑且仍低于原普通阈值。15m 额外急跌不等待当前 1h 收盘，只以信号开始前已经完整的 1h 支撑和 ATR 为基准，在 1.0 ATR 阈值下检查最新 15m 收盘，并可在 16 根 15m 内回溯；回溯信号之后必须未收复支撑且当前仍在普通缓冲以下。
 
-旧仓轮换必须同时位于全部有效评分的后 20%，并通过 1h 资格：最新 1h close < EMA20，且（EMA 相对 3 小时前下降，或本根 high、low、close 均低于上根）；最新 1h high 不得超过此前 3 根 1h high 的最高值，最近 3 根先前小时最高收盘价到最新收盘价的回撤至少为 0.5 ATR1h。新目标必须位于排除已有仓位后的候选买入评分前 10%。通过相对排名后才应用双通道的绝对分数、分差、确认和冷却；持仓趋势退出不等待固定持仓天数，程序硬止损保留，普通市场转弱只暂停新开仓，严重普跌才触发市场紧急退出。
+旧仓轮换不再要求池子百分位：普通通道要求原评分低于 `replacement_weak_score=45`，快速通道不设旧仓固定分数线，两者都必须通过 1h 资格：最新 1h close < EMA20，且（EMA 相对 3 小时前下降，或本根 high、low、close 均低于上根）；最新 1h high 不得超过此前 3 根 1h high 的最高值，最近 3 根先前小时最高收盘价到最新收盘价的回撤至少为 0.5 ATR1h。新目标从排除已有仓位后的候选中按与新仓相同的优先序逐个检查，不设前 10% 限制。目标通过形态、风险评分门槛、分差和通道质量后，才进入确认和冷却；持仓趋势退出不等待固定持仓天数，程序硬止损保留，普通市场转弱只暂停新开仓，严重普跌才触发市场紧急退出。
 
 ## 当前实现的离线试算
 
@@ -64,27 +62,9 @@
 
 分项核对：47.3667 分由动量 23.4667、放量 13.5、主动买 10.4 构成。66.5333 分由动量 29.3333、放量 21.6、主动买 15.6 构成。97 分情景为 44+27+26；OI 和强平当前均不改变分数。资金费率可在这些分数上调整 -3 到 +3 分。
 
-## 热度折扣对门槛的影响
+## 热度与形态检查
 
-买入评分为原评分 ×（1 − 热度惩罚）。下表取 0%、10% 和 20% 三个惩罚场景用于理解门槛；实际热度惩罚按公开配置和指标连续计算。
-
-| 原评分 | 0% 折扣 | 10% 折扣 | 20% 折扣 |
-|---:|---:|---:|---:|
-| 47.3667 | 47.3667 | 42.6300 | 37.8934 |
-| 66.5333 | 66.5333 | 59.8800 | 53.2266 |
-| 97.0000 | 97.0000 | 87.3000 | 77.6000 |
-
-若折扣后的买入评分要达到下列门槛，原评分至少需要达到：
-
-| 买入门槛 | 0% 折扣 | 10% 折扣 | 20% 折扣 |
-|---:|---:|---:|---:|
-| 40 | 40.00 | 44.4444 | 50.00 |
-| 45 | 45.00 | 50.00 | 56.25 |
-| 50 | 50.00 | 55.5556 | 62.50 |
-| 60 | 60.00 | 66.6667 | 75.00 |
-| 70 | 70.00 | 77.7778 | 87.50 |
-
-因此，热度折扣只影响强度阶段的买入评分和排名；形态最低分、形态短名单、硬条件和最终复核仍独立生效。高强度分不能绕过形态评分不足或候选偏离达到 5 ATR 的硬拒绝。
+买入评分不再按 15 日涨幅扣分，15 日涨幅只作观察，不参与评分或排序。入场仍要求完整的热度历史，以计算 EMA/ATR 偏离和识别整理突破；偏离质量进入形态分，普通候选达到 `entry_setup_late_extension_atr=5.0 ATR` 时硬拒绝。满足启动整理突破条件的候选形态分和优先序会相应变化，末端硬拒绝上限可到 `entry_heat_extension_full_atr=6.0 ATR`。因此，热度历史用于位置和形态检查，不是买入评分折扣。
 
 ## 已开放的评分和热度参数
 
@@ -93,7 +73,9 @@
 | 配置键 | 当前值 | 作用 |
 |---|---:|---|
 | entry_risk_base_score | 40.0 | 第 1 仓（无风险占用）使用的强度评分门槛 |
-| entry_risk_premium | 14.0 | 风险占用达到满值时追加的分数；与 base 相加为模型最严门槛 54 |
+| entry_risk_premium | 20.0 | 风险占用达到满值时追加的分数；与 base 相加为模型最严门槛 60 |
+| profit_lock_arm_r | 0.5 | 峰值达到 0.5R 即武装盈利棘轮，至少锁到成本加手续费 |
+| profit_no_progress_max_r | 0.5 | 允许等于武装点：0.5R 以下由无进展退出覆盖，0.5R 以上由棘轮接管 |
 | entry_risk_per_trade | 0.01 | 单仓初始止损对应的账户计划风险；当前为可交易资金的 1% |
 | entry_risk_initial_stop_enabled | true | 成交后使用冻结的 1R 价格距离建立初始保护止损 |
 | entry_risk_correlation_weight | 0.5 | 相关性对风险占用的放大权重；0 表示只看仓位数 |
@@ -106,10 +88,13 @@
 | entry_risk_cluster_correlation | 0.85 | 判定“同一笔交易”的相关系数阈值 |
 | entry_risk_cluster_max_positions | 5 | 硬上限：单个高相关簇允许的最大仓位数 |
 | entry_setup_min_score | 50.0 | 形态阶段的最低评分 |
-| entry_setup_enabled | true | 是否启用形态筛选和末端追高硬闸门；与热度折扣开关独立 |
+| entry_setup_enabled | true | 是否启用形态筛选与末端追高硬闸门 |
 | entry_setup_score_points | 启动35/中继20/偏离30/整理20/距离15 | 形态评分各组成项的分值 |
-| entry_setup_shortlist_ratio | 0.40 | 形态评分短名单保留前 40% |
-| entry_setup_min_candidates | 10 | 形态短名单至少保留的有效候选数 |
+| liquidity_core_min_quote_volume | 10000000 | 核心池下限；定义市场宽度并贡献常规候选 |
+| liquidity_discovery_min_quote_volume | 3000000 | 发现池下限；pairlist `min_value` 当前为 300 万，实际候选带为 300 万–1000 万 |
+| scout_max_candidates | 30 | 侦察池每轮最多进入评分池的数量 |
+| candidate_min_metric_ratio | 0.80 | 候选池远端指标成功率下限 |
+| profit_lock_strong_score / profit_lock_fading_score | 45.0 / 20.0 | 盈利保护档位的绝对评分门槛 |
 | entry_setup_launch_candles | 2 | 新鲜启动识别窗口，最近 2 根 15m K 线 |
 | entry_setup_late_extension_atr | 5.0 | 普通候选偏离 EMA 达 5 ATR 时硬拒绝；整理突破使用 6 ATR 硬上限 |
 | min_absolute_momentum | 0.0 | 1h 涨幅必须严格为正 |
@@ -122,25 +107,18 @@
 | volume_activity_baseline_candles | 672 | 此前一周 15m K 线作为均量基准，排除最近 3 根 |
 | taker_score_full_ratio | 1.5 | 主动买卖比达到此值时主动买分满分 |
 | oi_score_full_drop | 0.03 | 停用保留参数；OI 权重为 0 时不请求接口 |
-| liquidation_min_notional | 1000.0 | 停用保留参数；强平权重为 0 时不启动数据流 |
-| liquidation_score_full_ratio | 5.0 | 停用保留的强平满分尺度 |
-| liquidation_warmup_score | 0.0 | 停用状态不平移绝对分数 |
 
 热度参数也已经开放：
 
 | 配置键 | 当前值 | 作用 |
 |---|---:|---|
-| entry_heat_max_penalty | 0.20 | 最大热度惩罚 20% |
-| entry_heat_return_scale | 1.0 | 配置的热度历史涨幅达到 100% 时涨幅热度满量程 |
-| entry_heat_extension_start_atr | 2.0 | 偏离 EMA 达 2 ATR 后开始增加惩罚 |
-| entry_heat_extension_full_atr | 6.0 | 偏离 EMA 达 6 ATR 时偏离热度满量程 |
+| entry_heat_extension_start_atr | 2.0 | 偏离 EMA 超过 2 ATR 后，形态分中的偏离质量逐步下降 |
+| entry_heat_extension_full_atr | 6.0 | 已确认整理突破候选的末端硬拒绝上限；普通候选仍使用 5 ATR |
 | entry_heat_ema_candles | 96 | 热度参考 EMA96，约 24 小时 |
 | entry_heat_box_candles | 16 | 整理箱体 16 根，约 4 小时 |
 | entry_heat_box_max_width_atr | 4.0 | 整理箱体宽度上限 |
 | entry_heat_prebreak_extension_max_atr | 2.0 | 突破前收盘距 EMA 的偏离上限 |
 | entry_heat_breakout_overshoot_atr | 1.0 | 突破后允许超过箱体高点的 ATR 倍数 |
-| entry_heat_cooled_breakout_factor | 0.25 | 整理后突破的惩罚乘数 |
-| entry_heat_base_fraction | 0.25 | 仅有 15 日涨幅时的基础惩罚比例；偏离比例为 1 减此值 |
 
 热度历史由 `entry_heat_history_days` 控制，当前为 15 天；在顶层 `timeframe=15m` 且 `startup_candle_count=1441` 时，对应 1441 根已收盘 K 线。趋势和热度 ATR 周期由 `atr_period` 控制，当前为 Wilder ATR14。`startup_candle_count` 必须覆盖公开配置中的热度和指标窗口，策略启动校验会拒绝历史不足的组合；修改配置后需要重启进程。
 
@@ -150,19 +128,15 @@
 
 | 配置键 | 当前值 | 作用 |
 |---|---:|---|
-| replacement_entry_score | 50.0 | 普通轮换原始目标门槛；实际与模型最严门槛取较大值，为 54 |
 | replacement_weak_score | 45.0 | 普通轮换旧仓原评分必须低于此值 |
 | replacement_score_gap | 10.0 | 普通目标买入评分至少领先旧仓原评分 10 分 |
 | replacement_confirmations | 2 | 普通通道需要 2 根连续不同的已收盘 15m K 线确认 |
 | replacement_min_age_minutes | 30 | 普通旧仓最短持有 30 分钟 |
 | replacement_cooldown_minutes | 30 | 普通轮换冷却 30 分钟 |
 | replacement_no_new_high_candles | 4 | 旧仓最近 4 根 1h K 线中，最新高点不得超过此前 3 根高点 |
-| replacement_weak_bottom_ratio | 0.20 | 只有全部有效原评分后 20% 的旧仓具备轮换资格 |
-| replacement_target_top_ratio | 0.10 | 只有排除已有仓位后买入评分前 10% 的候选可作为目标 |
-| replacement_candidate_hysteresis | 3.0 | 候选切换的评分滞后范围，减少候选来回切换 |
+| replacement_candidate_hysteresis | 3.0 | 仅当前三项优先字段（阶段、突破新鲜度、相对放量）相同时，允许按评分差保留上一候选 |
 | replacement_reentry_cooldown_minutes | 30 | 轮换后同一交易对重新进入的冷却时间 |
 | replacement_fast_enabled | true | 启用快速轮换 |
-| replacement_fast_entry_score | 60.0 | 快速目标最低买入评分，仍为 60 |
 | replacement_fast_score_gap | 15.0 | 快速目标至少领先旧仓原评分 15 分 |
 | replacement_fast_confirmations | 1 | 快速通道需要 1 根已收盘 15m K 线确认 |
 | replacement_fast_min_age_minutes | 15 | 快速旧仓最短持有 15 分钟 |
@@ -175,7 +149,7 @@
 | replacement_fast_close_location | 0.65 | 收盘位于本根振幅的 65% 以上 |
 | replacement_fast_max_breakout_atr | 1.0 | 突破前高后最多超出 1 ATR |
 
-快速通道的核心分上限 97 来自动量 44 分、放量 27 分和主动买 26 分；`replacement_fast_core_score=75` 表示至少取得其中 75 分，维持约 77.3% 的严格程度。快速通道不要求旧仓原评分低于 45，但仍要求旧仓处于全评分池后 20%，并通过 1h 走弱、回撤和最近 3 根 1h 高点保护条件；目标必须处于排除持仓后的前 10%，再通过分层漏斗中的硬条件、形态检查及 15m 突破、量比、主动买和收盘位置检查。普通轮换目标门槛取模型最严门槛 54 与 `replacement_entry_score=50` 的较大值，即 54；快速轮换仍为 60。
+快速通道的核心分上限 97 来自动量 44 分、放量 27 分和主动买 26 分；`replacement_fast_core_score=75` 表示至少取得其中 75 分，维持约 77.3% 的严格程度。快速通道不要求旧仓原评分低于 45，但仍要求旧仓通过 1h 走弱、回撤和最近 3 根 1h 高点保护条件；目标不受前 10% 限制，按与普通新仓相同的启动新鲜度、整理突破、相对放量及强度分优先序逐个检查，并通过分层漏斗中的硬条件、形态检查及 15m 突破、量比、主动买和收盘位置检查。普通与快速通道的目标门槛都取 `entry_risk_base_score + entry_risk_premium × 风险占用`（按当前账户占用计算，当前配置下约 53.3～60），不再附加通道固定分数。
 
 ## 轮换审计记录
 
@@ -203,13 +177,11 @@
 | `momentum_lookback_candles` / `trend_continuity_candles` | 4 / 3 | 动量和收盘连续性窗口 |
 | `volume_window_candles` / `volume_baseline_windows` | 3 / 20 | 近期均量窗口和此前短期基准根数 |
 | `candle_min_history` / `oi_sample_count` | 21 / 4 | 评分 K 线最少历史；OI 样本数为停用保留参数 |
-| `liquidation_window_seconds` / `liquidation_recent_seconds` | 3600 / 900 | 停用保留的强平窗口参数 |
 | `score_refresh_seconds` / `score_candle_close_delay_seconds` | 900 / 30 | 评分最长间隔；下一根 15m 收盘后等待 30 秒再刷新 |
 | `exit_evaluation_failure_limit` | 6 | 同一持仓退出评估连续失败达到该次数后暂停新开仓并告警 |
 | `metric_request_timeout_seconds` / `funding_request_timeout_seconds` | 10 / 5 | 远端指标和资金费率请求超时 |
 | `metric_request_retries` / `metric_retry_backoff_seconds` | 1 / 0.5 | 网络或 HTTP 临时错误的单次有限重试和初始退避 |
 | `raw_metrics_log_enabled` | `false` | 是否打印独立的原始指标与资金费率明细表；不影响评分 |
-| `liquidation_open_timeout_seconds` / `liquidation_close_timeout_seconds` / `liquidation_receive_timeout_seconds` / `liquidation_reconnect_seconds` | 10 / 1 / 30 / 5 | 停用保留的强平流网络参数 |
 | `position_sync_seconds` / `position_stale_seconds` | 30 / 60 | 仓位同步和状态过旧阈值 |
 | `risk_state_checkpoint_seconds` | 60 | 例行权益状态写盘间隔；轮换变化仍立即保存 |
 
@@ -219,7 +191,7 @@
 
 ## 当前评分取舍
 
-OI 下降既可能来自空头回补，也可能来自多头平仓；强平快照同样不能稳定区分方向。当前将两项权重设为 0，并同步停止 OI 请求、强平流及其开仓门禁，避免低置信度指标影响交易或因远端故障暂停策略。释放出的 8 分分配给动量、放量和主动买盘，三项合计 97 分。快速核心门槛从 69/89 同比调整为 75/97，保持约 77% 的严格程度。
+OI 下降既可能来自空头回补，也可能来自多头平仓。当前把 OI 权重设为 0，并同步停止 OI 请求；强平评分、强平数据流及其开仓门禁已整块删除，避免低置信度指标影响交易或因远端故障暂停策略。释放出的 8 分分配给动量、放量和主动买盘，三项合计 97 分。快速核心门槛从 69/89 同比调整为 75/97，保持约 77% 的严格程度。
 
 资金费率保留 3 分权重，但改为有符号调整：负费率最多加 3 分，正费率最多扣 3 分，缺失或过期时回到 0 且不阻止开仓。放量仍使用周基准持续活跃度和短基准新增放量；主动买普通评分汇总三根已收盘 15m，快速突破保留最新单根信号。上述分配是待实盘日志验证的起点，不是已证实的最优解。OI 的含义可参考 [CME Open Interest](https://www.cmegroup.com/education/lessons/open-interest)。
 

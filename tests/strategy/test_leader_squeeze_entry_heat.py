@@ -1,4 +1,4 @@
-"""Entry heat discounts must not turn a winning holding into a weak rotation candidate."""
+"""Fifteen-day heat informs entry shape without changing strength scores."""
 
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -29,13 +29,17 @@ def _frame(kind="extended", first=100.0):
         closes = [first] * 1360 + [100 + 65 * i / 79 for i in range(80)] + [180.0]
     else:
         closes = [first] * 500 + [179.0] * 940 + [180.0]
+    volume = [100.0] * 1441
+    if kind == "cooled":
+        # Launch detection requires a volume-confirmed close above the box.
+        volume[-1] = 200.0
     return pd.DataFrame(
         {
             "date": pd.date_range(end=NOW, periods=1441, freq="15min") - pd.Timedelta(minutes=15),
             "close": closes,
             "high": [value + 0.5 for value in closes],
             "low": [value - 0.5 for value in closes],
-            "volume": 100.0,
+            "volume": volume,
         }
     )
 
@@ -49,6 +53,9 @@ def _strategy(frame):
             if key.startswith(("entry_heat_", "entry_setup_"))
         }
     )
+    strategy._candidate_pairs = [PAIR]
+    strategy._occupied_pairs = Mock(return_value=set())
+    strategy.settings["entry_setup_enabled"] = True
     strategy.dp = SimpleNamespace(get_pair_dataframe=Mock(return_value=frame))
     strategy._candle_metrics = Mock(return_value={"momentum": 0.05, "trend_continuity": 1.0})
     strategy._trend_reversed = Mock(return_value=False)
@@ -62,22 +69,26 @@ def _heat(strategy):
         return strategy._entry_heat_metrics(PAIR)
 
 
-def test_extended_and_cooled_breakouts_with_same_return_receive_different_penalties():
-    extended = _heat(_strategy(_frame()))
-    cooled = _heat(_strategy(_frame("cooled")))
+def test_same_fifteen_day_return_can_have_different_entry_shape():
+    extended_strategy = _strategy(_frame())
+    cooled_strategy = _strategy(_frame("cooled"))
+    extended = _heat(extended_strategy)
+    cooled = _heat(cooled_strategy)
     assert extended["return_15d"] == cooled["return_15d"] == pytest.approx(0.8)
-    assert extended["penalty"] == pytest.approx(0.16)
+    assert "penalty" not in extended
     assert cooled["cooled_breakout"] == 1
-    assert cooled["penalty"] == pytest.approx(0.01)
+    assert extended_strategy._current_score(PAIR) == cooled_strategy._current_score(PAIR)
+    with patch.object(MODULE.time, "time", return_value=NOW.timestamp()):
+        assert extended_strategy._entry_setup_metrics(PAIR)["late"] == 1
+        assert cooled_strategy._entry_setup_metrics(PAIR)["stage"] == "启动"
 
 
-def test_recent_appreciation_increases_discount_but_never_increases_base_score():
-    penalties = [
-        _heat(_strategy(_frame(first=price)))["penalty"] for price in (200.0, 150.0, 100.0, 50.0)
-    ]
-    assert penalties == sorted(penalties)
-    assert penalties[0] == 0
-    assert penalties[-1] == pytest.approx(0.20)
+def test_recent_appreciation_is_context_and_does_not_change_current_score():
+    strategies = [_strategy(_frame(first=price)) for price in (200.0, 150.0, 100.0, 50.0)]
+    returns = [_heat(strategy)["return_15d"] for strategy in strategies]
+    scores = [strategy._current_score(PAIR) for strategy in strategies]
+    assert returns == sorted(returns)
+    assert scores == [90.0] * len(strategies)
 
 
 def test_breakout_relief_requires_close_above_box_and_no_large_overshoot():
@@ -106,7 +117,7 @@ def test_unclosed_spike_cannot_change_heat_and_signal_spike_cannot_inflate_own_a
 @pytest.mark.parametrize(
     "fault", ["short", "stale", "gap", "invalid_ohlc", "missing_high", "zero_atr"]
 )
-def test_invalid_history_blocks_buy_but_preserves_holding_score(fault):
+def test_invalid_history_blocks_new_entry_but_preserves_holding_score(fault):
     frame = _frame()
     if fault == "short":
         frame = frame.iloc[1:]
@@ -133,9 +144,10 @@ def test_invalid_history_blocks_buy_but_preserves_holding_score(fault):
     strategy._execution_is_safe.assert_not_called()
 
 
-def test_discounted_score_controls_ranking_threshold_and_order_confirmation():
+def test_raw_strength_ranks_candidates_while_late_chase_gate_still_applies():
     strategy = _strategy(_frame())
     strategy._scores = {PAIR: 46.0, "COOL": 44.0}
+    strategy._candidate_pairs = [PAIR, "COOL"]
     strategy._metrics["COOL"] = strategy._metrics[PAIR].copy()
     strategy.dp.get_pair_dataframe.side_effect = lambda pair, timeframe: (
         _frame() if pair == PAIR else _frame("cooled")
@@ -144,57 +156,55 @@ def test_discounted_score_controls_ranking_threshold_and_order_confirmation():
         patch.object(MODULE.time, "time", return_value=NOW.timestamp()),
         patch.object(MODULE.Trade, "get_open_trades", return_value=[]),
     ):
-        assert strategy._ranked_pairs()[0][0] == "COOL"
+        assert strategy._ranked_pairs()[0][0] == PAIR
         assert strategy._select_entries() == {"COOL"}
         assert "末端过热" in strategy._entry_decisions[PAIR]
         assert not strategy.confirm_trade_entry(PAIR, "market", 1, 180, "GTC", NOW, None, "long")
 
 
-def test_order_confirmation_recomputes_heat_after_orderbook_request():
+def test_order_confirmation_rechecks_entry_shape_after_selection():
     frame = _frame("cooled")
     strategy = _strategy(frame)
     strategy._scores[PAIR] = 42.0
-
-    def change_heat(*args, **kwargs):
-        frame.loc[1440, ["close", "high", "low"]] = [200.0, 201.0, 199.0]
-        return True
-
-    strategy._execution_is_safe.side_effect = change_heat
+    with patch.object(MODULE.time, "time", return_value=NOW.timestamp()):
+        good = strategy._entry_setup_metrics(PAIR)
+    late = {**good, "stage": "末端", "late": 1.0, "extension_atr": 6.0}
+    setup_calls = iter((good, late))
+    strategy._entry_setup_metrics = Mock(side_effect=lambda pair: next(setup_calls))
     with (
         patch.object(MODULE.time, "time", return_value=NOW.timestamp()),
         patch.object(MODULE.Trade, "get_open_trades", return_value=[]),
     ):
-        assert strategy._entry_score(PAIR) > 40
+        assert strategy._select_entries() == {PAIR}
+        strategy._entry_pairs = {PAIR}
         assert not strategy.confirm_trade_entry(PAIR, "market", 1, 180, "GTC", NOW, None, "long")
         assert "末端过热" in strategy._entry_block_reason
     strategy._execution_is_safe.assert_called_once()
 
 
-def test_rotation_uses_undiscounted_old_holding_and_discounted_new_target():
+def test_rotation_uses_unmodified_strength_scores():
     strategy = _strategy(_frame())
     strategy._scores = {"OLD": 52.0, PAIR: 70.0}
     strategy._metrics["OLD"] = strategy._metrics[PAIR].copy()
+    strategy._candidate_pairs = ["OLD", PAIR]
+    strategy._rotation_floor = Mock(return_value=40.0)
     with patch.object(MODULE.time, "time", return_value=NOW.timestamp()):
-        assert strategy._entry_score("OLD") < 50
         assert strategy._current_score("OLD") == 52
         assert not strategy._rotation_scores_qualify("OLD", PAIR)
         strategy._scores.update({"OLD": 44.0, PAIR: 60.0})
-        assert not strategy._rotation_scores_qualify("OLD", PAIR)  # 50.4 - 44 < 10.
-        strategy._scores[PAIR] = 70.0
         assert strategy._rotation_scores_qualify("OLD", PAIR)
 
 
 @pytest.mark.parametrize(
     ("key", "value"),
     [
-        ("entry_heat_max_penalty", -0.1),
-        ("entry_heat_max_penalty", 0.6),
-        ("entry_heat_max_penalty", True),
-        ("entry_heat_return_scale", 0),
         ("entry_heat_extension_start_atr", -1),
         ("entry_heat_extension_full_atr", 2),
         ("entry_heat_extension_full_atr", 5),
         ("entry_heat_extension_full_atr", float("nan")),
+        ("entry_setup_launch_candles", 0),
+        ("entry_setup_breakout_volume_multiple", 11),
+        ("entry_setup_late_extension_atr", 1),
     ],
 )
 def test_invalid_heat_configuration_is_rejected(key, value):
@@ -204,20 +214,18 @@ def test_invalid_heat_configuration_is_rejected(key, value):
         strategy._validate_entry_heat_settings()
 
 
-def test_disabled_heat_does_not_require_long_history():
+def test_disabled_setup_does_not_require_long_history():
     strategy = _strategy(pd.DataFrame())
-    strategy.settings["entry_heat_max_penalty"] = 0
-    assert strategy._entry_score(PAIR) == 90
+    strategy.settings["entry_setup_enabled"] = False
+    assert strategy._entry_setup_metrics(PAIR) == {"stage": "中继", "score": 100.0, "late": 0.0}
     strategy.dp.get_pair_dataframe.assert_not_called()
 
 
-def test_zero_heat_discount_keeps_setup_and_late_chase_protection_enabled():
+def test_fifteen_day_return_is_not_a_score_discount():
     strategy = _strategy(_frame())
-    strategy.settings["entry_heat_max_penalty"] = 0
 
     with patch.object(MODULE.time, "time", return_value=NOW.timestamp()):
-        assert strategy._entry_score(PAIR) == 90
-        strategy.dp.get_pair_dataframe.assert_not_called()
+        assert strategy._current_score(PAIR) == 90
         setup = strategy._entry_setup_metrics(PAIR)
 
     assert setup is not None
@@ -244,7 +252,6 @@ def test_cooled_breakout_uses_separate_hard_extension_limit_for_selection_and_co
             "cooled_breakout": cooled_breakout,
             "breakout_age_candles": 0.0 if cooled_breakout else float("nan"),
             "breakout_distance_atr": 0.0 if cooled_breakout else float("nan"),
-            "penalty": 0.0,
         }
     )
     with (
@@ -269,6 +276,7 @@ def test_real_cooled_breakout_detection_reaches_the_relaxed_selection_path(close
     frame = _frame("cooled")
     frame.loc[1439, ["close", "high", "low"]] = [180.0, 180.5, 179.5]
     frame.loc[1440, ["close", "high", "low"]] = [close, close + 0.5, close - 0.5]
+    frame.loc[1439, "volume"] = 200.0
     strategy = _strategy(frame)
 
     with (
@@ -308,7 +316,7 @@ def test_short_history_still_allows_existing_position_to_exit_on_a_break():
         assert strategy.custom_exit(PAIR, SimpleNamespace(), NOW, 95, -0.05) == "trend_reversal"
 
 
-def test_expired_funding_is_removed_before_applying_entry_discount():
+def test_expired_funding_is_removed_from_the_current_score():
     strategy = _strategy(_frame())
     strategy._metrics[PAIR].update(
         {
@@ -319,9 +327,9 @@ def test_expired_funding_is_removed_before_applying_entry_discount():
         }
     )
     with patch.object(MODULE.time, "time", return_value=NOW.timestamp()):
-        assert strategy._entry_score(PAIR) == pytest.approx(90 * 0.84)
+        assert strategy._current_score(PAIR) == pytest.approx(90)
     with patch.object(MODULE.time, "time", return_value=NOW.timestamp() + 11):
-        assert strategy._entry_score(PAIR) == pytest.approx(87 * 0.84)
+        assert strategy._current_score(PAIR) == pytest.approx(87)
 
 
 def test_real_candles_allow_a_healthy_entry_with_heat_enabled():
@@ -334,12 +342,12 @@ def test_real_candles_allow_a_healthy_entry_with_heat_enabled():
         patch.object(MODULE.time, "time", return_value=NOW.timestamp()),
         patch.object(MODULE.Trade, "get_open_trades", return_value=[]),
     ):
-        assert strategy._entry_heat_metrics(PAIR)["penalty"] > 0
+        assert strategy._entry_heat_metrics(PAIR)["cooled_breakout"] == 1
         assert strategy._select_entries() == {PAIR}
         assert strategy.confirm_trade_entry(PAIR, "market", 1, 180, "GTC", NOW, None, "long")
 
 
-def test_heat_log_shows_real_discount_and_buy_score(caplog):
+def test_heat_log_shows_shape_context_without_changing_buy_score(caplog):
     strategy = _strategy(_frame())
     strategy._liquidation_score = Mock(return_value=0.5)
     strategy._market_id = lambda pair: pair
@@ -362,16 +370,18 @@ def test_heat_log_shows_real_discount_and_buy_score(caplog):
         for record in caplog.records
         if "评分综合明细" in record.getMessage()
     )
-    assert "+80.0%" in score_table.columns[5]._cells[0].plain
-    assert "折16.0%" in score_table.columns[5]._cells[0].plain
+    heat_cell = score_table.columns[5]._cells[0].plain
+    assert "+80.0%" in heat_cell
+    assert "偏" in heat_cell
+    assert "形" in heat_cell
+    assert "折" not in heat_cell
     assert float(score_table.columns[2]._cells[0].plain) == pytest.approx(
-        strategy._scores[PAIR] * 0.84, abs=0.05
+        strategy._scores[PAIR], abs=0.05
     )
 
 
-def test_setup_remains_visible_when_heat_discount_is_disabled(caplog):
+def test_setup_remains_visible_and_fifteen_day_return_does_not_discount_score(caplog):
     strategy = _strategy(_frame("cooled"))
-    strategy.settings["entry_heat_max_penalty"] = 0
     strategy._liquidation_score = Mock(return_value=0.5)
     strategy._market_id = lambda pair: pair
     metric = {
@@ -397,7 +407,7 @@ def test_setup_remains_visible_when_heat_discount_is_disabled(caplog):
     )
     heat_cell = score_table.columns[5]._cells[0].plain
     assert "形" in heat_cell
-    assert "折0.0%" in heat_cell
+    assert "折" not in heat_cell
     assert float(score_table.columns[2]._cells[0].plain) == pytest.approx(
         strategy._scores[PAIR], abs=0.05
     )
@@ -430,5 +440,5 @@ def test_disabled_setup_is_reported_as_disabled_instead_of_fake_score(caplog):
         if "评分综合明细" in record.getMessage()
     )
     heat_cell = score_table.columns[5]._cells[0].plain
-    assert "形关闭" in heat_cell
+    assert heat_cell == "—/关闭"
     assert "形中继100" not in heat_cell

@@ -74,6 +74,20 @@ def test_missing_entry_volatility_blocks_the_order():
     )
 
 
+def test_disabled_initial_stop_sizes_against_the_global_stop() -> None:
+    strategy = configured_strategy(LeaderSqueezeStrategy)
+    strategy.settings["entry_risk_initial_stop_enabled"] = False
+    strategy.wallets = SimpleNamespace(get_total_stake_amount=lambda: 990)
+    strategy._profit_entry_atr = Mock(side_effect=AssertionError("ATR is not the active stop"))
+
+    margin = strategy.custom_stake_amount(
+        "BTC/USDT:USDT", datetime.now(UTC), 100, 165, 5, 990, 5, None, "long"
+    )
+
+    assert margin == pytest.approx(9.9)
+    strategy._profit_entry_atr.assert_not_called()
+
+
 @pytest.mark.parametrize("ratio", [0, -0.1, float("nan"), True, 0.2])
 def test_ratio_must_allow_normal_positions_and_buy_first_rotation(ratio):
     strategy = configured_strategy(LeaderSqueezeStrategy)

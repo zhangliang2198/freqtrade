@@ -42,6 +42,8 @@ def _scenario(branch):
     # 7-day activity baseline, so shrink that configurable lookback here while
     # keeping the reversal candles and their purpose unchanged.
     strategy.settings["volume_activity_baseline_candles"] = 96
+    strategy.settings["entry_setup_enabled"] = False
+    strategy._candidate_pairs = [PAIR]
     # These tests exercise the real candle and trend implementations.
     strategy.__dict__.pop("_candle_metrics", None)
     strategy.__dict__.pop("_trend_reversed", None)

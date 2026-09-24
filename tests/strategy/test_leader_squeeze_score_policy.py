@@ -39,11 +39,7 @@ def _score_strategy() -> LeaderSqueezeStrategy:
         **configured_settings(),
         "weights": configured_settings()["weights"].copy(),
     }
-    # Score-policy tests assert the pre-existing component arithmetic.  Heat
-    # aware entry tests supply a complete 15-day history explicitly.
-    strategy.settings["entry_heat_max_penalty"] = 0
     strategy._market_id = lambda pair: pair
-    strategy._liquidation_score = lambda symbol, now: 0.0
     return strategy
 
 
@@ -79,6 +75,7 @@ def _apply(
 ) -> dict[str, float]:
     valid = {pair: item.copy() for pair, item in metrics.items()}
     all_metrics = {pair: item.copy() for pair, item in metrics.items()}
+    strategy._candidate_pairs = list(valid)
     strategy._apply_scores(1_000.0, valid, all_metrics)
     return strategy._scores
 
@@ -110,7 +107,7 @@ def test_score_weights_prioritize_direct_price_volume_and_buying_evidence() -> N
     assert weights["taker_buy"] == pytest.approx(0.26)
     assert weights["oi_squeeze"] == pytest.approx(0.0)
     assert "adl_risk" not in weights
-    assert len(weights) == 6
+    assert len(weights) == 5
     assert sum(weights.values()) == pytest.approx(1.0)
     score = _apply(strategy, {PAIR: _metric()})[PAIR]
 
@@ -181,6 +178,8 @@ def _entry_strategy(scores: dict[str, float]) -> LeaderSqueezeStrategy:
     strategy._scores = scores
     strategy._metrics = {pair: _metric() for pair in scores}
     strategy._score_leaders = list(scores)
+    strategy._candidate_pairs = list(scores)
+    strategy._score_pairs = list(scores)
     strategy._candle_metrics = Mock(side_effect=lambda pair: strategy._metrics[pair])
     strategy._trend_reversed = Mock(return_value=False)
     strategy._entry_pair_available = Mock(return_value=True)
@@ -256,16 +255,14 @@ def _rotation_strategy(weak_score: float, target_score: float) -> LeaderSqueezeS
     return strategy
 
 
-@pytest.mark.parametrize(
-    ("weak_score", "target_score", "qualifies"),
-    [(40.0, 53.9, False), (44.0, 53.99, False), (44.0, 54.0, True)],
-)
-def test_rotation_target_uses_the_strictest_risk_floor_and_a_10_point_gap(
-    weak_score: float, target_score: float, qualifies: bool
+@pytest.mark.parametrize(("floor_delta", "qualifies"), [(-0.01, False), (0.0, True)])
+def test_rotation_target_uses_the_current_dynamic_risk_floor(
+    floor_delta: float, qualifies: bool
 ) -> None:
-    """Rotation is the most demanding entry, so it clears the fully-concentrated floor."""
-    strategy = _rotation_strategy(weak_score, target_score)
+    strategy = _rotation_strategy(44.0, 60.0)
     current_time = ETH_TEST_NOW
+    floor = strategy._rotation_floor(TARGET, {WEAK})
+    strategy._scores[TARGET] = floor + floor_delta
     weak_trade = SimpleNamespace(
         pair=WEAK,
         is_short=False,
@@ -316,11 +313,12 @@ def test_eth_downtrend_blocks_select_confirm_and_rotation_even_at_100_points() -
     assert strategy._rotation_seen == 0
 
 
-def test_rotation_does_not_fall_back_when_bottom_ranked_holding_is_too_young() -> None:
+def test_rotation_uses_next_eligible_weak_holding_when_lowest_is_too_young() -> None:
     strategy = _rotation_strategy(40.0, 60.0)
     strategy.settings["max_positions"] = 2
     strategy._scores.update({"YOUNG": 20.0, "UNSAFE": 90.0})
     strategy._metrics.update({"YOUNG": _metric(), "UNSAFE": _metric()})
+    strategy._candidate_pairs = [TARGET, "YOUNG", "UNSAFE"]
     strategy._execution_is_safe = Mock(side_effect=lambda pair: pair != "UNSAFE")
     trades = [
         SimpleNamespace(
@@ -330,8 +328,9 @@ def test_rotation_does_not_fall_back_when_bottom_ranked_holding_is_too_young() -
     ]
     with patch.object(MODULE.Trade, "get_open_trades", return_value=trades):
         strategy._plan_rotation(ETH_TEST_NOW.timestamp() + 3600, ETH_TEST_NOW)
-    assert strategy._rotation_candidate is None
-    strategy._execution_is_safe.assert_not_called()
+    assert strategy._rotation_candidate == (WEAK, TARGET)
+    strategy._execution_is_safe.assert_any_call("UNSAFE")
+    strategy._execution_is_safe.assert_any_call(TARGET)
 
 
 def test_unsubmitted_rotation_is_cancelled_when_score_gap_disappears() -> None:
@@ -348,6 +347,7 @@ def test_unsubmitted_rotation_is_cancelled_when_score_gap_disappears() -> None:
 @pytest.mark.parametrize("held_count,allowed", [(0, True), (1, True), (20, False)])
 def test_confirmation_checks_actual_position_count_after_funding_expires(held_count, allowed):
     strategy = _entry_strategy({PAIR: 46.0})
+    strategy.settings["max_positions"] = 21
     strategy.settings["entry_risk_cluster_max_positions"] = 21
     strategy._metrics[PAIR].update(
         {
@@ -359,6 +359,9 @@ def test_confirmation_checks_actual_position_count_after_funding_expires(held_co
     )
     strategy._entry_pairs = {PAIR}
     trades = [SimpleNamespace(pair=f"HELD-{n}") for n in range(held_count)]
+    floor, _, _ = strategy._entry_risk_floor(
+        PAIR, held_count + 1, sorted(trade.pair for trade in trades)
+    )
     with patch.object(MODULE.Trade, "get_open_trades", return_value=trades):
         assert (
             strategy.confirm_trade_entry(
@@ -367,7 +370,7 @@ def test_confirmation_checks_actual_position_count_after_funding_expires(held_co
             is allowed
         )
     if not allowed:
-        assert "43.0 < 门槛 54.0" in strategy._entry_block_reason
+        assert f"评分 43.0 < 门槛 {floor:.1f}" in strategy._entry_block_reason
         strategy._execution_is_safe.assert_not_called()
 
 
@@ -411,7 +414,6 @@ def test_public_config_matches_strategy_policy_and_keeps_margin_and_risk_limits(
         "entry_setup_min_score",
         "min_trend_continuity",
         "momentum_full_score",
-        "liquidation_min_notional",
         "replacement_score_gap",
         "weights",
     ):

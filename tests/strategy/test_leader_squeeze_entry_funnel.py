@@ -36,11 +36,11 @@ def _funnel_strategy(
     strategy.settings = configured_settings()
     strategy.settings["max_positions"] = max_positions
     strategy.settings["entry_risk_cluster_max_positions"] = max_positions + 1
-    # The setup stage is supplied by the test double; disable the underlying
-    # 15-day heat fetch so these tests exercise only the funnel contract.
-    strategy.settings["entry_heat_max_penalty"] = 0
+    strategy.settings["entry_setup_enabled"] = True
     strategy._scores = scores
     strategy._score_leaders = list(scores)
+    # Entry is restricted to the strategy's current core/scout candidate pool.
+    strategy._candidate_pairs = list(scores)
     strategy._metrics = {pair: _fresh_score_metric() for pair in scores}
     strategy._candle_metrics = Mock(return_value=_fresh_score_metric())
     strategy._trend_reversed = Mock(return_value=False)
@@ -86,7 +86,7 @@ def test_strength_ranking_only_sees_setup_qualified_candidates() -> None:
     assert strategy._entry_decisions["SAFE"].startswith("入选第1仓")
 
 
-def test_setup_shortlist_keeps_top_forty_percent_with_a_ten_candidate_floor() -> None:
+def test_all_setup_qualified_candidates_reach_risk_and_capacity_stages() -> None:
     pairs = [f"PAIR-{index:02d}" for index in range(25)]
     strategy = _funnel_strategy(
         {pair: 100.0 - index for index, pair in enumerate(pairs)},
@@ -96,11 +96,12 @@ def test_setup_shortlist_keeps_top_forty_percent_with_a_ten_candidate_floor() ->
     with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
         assert len(strategy._select_entries()) == 10
 
-    assert strategy._entry_funnel_rows[2] == ["3 形态短名单", "25", "10", "15", "前40%, 至少10个"]
-    assert sum("形态排名未进前40%" in reason for reason in strategy._entry_decisions.values()) == 15
+    assert strategy._entry_funnel_rows[1][:4] == ["2 硬条件/形态", "25", "25", "0"]
+    assert strategy._entry_funnel_rows[4][:4] == ["5 容量截断", "25", "10", "15"]
+    assert not any("排名未进" in reason for reason in strategy._entry_decisions.values())
 
 
-def test_disabling_setup_keeps_every_hard_eligible_candidate_in_shortlist() -> None:
+def test_disabling_setup_keeps_every_candidate_without_a_shape_cutoff() -> None:
     pairs = [f"PAIR-{index:02d}" for index in range(25)]
     strategy = _funnel_strategy(
         {pair: 100.0 - index for index, pair in enumerate(pairs)},
@@ -112,14 +113,12 @@ def test_disabling_setup_keeps_every_hard_eligible_candidate_in_shortlist() -> N
         selected = strategy._select_entries()
         assert len(selected) == 10
 
-    assert strategy._entry_funnel_rows[2] == [
-        "3 形态短名单",
+    assert strategy._entry_funnel_rows[1][:4] == [
+        "2 硬条件/形态",
         "25",
         "25",
         "0",
-        "形态筛选关闭",
     ]
-    assert not any("形态排名未进" in reason for reason in strategy._entry_decisions.values())
     assert all("形态关闭" in strategy._entry_decisions[pair] for pair in selected)
     assert all(row[2:4] == ["关闭", "—"] for row in strategy._entry_funnel_candidates)
 
@@ -134,8 +133,8 @@ def test_capacity_cutoff_is_not_reported_as_a_strength_rejection() -> None:
     with patch.object(MODULE.Trade, "get_open_trades", return_value=[]):
         assert len(strategy._select_entries()) == 10
 
-    assert strategy._entry_funnel_rows[3][0:4] == ["4 风险门槛/上限", "10", "10", "0"]
-    assert strategy._entry_funnel_rows[5] == ["6 容量截断", "12", "10", "2", "本轮可用名额10"]
+    assert strategy._entry_funnel_rows[2][0:4] == ["3 风险门槛/上限", "10", "10", "0"]
+    assert strategy._entry_funnel_rows[4] == ["5 容量截断", "30", "10", "20", "本轮可用名额10"]
 
 
 def test_funnel_log_table_shows_stage_counts_and_final_slot(caplog) -> None:
@@ -148,9 +147,9 @@ def test_funnel_log_table_shows_stage_counts_and_final_slot(caplog) -> None:
 
     rendered = "\n".join(record.getMessage() for record in caplog.records)
     assert "入场漏斗" in rendered
-    assert "3 形态短名单" in rendered
+    assert "2 硬条件/形态" in rendered
     assert f"最终候选 {TARGET}" in rendered
-    assert "第1仓 启动 形态80.0 强度70.0/门槛40.0 相关度0.00" in rendered
+    assert "第1仓 启动 形态80.0 新鲜度— 放量— 强度70.0/门槛40.0 相关度0.00" in rendered
 
 
 def test_confirmation_rechecks_setup_after_selection() -> None:

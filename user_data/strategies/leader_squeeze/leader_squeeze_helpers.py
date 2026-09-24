@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta, timezone
 from functools import wraps
@@ -46,7 +47,6 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from websockets.sync.client import connect
 
 from freqtrade.exchange import Exchange, timeframe_to_seconds
 from freqtrade.exchange_accounting import ExchangeAccounting
@@ -65,6 +65,21 @@ LOG_SCORE = {"strategy_log_style": "magenta"}
 
 _report_cache: ContextVar[dict | None] = ContextVar("leader_report_cache", default=None)
 _decision_cache: ContextVar[dict | None] = ContextVar("leader_decision_cache", default=None)
+_quiet_warnings: ContextVar[bool] = ContextVar("leader_quiet_warnings", default=False)
+
+
+@contextmanager
+def quiet_data_warnings():
+    """序列化/重试路径内不再逐票刷"数据不可用"警告。
+
+    与 report/decision 快照一样按上下文隔离: 后台评分线程看不到这里的设置, 因此
+    不会连带吞掉它自己真正的数据告警。
+    """
+    token = _quiet_warnings.set(True)
+    try:
+        yield
+    finally:
+        _quiet_warnings.reset(token)
 
 
 def decision_snapshot(function):
@@ -91,6 +106,35 @@ def report_snapshot(function):
             return function(*args, **kwargs)
         finally:
             _report_cache.reset(token)
+
+    return wrapped
+
+
+def candle_cached(function):
+    """按主周期K线缓存"只依赖已收盘K线"的结果。
+
+    这些输入在一根K线内部不会变化, 每 5 秒重算整份白名单只是白烧 CPU; 桶边界与
+    评分刷新共用 score_candle_close_delay_seconds, 保证新K线收盘后才失效。
+    新鲜度判定仍由每轮实时执行的 _candle_metrics / _closed_candles 负责。
+    """
+
+    @wraps(function)
+    def wrapped(self, *args, **kwargs):
+        period = timeframe_to_seconds(self.timeframe)
+        delay = float(self.settings["score_candle_close_delay_seconds"])
+        bucket = int(max(0.0, time.time() - delay) // period)
+        store = self.__dict__.setdefault("_candle_cache", {})
+        if store.get("bucket") != bucket:
+            store.clear()
+            store["bucket"] = bucket
+        data = store.setdefault("data", {})
+        key = (function.__name__, args, tuple(sorted(kwargs.items())))
+        if key not in data:
+            result = function(self, *args, **kwargs)
+            if result is not None:
+                data[key] = result
+            return result
+        return data[key]
 
     return wrapped
 
@@ -309,26 +353,22 @@ class LeaderMixinContext:
     _candle_metrics: Any
     _clear_rotation: Any
     _closed_candles: Any
+    _candidate_pairs: list[str]
     _current_score: Any
     _data_healthy: Any
     _entry_block_reason: Any
     _entry_decisions: Any
     _entry_heat_metrics: Any
     _entry_pairs: Any
-    _entry_score: Any
     _entry_setup_metrics: Any
     _external_pairs: Any
     _fast_rotation_quality: Any
     _funding_score: Any
     _last_good_data: Any
     _last_position_sync: Any
+    _last_score_fetch_seconds: float
     _last_status_log: float
     _last_status_signature: tuple[Any, ...] | None
-    _liquidation_connected: Any
-    _liquidation_last_message: float
-    _liquidation_lock: Any
-    _liquidation_started: float
-    _liquidations: Any
     _log_profit_position_table: Any
     _market_data_healthy: Any
     _market_down: Any
@@ -336,6 +376,7 @@ class LeaderMixinContext:
     _metrics_current: Any
     _multi_timeframe_snapshot: Any
     _next_score_refresh: Any
+    _occupied_pairs: Any
     _opening_score_label: Any
     _pair_score_current: Any
     _position_data_healthy: Any
@@ -344,6 +385,7 @@ class LeaderMixinContext:
     _ranked_pairs: Any
     _record_rotation_event: Any
     _required_leader_count: Any
+    _required_candidate_count: Any
     _risk_state: dict[str, Any]
     _rotation_candidate: tuple[str, str] | None
     _rotation_entry_tag: Any
@@ -359,7 +401,6 @@ class LeaderMixinContext:
     _score_result_lock: Any
     _scores: dict[str, float]
     _state_path: Any
-    _stop_event: Any
     _trend_context: Any
     _trend_candles: Any
     _trend_history_count: Any
@@ -519,6 +560,19 @@ def entry_risk_stake_amount(
     """
     risk_sized = float(capital) * float(risk_ratio) / (float(stop_fraction) * float(leverage))
     return min(float(capital) * float(max_stake_ratio), risk_sized)
+
+
+def coverage_deadline(deadlines: Sequence[float], required: int) -> float:
+    """Latest timestamp at which ``required`` samples are still valid.
+
+    Taking the minimum over every sample lets one laggard expire the whole
+    snapshot; taking the coverage-quantile keeps the same safety ratio while
+    ignoring the slowest minority.
+    """
+    usable = sorted(float(value) for value in deadlines if value and float(value) > 0)
+    if required <= 0 or len(usable) < required:
+        return 0.0
+    return usable[len(usable) - required]
 
 
 def entry_risk_cluster_size(correlations: Sequence[float], *, threshold: float) -> int:
@@ -795,8 +849,6 @@ class LeaderConfigMixin(LeaderMixinContext):
     def _validate_entry_pipeline_settings(self) -> None:
         self._validate_entry_risk_settings()
         setup_score = self.settings["entry_setup_min_score"]
-        setup_ratio = self.settings["entry_setup_shortlist_ratio"]
-        setup_count = self.settings["entry_setup_min_candidates"]
         setup_enabled = self.settings["entry_setup_enabled"]
         setup_points = self.settings["entry_setup_score_points"]
         if (
@@ -805,14 +857,6 @@ class LeaderConfigMixin(LeaderMixinContext):
             or not 0 <= setup_score <= 100
         ):
             raise ValueError("entry_setup_min_score must be within [0, 100]")
-        if (
-            type(setup_ratio) not in (int, float)
-            or not math.isfinite(setup_ratio)
-            or not 0 < setup_ratio <= 1
-        ):
-            raise ValueError("entry_setup_shortlist_ratio must be within (0, 1]")
-        if type(setup_count) is not int or setup_count < 1:
-            raise ValueError("entry_setup_min_candidates must be a positive integer")
         if type(setup_enabled) is not bool:
             raise ValueError("entry_setup_enabled must be boolean")
         required_points = {"launch", "continuation", "extension", "compression", "proximity"}
@@ -837,26 +881,15 @@ class LeaderConfigMixin(LeaderMixinContext):
             raise ValueError("leader_squeeze weights must add up to 1.0")
         if any(not math.isfinite(v) or v < 0 for v in self.settings["weights"].values()):
             raise ValueError("leader_squeeze weights must be finite and non-negative")
-        for key in (
-            "momentum_full_score",
-            "liquidation_min_notional",
-            "replacement_score_gap",
-        ):
-            if not math.isfinite(float(self.settings[key])) or float(self.settings[key]) <= 0:
-                raise ValueError(f"leader_squeeze {key} must be positive and finite")
-        if not 0 <= float(self.settings["min_trend_continuity"]) <= 1:
-            raise ValueError("leader_squeeze min_trend_continuity must be within [0, 1]")
+        for key in ("momentum_full_score", "replacement_score_gap"):
+            _require_setting(self.settings, key, low=0, exclude_low=True)
+        _require_setting(self.settings, "min_trend_continuity", low=0, high=1)
+        # 之前漏校验: 字符串会被 float() 静默接受, 非数字则在主循环里才炸。
+        _require_setting(self.settings, "min_absolute_momentum", low=-1, high=1)
         for key in ("market_min_coverage_ratio", "market_down_ratio"):
-            if not 0 < float(self.settings[key]) <= 1:
-                raise ValueError(f"leader_squeeze {key} must be within (0, 1]")
-        if (
-            not math.isfinite(float(self.settings["status_log_seconds"]))
-            or float(self.settings["status_log_seconds"]) <= 0
-        ):
-            raise ValueError("leader_squeeze status_log_seconds must be positive and finite")
-        max_positions = self.settings["max_positions"]
-        if type(max_positions) is not int or max_positions < 1:
-            raise ValueError("leader_squeeze max_positions must be a positive integer")
+            _require_setting(self.settings, key, low=0, high=1, exclude_low=True)
+        _require_setting(self.settings, "status_log_seconds", low=0, exclude_low=True)
+        max_positions = int(_require_setting(self.settings, "max_positions", low=1, integer=True))
         self._validate_entry_pipeline_settings()
         stake_ratio = self.settings["stake_ratio"]
         if (
@@ -918,22 +951,17 @@ class LeaderConfigMixin(LeaderMixinContext):
             raise ValueError("reversal slow confirmation exceeds startup_candle_count")
 
     def _validate_entry_heat_settings(self) -> None:
-        penalty = self.settings["entry_heat_max_penalty"]
-        scale = self.settings["entry_heat_return_scale"]
+        """15 日过热只用于 5ATR 末端硬拒绝和形态评分, 不再有软折扣。"""
         start = self.settings["entry_heat_extension_start_atr"]
         full = self.settings["entry_heat_extension_full_atr"]
-        if any(
-            type(v) not in (int, float) or not math.isfinite(v)
-            for v in (penalty, scale, start, full)
-        ):
+        if any(type(v) not in (int, float) or not math.isfinite(v) for v in (start, full)):
             raise ValueError("entry heat settings must be finite numbers")
-        if not (0 <= penalty <= 0.5 and scale > 0 and 0 <= start < full):
-            raise ValueError(
-                "entry heat requires penalty within [0, .5], scale > 0, 0 <= start < full"
-            )
+        if not 0 <= start < full:
+            raise ValueError("entry heat requires 0 <= extension_start_atr < extension_full_atr")
         if (
-            penalty or self.settings["entry_setup_enabled"]
-        ) and self.startup_candle_count < self.ENTRY_HEAT_HISTORY_CANDLES:
+            self.settings["entry_setup_enabled"]
+            and self.startup_candle_count < self.ENTRY_HEAT_HISTORY_CANDLES
+        ):
             raise ValueError(
                 f"entry heat requires {self.ENTRY_HEAT_HISTORY_CANDLES} closed candles"
             )
@@ -941,6 +969,15 @@ class LeaderConfigMixin(LeaderMixinContext):
         late_atr = self.settings["entry_setup_late_extension_atr"]
         if type(launch_candles) is not int or not 1 <= launch_candles <= 8:
             raise ValueError("entry_setup_launch_candles must be an integer within [1, 8]")
+        breakout_volume = self.settings["entry_setup_breakout_volume_multiple"]
+        if (
+            type(breakout_volume) not in (int, float)
+            or not math.isfinite(breakout_volume)
+            or not 0 <= breakout_volume <= 10
+        ):
+            raise ValueError(
+                "entry_setup_breakout_volume_multiple must be a finite number within [0, 10]"
+            )
         if type(late_atr) not in (int, float) or not math.isfinite(late_atr) or late_atr <= start:
             raise ValueError("entry_setup_late_extension_atr must exceed the heat extension start")
         if full <= late_atr:
@@ -953,23 +990,15 @@ class LeaderConfigMixin(LeaderMixinContext):
         for key in (
             "momentum_return_weight",
             "volume_activity_weight",
-            "liquidation_warmup_score",
-            "entry_heat_cooled_breakout_factor",
-            "entry_heat_base_fraction",
             "replacement_fast_close_location",
         ):
-            value = self.settings[key]
-            if type(value) not in (float, int) or not math.isfinite(value) or not 0 <= value <= 1:
-                raise ValueError(f"leader_squeeze {key} must be within [0, 1]")
+            _require_setting(self.settings, key, low=0, high=1)
         for key in (
             "volume_score_full_ratio",
             "volume_activity_full_ratio",
             "taker_score_full_ratio",
-            "liquidation_score_full_ratio",
         ):
-            value = self.settings[key]
-            if type(value) not in (float, int) or not math.isfinite(value) or value <= 1:
-                raise ValueError(f"leader_squeeze {key} must exceed 1")
+            _require_setting(self.settings, key, low=1, exclude_low=True)
         for key in (
             "oi_score_full_drop",
             "entry_heat_box_max_width_atr",
@@ -980,9 +1009,8 @@ class LeaderConfigMixin(LeaderMixinContext):
             "replacement_fast_taker_ratio",
             "replacement_fast_max_breakout_atr",
         ):
-            value = self.settings[key]
-            if type(value) not in (float, int) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"leader_squeeze {key} must be positive and finite")
+            _require_setting(self.settings, key, low=0, exclude_low=True)
+        self._validate_liquidity_settings()
         self._validate_rotation_settings()
 
     def _validate_rotation_settings(self) -> None:
@@ -995,20 +1023,15 @@ class LeaderConfigMixin(LeaderMixinContext):
             ("replacement_confirmations", 1, 10),
             ("replacement_fast_confirmations", 1, 10),
         ):
-            value = self.settings[key]
-            if type(value) is not int or not low <= value <= high:
-                raise ValueError(f"leader_squeeze {key} must be an integer within [{low}, {high}]")
+            _require_setting(self.settings, key, low=low, high=high, integer=True)
         for key in (
-            "replacement_entry_score",
             "replacement_weak_score",
-            "replacement_fast_entry_score",
             "replacement_fast_core_score",
             "replacement_candidate_hysteresis",
         ):
-            value = self.settings[key]
-            if type(value) not in (float, int) or not math.isfinite(value) or not 0 <= value <= 100:
-                raise ValueError(f"leader_squeeze {key} must be within [0, 100]")
-        self._validate_rotation_ratio_settings()
+            _require_setting(self.settings, key, low=0, high=100)
+        for key in ("replacement_score_gap", "replacement_fast_score_gap"):
+            _require_setting(self.settings, key, low=0, exclude_low=True)
         for key in (
             "replacement_min_age_minutes",
             "replacement_cooldown_minutes",
@@ -1016,13 +1039,9 @@ class LeaderConfigMixin(LeaderMixinContext):
             "replacement_fast_cooldown_minutes",
             "replacement_reentry_cooldown_minutes",
         ):
-            value = self.settings[key]
-            if type(value) not in (float, int) or not math.isfinite(value) or value < 0:
-                raise ValueError(f"leader_squeeze {key} must be non-negative and finite")
+            _require_setting(self.settings, key, low=0)
         if type(self.settings["replacement_fast_enabled"]) is not bool:
             raise ValueError("replacement_fast_enabled must be boolean")
-        if self.settings["replacement_fast_entry_score"] < self.settings["replacement_entry_score"]:
-            raise ValueError("fast entry score must be >= normal entry score")
         if self.settings["replacement_fast_score_gap"] < self.settings["replacement_score_gap"]:
             raise ValueError("fast score gap must be >= normal score gap")
         core_max = 100 * sum(
@@ -1034,11 +1053,24 @@ class LeaderConfigMixin(LeaderMixinContext):
         ):
             raise ValueError("replacement_fast_core_score exceeds available weighted core points")
 
-    def _validate_rotation_ratio_settings(self) -> None:
-        for key in ("replacement_weak_bottom_ratio", "replacement_target_top_ratio"):
-            value = self.settings[key]
-            if type(value) not in (float, int) or not math.isfinite(value) or not 0 < value <= 1:
-                raise ValueError(f"leader_squeeze {key} must be within (0, 1]")
+    def _validate_liquidity_settings(self) -> None:
+        """三池分层参数: 侦察池下限必须低于核心池下限, 且都是正数。"""
+        discovery = self.settings["liquidity_discovery_min_quote_volume"]
+        core = self.settings["liquidity_core_min_quote_volume"]
+        for key in ("liquidity_discovery_min_quote_volume", "liquidity_core_min_quote_volume"):
+            _require_setting(self.settings, key, low=0, exclude_low=True)
+        if discovery >= core:
+            raise ValueError(
+                "leader_squeeze liquidity_discovery_min_quote_volume must be smaller than "
+                "liquidity_core_min_quote_volume"
+            )
+        _require_setting(self.settings, "liquidity_volume_candles", low=1, high=1440, integer=True)
+        _require_setting(self.settings, "scout_max_candidates", low=1, high=200, integer=True)
+        for key in ("scout_min_volume_ratio", "scout_min_activity_ratio"):
+            _require_setting(self.settings, key, low=1)
+        _require_setting(
+            self.settings, "candidate_min_metric_ratio", low=0, high=1, exclude_low=True
+        )
 
 
 REQUIRED_SETTINGS = frozenset(
@@ -1062,9 +1094,8 @@ REQUIRED_SETTINGS = frozenset(
         "entry_setup_enabled",
         "entry_setup_score_points",
         "entry_setup_min_score",
-        "entry_setup_shortlist_ratio",
-        "entry_setup_min_candidates",
         "entry_setup_launch_candles",
+        "entry_setup_breakout_volume_multiple",
         "entry_setup_late_extension_atr",
         "min_absolute_momentum",
         "min_trend_continuity",
@@ -1076,10 +1107,6 @@ REQUIRED_SETTINGS = frozenset(
         "volume_activity_baseline_candles",
         "taker_score_full_ratio",
         "oi_score_full_drop",
-        "liquidation_score_full_ratio",
-        "liquidation_warmup_score",
-        "entry_heat_max_penalty",
-        "entry_heat_return_scale",
         "entry_heat_extension_start_atr",
         "entry_heat_extension_full_atr",
         "entry_heat_ema_candles",
@@ -1087,9 +1114,13 @@ REQUIRED_SETTINGS = frozenset(
         "entry_heat_box_max_width_atr",
         "entry_heat_prebreak_extension_max_atr",
         "entry_heat_breakout_overshoot_atr",
-        "entry_heat_cooled_breakout_factor",
-        "entry_heat_base_fraction",
-        "liquidation_min_notional",
+        "liquidity_discovery_min_quote_volume",
+        "liquidity_core_min_quote_volume",
+        "liquidity_volume_candles",
+        "scout_max_candidates",
+        "scout_min_volume_ratio",
+        "scout_min_activity_ratio",
+        "candidate_min_metric_ratio",
         "market_min_coverage_ratio",
         "market_down_ratio",
         "market_emergency_enabled",
@@ -1116,8 +1147,8 @@ REQUIRED_SETTINGS = frozenset(
         "profit_lock_arm_r",
         "profit_lock_fee_buffer",
         "profit_lock_regimes",
-        "profit_lock_strong_rank_ratio",
-        "profit_lock_fading_rank_ratio",
+        "profit_lock_strong_score",
+        "profit_lock_fading_score",
         "profit_lock_strong_max_bars",
         "profit_lock_fading_min_bars",
         "profit_lock_state_confirm_bars",
@@ -1130,7 +1161,6 @@ REQUIRED_SETTINGS = frozenset(
         "raw_metrics_log_enabled",
         "data_grace_seconds",
         "remote_metric_max_age_seconds",
-        "liquidation_stream_max_age_seconds",
         "max_spread_ratio",
         "max_slippage_ratio",
         "reversal_lookback_candles",
@@ -1145,19 +1175,15 @@ REQUIRED_SETTINGS = frozenset(
         "reversal_intrabar_atr_buffer",
         "reversal_emergency_memory_candles",
         "replacement_weak_atr_drop",
-        "replacement_entry_score",
         "replacement_weak_score",
         "replacement_score_gap",
         "replacement_confirmations",
         "replacement_min_age_minutes",
         "replacement_cooldown_minutes",
         "replacement_no_new_high_candles",
-        "replacement_weak_bottom_ratio",
-        "replacement_target_top_ratio",
         "replacement_candidate_hysteresis",
         "replacement_reentry_cooldown_minutes",
         "replacement_fast_enabled",
-        "replacement_fast_entry_score",
         "replacement_fast_score_gap",
         "replacement_fast_confirmations",
         "replacement_fast_min_age_minutes",
@@ -1186,8 +1212,6 @@ REQUIRED_SETTINGS = frozenset(
         "volume_baseline_windows",
         "candle_min_history",
         "oi_sample_count",
-        "liquidation_window_seconds",
-        "liquidation_recent_seconds",
         "position_sync_seconds",
         "position_stale_seconds",
         "risk_state_checkpoint_seconds",
@@ -1197,12 +1221,7 @@ REQUIRED_SETTINGS = frozenset(
         "funding_request_timeout_seconds",
         "funding_max_age_seconds",
         "metric_workers",
-        "liquidation_open_timeout_seconds",
-        "liquidation_close_timeout_seconds",
-        "liquidation_receive_timeout_seconds",
-        "liquidation_reconnect_seconds",
         "rest_base_url",
-        "liquidation_stream_url",
         "state_file_live",
         "state_file_dry_run",
         "rotation_audit_enabled",
@@ -1226,6 +1245,60 @@ FRAMEWORK_SETTINGS = (
 )
 
 
+_EVENT_HIGHLIGHT: tuple[tuple[str, str, str], ...] = (
+    # (消息特征, emoji, 行样式); 样式只在控制台生效, 日志文件仍是纯文本。
+    # 框架只在把挂单止损向上移动时才打"以便重新挂单", 即又锁住一段利润。
+    ("以便重新挂单", "📈", "green"),
+    ("添加 market 止损单", "🛡️", ""),
+    ("添加 stoploss 止损单", "🛡️", ""),
+    ("MARKET_BUY 已成交", "🟢", ""),
+    ("MARKET_SELL 已成交", "🔴", ""),
+    ("stoploss market order added", "🛡️", ""),
+    ("MARKET_BUY filled", "🟢", ""),
+    ("MARKET_SELL filled", "🔴", ""),
+)
+_EVENT_HIGHLIGHT_LOGGERS = (
+    "freqtrade.exchange.exchange",
+    "freqtrade.persistence.trade_model",
+    "freqtrade.freqtradebot",
+)
+
+
+class EventHighlightFilter(logging.Filter):
+    """给框架的交易事件日志加 emoji 和高亮颜色, 便于在长日志里一眼扫到。
+
+    成交、挂止损和移动止损的日志由框架的 ``freqtrade.exchange`` /
+    ``freqtrade.persistence`` / ``freqtrade.freqtradebot`` 发出, 策略改不了它们的
+    文本, 所以在日志记录上挂过滤器统一加前缀, 并按需设置 ``strategy_log_style``
+    (控制台 rich handler 读这个属性着色; 日志文件不带颜色)。重复安装是幂等的。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Decorate recognized trade events and keep every log record."""
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        for needle, emoji, style in _EVENT_HIGHLIGHT:
+            if needle not in message:
+                continue
+            if not message.startswith(emoji):
+                record.msg = f"{emoji} {message}"
+                record.args = ()
+            if style and not getattr(record, "strategy_log_style", ""):
+                record.strategy_log_style = style
+            break
+        return True
+
+
+def install_event_highlight_filter() -> None:
+    """在框架关键日志器上安装事件 emoji/高亮过滤器(幂等)。"""
+    for name in _EVENT_HIGHLIGHT_LOGGERS:
+        target = logging.getLogger(name)
+        if not any(isinstance(item, EventHighlightFilter) for item in target.filters):
+            target.addFilter(EventHighlightFilter())
+
+
 def configure_strategy(strategy, config: dict, *, framework: bool = True) -> None:
     from copy import deepcopy
 
@@ -1240,12 +1313,11 @@ def configure_strategy(strategy, config: dict, *, framework: bool = True) -> Non
         "momentum",
         "volume",
         "taker_buy",
-        "liquidation",
         "oi_squeeze",
         "funding",
     }
     if set(supplied["weights"]) != expected_weights:
-        raise ValueError("leader_squeeze.weights must specify all six score components")
+        raise ValueError("leader_squeeze.weights must specify all five score components")
     strategy.config = config
     strategy.settings = deepcopy(supplied)
     if framework:
@@ -1284,13 +1356,10 @@ def validate_runtime_settings(strategy) -> None:
         "profit_lock_state_confirm_bars",
     )
     for key in integer_keys:
-        if type(settings[key]) is not int or settings[key] <= 0:
-            raise ValueError(f"leader_squeeze.{key} must be a positive integer")
-    for key, value in settings.items():
-        if key.endswith("_seconds") and (
-            type(value) not in (int, float) or not math.isfinite(value) or value <= 0
-        ):
-            raise ValueError(f"leader_squeeze.{key} must be positive and finite")
+        _require_setting(settings, key, low=1, integer=True)
+    for key in settings:
+        if key.endswith("_seconds"):
+            _require_setting(settings, key, low=0, exclude_low=True)
     _validate_remote_request_settings(settings)
     _validate_score_refresh_timing(settings, strategy.timeframe)
     for key in (
@@ -1306,10 +1375,6 @@ def validate_runtime_settings(strategy) -> None:
     ):
         if type(settings[key]) is not bool:
             raise ValueError(f"leader_squeeze.{key} must be boolean")
-    if settings["liquidation_recent_seconds"] >= settings["liquidation_window_seconds"]:
-        raise ValueError(
-            "liquidation_recent_seconds must be smaller than liquidation_window_seconds"
-        )
     if settings["oi_sample_count"] < 2:
         raise ValueError("oi_sample_count must include at least two observations")
     eth_fast_buffer = settings["eth_fast_atr_buffer"]
@@ -1333,6 +1398,37 @@ def validate_runtime_settings(strategy) -> None:
         or strategy.startup_candle_count < required_history
     ):
         raise ValueError("startup_candle_count does not cover the configured indicator windows")
+
+
+def _require_setting(
+    settings: dict,
+    key: str,
+    *,
+    low: float | None = None,
+    high: float | None = None,
+    integer: bool = False,
+    exclude_low: bool = False,
+    exclude_high: bool = False,
+) -> float:
+    """校验单个数值配置项并返回其值。
+
+    上下界默认闭区间; ``exclude_low``/``exclude_high`` 用于 ``(0, 1]`` 这类半开区间。
+    布尔值不算整数, 字符串不会被隐式转换, 避免"看起来合法"的配置蒙混过关。
+    """
+    value = settings[key]
+    valid = type(value) is int if integer else type(value) in (int, float)
+    if valid and not integer:
+        valid = math.isfinite(value)
+    if valid and low is not None:
+        valid = value > low if exclude_low else value >= low
+    if valid and high is not None:
+        valid = value < high if exclude_high else value <= high
+    if not valid:
+        lower = ("(" if exclude_low else "[") + ("-inf" if low is None else str(low))
+        upper = ("inf" if high is None else str(high)) + (")" if exclude_high else "]")
+        kind = "an integer" if integer else "a number"
+        raise ValueError(f"leader_squeeze.{key} must be {kind} within {lower}, {upper}")
+    return value
 
 
 def _validate_remote_request_settings(settings: dict) -> None:
@@ -1397,16 +1493,16 @@ def _validate_profit_lock_regimes(settings: dict) -> None:
         >= regimes["fading"]["atr_multiple"]
     ):
         raise ValueError("profit lock regimes must tighten from strong to normal to fading")
-    strong_rank = settings["profit_lock_strong_rank_ratio"]
-    fading_rank = settings["profit_lock_fading_rank_ratio"]
+    strong_score = settings["profit_lock_strong_score"]
+    fading_score = settings["profit_lock_fading_score"]
     if not (
-        type(strong_rank) in (int, float)
-        and type(fading_rank) in (int, float)
-        and math.isfinite(strong_rank)
-        and math.isfinite(fading_rank)
-        and 0 < strong_rank < fading_rank <= 1
+        type(strong_score) in (int, float)
+        and type(fading_score) in (int, float)
+        and math.isfinite(strong_score)
+        and math.isfinite(fading_score)
+        and 0 < fading_score < strong_score <= 100
     ):
-        raise ValueError("profit lock rank ratios must satisfy 0 < strong < fading <= 1")
+        raise ValueError("profit lock scores must satisfy 0 < fading_score < strong_score <= 100")
     if settings["profit_lock_strong_max_bars"] >= settings["profit_lock_fading_min_bars"]:
         raise ValueError("profit lock stall thresholds must satisfy strong < fading")
 
@@ -1418,16 +1514,9 @@ def _validate_profit_protection_settings(settings: dict) -> None:
         "profit_lock_arm_r",
         "profit_no_progress_new_high_r",
     ):
-        value = settings[key]
-        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-            raise ValueError(f"leader_squeeze.{key} must be positive and finite")
-    for key in (
-        "profit_lock_fee_buffer",
-        "profit_lock_min_step_r",
-    ):
-        value = settings[key]
-        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-            raise ValueError(f"leader_squeeze.{key} must be non-negative and finite")
+        _require_setting(settings, key, low=0, exclude_low=True)
+    for key in ("profit_lock_fee_buffer", "profit_lock_min_step_r"):
+        _require_setting(settings, key, low=0)
     _validate_profit_lock_regimes(settings)
     if settings["profit_lock_fee_buffer"] >= 0.1:
         raise ValueError("leader_squeeze.profit_lock_fee_buffer must stay below 0.1")
@@ -1441,14 +1530,16 @@ def _validate_profit_protection_settings(settings: dict) -> None:
             "leader_squeeze.profit_r_min_pct must be within (0, profit_r_max_pct] and <= 0.5"
         )
     max_r = settings["profit_no_progress_max_r"]
+    # max_r 允许等于武装点: 棘轮在 arm_r 武装后由锁盈止损接管, 无进展退出继续覆盖
+    # arm_r 以下的停滞仓位, 两者在武装点重叠而不是留出保护空档。
     if (
         type(max_r) not in (int, float)
         or not math.isfinite(max_r)
-        or not 0 <= max_r < settings["profit_lock_arm_r"]
+        or not 0 <= max_r <= settings["profit_lock_arm_r"]
     ):
         raise ValueError(
             "leader_squeeze.profit_no_progress_max_r must be finite and within "
-            "[0, profit_lock_arm_r)"
+            "[0, profit_lock_arm_r]"
         )
     for key in ("profit_shadow_file_live", "profit_shadow_file_dry_run"):
         value = settings[key]
@@ -1534,21 +1625,28 @@ class LeaderDataMixin(LeaderMixinContext):
 
     def _start_score_refresh(self, now: float, *, exit_only: bool = False) -> None:
         self._last_score_request = now
-        leaders = [] if exit_only else self.dp.current_selection_whitelist()
+        leaders = [] if exit_only else list(getattr(self, "_candidate_pairs", ()))
         self._score_selection = leaders.copy()
-        held = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
+        held = self._occupied_pairs()
         pairs = list(dict.fromkeys([*leaders, *sorted(held)]))
-        if not pairs or (not exit_only and not leaders):
+        if not pairs:
             self._data_healthy = False
             self._next_score_refresh = now + float(self.settings["score_retry_seconds"])
             return
+        no_candidates = not exit_only and not leaders
+        if no_candidates:
+            # 没有候选也必须刷新持仓, 否则退出判定会因指标过期而停摆。
+            exit_only = True
+            self._data_healthy = False
+            logger.info("🛡️ 本轮无候选, 仅刷新持仓行情指标: %s", sorted(held), extra=LOG_INFO)
 
         self._score_pending = True
         self._next_score_refresh = math.inf
-        if exit_only:
+        if exit_only and not no_candidates:
             logger.info("🛡️ ETH拦截期间仅刷新持仓行情指标: %s", pairs, extra=LOG_INFO)
 
         def fetch() -> None:
+            started = time.time()
             try:
                 metrics = (
                     self._fetch_market_metrics(pairs, exit_only=True)
@@ -1558,6 +1656,7 @@ class LeaderDataMixin(LeaderMixinContext):
             except Exception as exc:
                 logger.warning("⚠️ 行情指标刷新失败: %s", exc, extra=LOG_WARN)
                 metrics = {}
+            self._last_score_fetch_seconds = time.time() - started
             with self._score_result_lock:
                 self._score_result = (time.time(), leaders, metrics)
                 self._score_pending = False
@@ -1589,7 +1688,10 @@ class LeaderDataMixin(LeaderMixinContext):
         candles = {
             pair: candle for pair in pairs if (candle := self._candle_metrics(pair)) is not None
         }
-        self._update_market_state(leaders, candles)
+        # 市场宽度只用核心池; 候选池与持仓不改变普跌分母。
+        core_pairs = list(getattr(self, "_core_pairs", ()))
+        cached_core = (getattr(self, "_pools_cache", None) or {}).get("core_candles", {})
+        self._update_market_state(core_pairs, cached_core)
         combined = {
             pair: {
                 **remote,
@@ -1607,7 +1709,8 @@ class LeaderDataMixin(LeaderMixinContext):
             if pair in combined and "momentum" in combined[pair]
         }
 
-        required = self._required_leader_count(len(leaders))
+        # 候选池用 candidate_min_metric_ratio(与状态行显示一致), 核心池宽度才用 leader 口径。
+        required = self._required_candidate_count(len(leaders))
         if len(valid_leaders) < required:
             self._data_healthy = False
             self._record_rotation_event(
@@ -1629,20 +1732,31 @@ class LeaderDataMixin(LeaderMixinContext):
         scoreable = {pair: item for pair, item in combined.items() if "momentum" in item}
         self._score_leaders = leaders
         self._apply_scores(completed_at, scoreable, combined)
-        deadline = min(
-            min(item["_score_valid_until"], item["_exit_valid_until"])
-            for item in valid_leaders.values()
+        # 覆盖率截止: 只要仍满足 candidate_min_metric_ratio, 少数落后币不提前整批刷新。
+        deadline = coverage_deadline(
+            [
+                min(item["_score_valid_until"], item["_exit_valid_until"])
+                for item in valid_leaders.values()
+            ],
+            required,
         )
+        held = self._occupied_pairs()
+        held_deadlines = [
+            min(item["_score_valid_until"], item["_exit_valid_until"])
+            for pair, item in combined.items()
+            if pair in held
+        ]
+        if held_deadlines:
+            held_deadline = min(held_deadlines)
+            deadline = min(deadline, held_deadline) if deadline else held_deadline
         self._next_score_refresh = self._scheduled_score_refresh(now, deadline)
         return True
 
     def _score_coverage(self, now: float) -> tuple[int, int, int]:
-        leaders = getattr(self, "_entry_leaders", None)
-        if leaders is None:
-            leaders = getattr(self, "_score_leaders", [])
+        leaders = self._candidate_pairs or getattr(self, "_score_leaders", [])
         metrics = getattr(self, "_metrics", {})
         fresh = sum(self._metrics_current(metrics.get(pair, {}), now) for pair in leaders)
-        return fresh, len(leaders), self._required_leader_count(len(leaders))
+        return fresh, len(leaders), self._required_candidate_count(len(leaders))
 
     def _advance_score_refresh(self, now: float, *, allow_scoring: bool) -> None:
         """名单变化/有效覆盖丢失后及时补刷新, 最快30秒一批, 不并发重复请求。"""
@@ -1653,8 +1767,8 @@ class LeaderDataMixin(LeaderMixinContext):
         ):
             return
         fresh, _, required = self._score_coverage(now)
-        leaders = getattr(self, "_entry_leaders", None)
-        changed = leaders is not None and set(leaders) != set(getattr(self, "_score_leaders", []))
+        leaders = self._candidate_pairs
+        changed = bool(leaders) and set(leaders) != set(getattr(self, "_score_leaders", []))
         if changed or not required or fresh < required or not self._data_healthy:
             self._next_score_refresh = min(self._next_score_refresh, now)
 
@@ -1983,6 +2097,10 @@ class LeaderDataMixin(LeaderMixinContext):
         return False
 
     def _warn_data_unavailable(self, key: str, reason: str) -> None:
+        if _quiet_warnings.get():
+            # 审计快照/序列化路径只记录状态, 不逐票刷警告; 真实警告由决策路径和
+            # 状态行的汇总覆盖率给出。
+            return
         now = time.time()
         warnings = getattr(self, "_data_warning_times", {})
         if now - warnings.get(key, -math.inf) >= float(self.settings["status_log_seconds"]):
@@ -2047,164 +2165,6 @@ class LeaderDataMixin(LeaderMixinContext):
         if self.wallets is None:
             raise RuntimeError("Wallets are not available")
         return self.wallets
-
-    def _liquidation_stream_stale(
-        self, now: float, connected_at: float, stream_max_age: float
-    ) -> bool:
-        with self._liquidation_lock:
-            last_message = self._liquidation_last_message
-        reference = last_message or connected_at
-        return now >= reference and now - reference > stream_max_age
-
-    def _receive_liquidation_payload(
-        self, socket: Any, timeout: float, connected_at: float, stream_max_age: float
-    ) -> tuple[Any, bool]:
-        try:
-            raw_payload = socket.recv(timeout=timeout)
-        except TimeoutError:
-            if self._stop_event.is_set():
-                return None, True
-            if self._liquidation_stream_stale(time.time(), connected_at, stream_max_age):
-                raise ConnectionError("强平数据流超过配置时限未收到有效消息")
-            # A single websocket receive timeout is not proof of a断流. Keep the
-            # existing window and let the age gate decide when reconnecting is necessary.
-            return None, False
-        try:
-            return json.loads(raw_payload), False
-        except (TypeError, ValueError, UnicodeDecodeError):
-            # Malformed input is isolated to this message. It does not refresh the
-            # stream heartbeat or force a reconnect.
-            if self._liquidation_stream_stale(time.time(), connected_at, stream_max_age):
-                raise ConnectionError("强平数据流超过配置时限未收到有效消息")
-            return None, False
-
-    def _liquidation_worker(self) -> None:
-        proxy = self.config.get("exchange", {}).get("ccxt_config", {}).get("wsProxy")
-        url = self.settings["liquidation_stream_url"]
-        while not self._stop_event.is_set():
-            try:
-                with connect(
-                    url,
-                    proxy=proxy or True,
-                    open_timeout=self.settings["liquidation_open_timeout_seconds"],
-                    close_timeout=self.settings["liquidation_close_timeout_seconds"],
-                ) as socket:
-                    self._reset_liquidation_window()
-                    connected_at = time.time()
-                    stream_max_age = float(self.settings["liquidation_stream_max_age_seconds"])
-                    receive_timeout = min(
-                        float(self.settings["liquidation_receive_timeout_seconds"]),
-                        stream_max_age,
-                    )
-                    while not self._stop_event.is_set():
-                        payload, stop = self._receive_liquidation_payload(
-                            socket, receive_timeout, connected_at, stream_max_age
-                        )
-                        if stop:
-                            break
-                        if payload is None:
-                            if self._liquidation_stream_stale(
-                                time.time(), connected_at, stream_max_age
-                            ):
-                                self._liquidation_connected.clear()
-                                raise ConnectionError("强平数据流超过配置时限未收到有效消息")
-                            continue
-                        received_at = time.time()
-                        if self._liquidation_last_message and (
-                            received_at - self._liquidation_last_message > stream_max_age
-                            or received_at < self._liquidation_last_message
-                        ):
-                            self._reset_liquidation_window()
-                        if not self._process_liquidation_payload(payload, received_at):
-                            if self._liquidation_stream_stale(
-                                received_at, connected_at, stream_max_age
-                            ):
-                                self._liquidation_connected.clear()
-                                raise ConnectionError("强平数据流超过配置时限未收到有效消息")
-                            continue
-                        with self._liquidation_lock:
-                            self._liquidation_last_message = received_at
-                            if not self._liquidation_started:
-                                self._liquidation_started = received_at
-                        self._prune_liquidations(received_at)
-                        self._liquidation_connected.set()
-            except Exception as exc:
-                self._liquidation_connected.clear()
-                if not self._stop_event.wait(self.settings["liquidation_reconnect_seconds"]):
-                    logger.warning("🔌 强平数据流断开, 正在重连: %s", exc, extra=LOG_WARN)
-            finally:
-                self._liquidation_connected.clear()
-
-    def _reset_liquidation_window(self) -> None:
-        initial = not (
-            getattr(self, "_liquidation_window_initialized", False)
-            or getattr(self, "_liquidation_started", 0)
-            or getattr(self, "_liquidation_last_message", 0)
-        )
-        self._liquidation_connected.clear()
-        with self._liquidation_lock:
-            self._liquidations.clear()
-            self._liquidation_started = 0.0
-            self._liquidation_last_message = 0.0
-        self._liquidation_window_initialized = True
-        logger.log(
-            logging.INFO if initial else logging.WARNING,
-            "🔌 强平流%s | %s%.0f分钟; 期间强平评分使用配置值, 收到有效心跳后不单独阻止开仓",
-            "初始化统计窗口" if initial else "连接重建或心跳断档, 清空统计窗口",
-            "预热" if initial else "重新预热",
-            self.settings["liquidation_window_seconds"] / 60,
-            extra=LOG_INFO if initial else LOG_WARN,
-        )
-
-    def _prune_liquidations(self, now: float) -> None:
-        """由全市场心跳清理所有币种, 不依赖币种是否参与排名。"""
-        with self._liquidation_lock:
-            for symbol, events in list(self._liquidations.items()):
-                while events and events[0][0] < now - self.settings["liquidation_window_seconds"]:
-                    events.popleft()
-                if not events:
-                    del self._liquidations[symbol]
-
-    def _process_liquidation_payload(self, payload: Any, received_at: float) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        stream = payload.get("stream")
-        data = payload.get("data", payload)
-        if stream == "!markPrice@arr@1s":
-            return isinstance(data, list)
-        if not isinstance(data, dict) or (
-            stream != "!forceOrder@arr" and data.get("e") != "forceOrder"
-        ):
-            return False
-        if data.get("st") != 1:
-            return True
-        order = data.get("o", {})
-        if not isinstance(order, dict):
-            return False
-        if order.get("S") != "BUY":
-            return True
-        symbol = order.get("s")
-        if not isinstance(symbol, str) or not symbol:
-            return False
-        try:
-            price = float(order.get("ap") or order.get("p") or 0)
-            quantity = float(order.get("z") or 0)
-        except (TypeError, ValueError, OverflowError):
-            return False
-        notional = price * quantity
-        if not (
-            math.isfinite(price)
-            and math.isfinite(quantity)
-            and math.isfinite(notional)
-            and price > 0
-            and quantity > 0
-            and notional > 0
-            and math.isfinite(received_at)
-        ):
-            return False
-        with self._liquidation_lock:
-            self._liquidations[symbol].append((received_at, notional))
-        return True
 
 
 class LeaderExecutionMixin(LeaderMixinContext):
@@ -2450,12 +2410,27 @@ class LeaderExecutionMixin(LeaderMixinContext):
 
 
 class LeaderReportingMixin(LeaderMixinContext):
+    def _log_scout_pool(self) -> None:
+        """侦察池是新增的低流动性入口, 单独打印便于核对它到底抓到了什么。"""
+        scouts = list(getattr(self, "_scout_pairs", ()))
+        if not scouts:
+            return
+        local = getattr(self, "_scout_local_scores", {})
+        logger.info(
+            "🔭 侦察池 %s/%s: %s",
+            len(scouts),
+            self.settings["scout_max_candidates"],
+            ", ".join(f"{pair}({local.get(pair, 0.0):.1f})" for pair in scouts),
+            extra=LOG_INFO,
+        )
+
     def _log_entry_funnel(self) -> None:
         rows = [list(row) for row in getattr(self, "_entry_funnel_rows", [])]
 
         def candidate_summary(row: list[str]) -> str:
             setup = "形态关闭" if row[2] == "关闭" else f"{row[2]} 形态{row[3]}"
-            return f"第{row[1]}仓 {setup} 强度{row[4]}/门槛{row[5]} 相关度{row[6]}"
+            priority = f" 新鲜度{row[7]} 放量{row[8]}" if len(row) > 8 else ""
+            return f"第{row[1]}仓 {setup}{priority} 强度{row[4]}/门槛{row[5]} 相关度{row[6]}"
 
         rows.extend(
             [
@@ -2477,8 +2452,8 @@ class LeaderReportingMixin(LeaderMixinContext):
             rows,
             style="cyan",
             caption=(
-                "先做硬条件和入场形态, 再取形态短名单, 最后按强度和逐仓门槛选择; "
-                "第1仓最宽, 第10仓最严"
+                "先做硬条件和入场形态, 再按启动新鲜度/整理突破/相对放量优先序选股, "
+                "强度分只作最低门槛; 第1仓最宽, 第10仓最严"
             ),
         )
 
@@ -2667,15 +2642,12 @@ class LeaderReportingMixin(LeaderMixinContext):
         heat_labels: dict[str, list[str]] = {}
 
         def heat_cells(pair: str) -> list[str]:
+            """15 日涨幅与偏离 ATR; 只作观察, 不参与任何降权。"""
             if pair not in heat_labels:
-                if not (
-                    self.settings["entry_heat_max_penalty"] or self.settings["entry_setup_enabled"]
-                ):
-                    heat_labels[pair] = ["—", "关闭"]
-                elif (heat := self._entry_heat_metrics(pair)) is not None:
+                if (heat := self._entry_heat_metrics(pair)) is not None:
                     heat_labels[pair] = [
                         f"{100 * heat['return_15d']:+.1f}%",
-                        f"{100 * heat['penalty']:.1f}%",
+                        f"{float(heat['extension_atr']):+.1f}",
                     ]
                 else:
                     heat_labels[pair] = ["未知", "未知"]
@@ -2683,9 +2655,9 @@ class LeaderReportingMixin(LeaderMixinContext):
 
         fresh_count, total, required = self._score_coverage(now)
         logger.info(
-            "🧭 策略状态 | 全局开仓=%s | 上批评分=%s 当前有效=%s/%s (至少%s) 评分年龄=%s | "
-            "评分任务=%s 下次刷新=%s | 仓位同步=%s 年龄=%s | 强平流=%s 心跳年龄=%s | "
-            "市场状态=%s",
+            "🧭 策略状态 | 全局开仓=%s | 上批评分=%s 候选有效=%s/%s (至少%s) 评分年龄=%s | "
+            "评分任务=%s 下次刷新=%s 耗时=%ss | 仓位同步=%s 年龄=%s | "
+            "池=核心%s 发现%s 侦察%s 候选%s 评分%s | 市场状态=%s",
             self._entry_block_reason or "允许 (仍须通过逐币筛选)",
             "成功" if self._data_healthy else "等待/不足",
             fresh_count,
@@ -2696,16 +2668,16 @@ class LeaderReportingMixin(LeaderMixinContext):
             "等待后台结果"
             if math.isinf(self._next_score_refresh)
             else f"{max(0, self._next_score_refresh - now):.0f}s 后",
+            f"{self._last_score_fetch_seconds:.1f}"
+            if getattr(self, "_last_score_fetch_seconds", 0.0)
+            else "—",
             "正常" if self._position_data_healthy else "异常",
             age(self._last_position_sync),
-            "关闭"
-            if self.settings["weights"]["liquidation"] <= 0
-            else "已连接"
-            if self._liquidation_connected.is_set()
-            else "断开",
-            "—"
-            if self.settings["weights"]["liquidation"] <= 0
-            else age(self._liquidation_last_message),
+            len(getattr(self, "_core_pairs", ())),
+            len(getattr(self, "_discovery_pairs", ())),
+            len(getattr(self, "_scout_pairs", ())),
+            len(getattr(self, "_candidate_pairs", ())),
+            len(getattr(self, "_score_pairs", ())),
             "未知"
             if not self._market_data_healthy
             else "严重普跌"
@@ -2715,6 +2687,7 @@ class LeaderReportingMixin(LeaderMixinContext):
             else "非普跌",
             extra=LOG_WARN if self._entry_block_reason else LOG_INFO,
         )
+        self._log_scout_pool()
         self._log_entry_funnel()
         if not self._consume_score_report(force=True, report_now=now):
             ranked = self._ranked_pairs()
@@ -2723,7 +2696,7 @@ class LeaderReportingMixin(LeaderMixinContext):
             pairs = dict.fromkeys([*scores, *self._entry_decisions, *sorted(self._entry_pairs)])
             _log_table(
                 "📊 评分综合明细 (等待完整评分快照)",
-                ["排名", "交易对", "买入评分", "15日涨幅", "热度折扣", "本轮入选", "筛选结果"],
+                ["排名", "交易对", "买入评分", "15日涨幅", "偏离ATR", "本轮入选", "筛选结果"],
                 [
                     [
                         ranks.get(pair, "—"),
@@ -2758,11 +2731,12 @@ class LeaderReportingMixin(LeaderMixinContext):
             len(positions),
             extra=LOG_INFO,
         )
-        holding_rows, holding_styles = [], []
-        for pair in sorted(
+        holding_pairs = sorted(
             set(positions) | db_pairs | self._external_pairs,
             key=lambda pair: self._holding_sort_key(pair, positions),
-        ):
+        )
+        holding_rows, holding_styles = [], []
+        for index, pair in enumerate(holding_pairs, 1):
             trade = db_trades.get(pair)
             position = positions.get(pair)
             detail = self._position_details.get(pair, {})
@@ -2804,6 +2778,7 @@ class LeaderReportingMixin(LeaderMixinContext):
             if position is None:
                 holding_rows.append(
                     [
+                        str(index),
                         pair,
                         (
                             "手动导入"
@@ -2813,7 +2788,6 @@ class LeaderReportingMixin(LeaderMixinContext):
                         if trade
                         else "外部仓位",
                         "钱包缓存缺失",
-                        "—",
                         "—",
                         "—",
                         current_price,
@@ -2839,6 +2813,7 @@ class LeaderReportingMixin(LeaderMixinContext):
             )
             holding_rows.append(
                 [
+                    str(index),
                     pair,
                     (
                         "手动导入"
@@ -2847,7 +2822,6 @@ class LeaderReportingMixin(LeaderMixinContext):
                     )
                     if trade
                     else "外部仓位",
-                    "多单" if position.side == "long" else "空单",
                     f"{position.position:.8f}",
                     str(leverage or "未知"),
                     str(entry_price or "未知"),
@@ -2885,9 +2859,9 @@ class LeaderReportingMixin(LeaderMixinContext):
         _log_table(
             "📦 持仓明细",
             [
+                "#",
                 "交易对",
                 "来源",
-                "方向",
                 "数量",
                 "杠杆",
                 "开仓价",
@@ -2898,7 +2872,7 @@ class LeaderReportingMixin(LeaderMixinContext):
                 "资金费",
                 "框架保护价",
                 "开仓分数",
-                "热度折扣",
+                "偏离ATR",
                 "15日涨幅",
                 "止损单",
                 "框架对账",
@@ -2917,10 +2891,10 @@ class LeaderReportingMixin(LeaderMixinContext):
             "实=交易所账单对账, 估=框架估算; 框架保护价取策略止损与强平保护中更早触发者, "
             "括号内依次为相对开仓价格幅度/价格幅度乘杠杆, 不含费用、资金费与滑点; "
             "止损单仅表示数据库最近缓存状态, 不是交易所实时确认; "
-            "热度折扣仅供新买入参考; "
+            "偏离ATR为最新收盘距EMA96的ATR倍数, 仅作观察; "
             "开仓分数取下单复核记录, (标签)为历史信号分, 旧版可能未扣热度",
         )
-        self._log_profit_position_table(now, db_trades)
+        self._log_profit_position_table(now, db_trades, holding_pairs)
         state = self._risk_state
         equity = float(state.get("last_equity", 0))
         day_start = float(state.get("day_start_equity", 0))
@@ -2990,6 +2964,17 @@ class LeaderReportingMixin(LeaderMixinContext):
         rows = []
         detail_rows = []
         show_details = self.settings["raw_metrics_log_enabled"]
+        decisions = getattr(self, "_entry_decisions", {})
+        held = self._occupied_pairs()
+        block_reason = getattr(self, "_entry_block_reason", "")
+        gate_reason = block_reason or "尚未评估"
+
+        def decision_text(pair: str) -> str:
+            """没有逐币决策时不要写"尚未评估": 全局闸门关闭会跳过整轮筛选。"""
+            if pair in decisions:
+                return decisions[pair]
+            return "已持仓" if pair in held else gate_reason
+
         for pair in sorted(
             valid, key=lambda pair: (int(ranks.get(pair, len(ranks) + 1)), -scores[pair])
         ):
@@ -2998,11 +2983,8 @@ class LeaderReportingMixin(LeaderMixinContext):
                 f"{100 * self.settings['weights'][name] * item[f'score_{name}']:.1f}"
                 for name in ("momentum", "volume", "taker_buy", "funding")
             ]
-            heat_enabled = bool(
-                self.settings["entry_heat_max_penalty"] or self.settings["entry_setup_enabled"]
-            )
-            heat = self._entry_heat_metrics(pair) if heat_enabled else None
-            if not heat_enabled:
+            heat = self._entry_heat_metrics(pair) if self.settings["entry_setup_enabled"] else None
+            if not self.settings["entry_setup_enabled"]:
                 heat_text = "—/关闭"
                 entry_score = self._current_score(pair, report_now)
             elif heat is None:
@@ -3020,14 +3002,11 @@ class LeaderReportingMixin(LeaderMixinContext):
                     )
                 heat_text = (
                     f"涨{100 * heat['return_15d']:+.1f}% "
-                    f"偏{heat['extension_atr']:.1f}ATR "
-                    f"折{100 * heat['penalty']:.1f}%"
+                    f"偏{heat['extension_atr']:.1f}ATR"
                     + (" 整理突" if heat["cooled_breakout"] else "")
                     + setup_text
                 )
-                entry_score = self._current_score(pair, report_now) * (
-                    1 - heat["penalty"] if self.settings["entry_heat_max_penalty"] else 1
-                )
+                entry_score = self._current_score(pair, report_now)
 
             trend = self._trend_labels(pair)
             rows.append(
@@ -3040,9 +3019,9 @@ class LeaderReportingMixin(LeaderMixinContext):
                     heat_text,
                     f"{trend[0]}/{trend[1]}",
                     (
-                        f"榜外持仓 | {getattr(self, '_entry_decisions', {}).get(pair, '尚未评估')}"
+                        f"榜外持仓 | {decision_text(pair)}"
                         if pair not in selected
-                        else getattr(self, "_entry_decisions", {}).get(pair, "尚未评估")
+                        else decision_text(pair)
                     ),
                 ]
             )
@@ -3074,6 +3053,10 @@ class LeaderReportingMixin(LeaderMixinContext):
                 else:
                     funding_text = "不可用/过期(费0)"
                 detail_rows.append([ranks.get(pair, "—"), pair, raw_text, funding_text])
+        core_candidates = len(getattr(self, "_candidate_pairs", ())) - len(
+            getattr(self, "_scout_pairs", ())
+        )
+        scout_count = len(getattr(self, "_scout_pairs", ()))
         _log_table(
             "📊 评分综合明细 (每个交易对一行)",
             [
@@ -3090,11 +3073,13 @@ class LeaderReportingMixin(LeaderMixinContext):
             caption=(
                 f"本批评分 {len(valid)} 个 = 本轮选币 {selected_count} 个"
                 f" + 榜外持仓监控 {len(valid) - selected_count} 个; "
-                f"选币池共 {len(selected)} 个; 已在选币池的持仓不重复计数; "
-                "买入评分按当前有效资金费及热度折扣计算; 原评分/分项为本批快照; "
+                f"选币池共 {len(selected)} 个"
+                f" (核心候选 {core_candidates} + 侦察 {scout_count}); "
+                "已在选币池的持仓不重复计数; "
+                "买入评分按当前有效资金费计算; 原评分/分项为本批快照; "
                 "本批评分时间="
                 f"{datetime.fromtimestamp(now, DISPLAY_TZ).strftime('%m-%d %H:%M:%S')}; "
-                "本轮选币不代表买入"
+                "本轮选币不代表买入" + (f"; 全局开仓={block_reason}" if block_reason else "")
             ),
         )
         if show_details:
@@ -3243,16 +3228,9 @@ class LeaderStorageMixin(LeaderMixinContext):
         pairs = {}
         for pair, stored_score in getattr(self, "_scores", {}).items():
             raw = self._current_score(pair)
-            heat = (
-                self._entry_heat_metrics(pair)
-                if self.settings["entry_heat_max_penalty"] or self.settings["entry_setup_enabled"]
-                else None
-            )
-            entry = (
-                raw
-                if not self.settings["entry_heat_max_penalty"]
-                else (raw * (1 - heat["penalty"]) if heat is not None else None)
-            )
+            heat = self._entry_heat_metrics(pair) if self.settings["entry_setup_enabled"] else None
+            # 软折扣已取消, entry_score 与 raw_score 同值; 字段保留以兼容轮换审计 SQL。
+            entry = raw
             frame = self._closed_candles(pair, self.timeframe, 1)
             pairs[pair] = {
                 "stored_score": stored_score,
@@ -3343,16 +3321,19 @@ class LeaderStorageMixin(LeaderMixinContext):
         if once and fingerprints.get(event_type) == fingerprint:
             return
         now = time.time()
-        try:
-            snapshot = self._rotation_snapshot()
-        except Exception as exc:
-            # Event identity and lifecycle must survive a broken/missing market snapshot.
-            snapshot = {
-                "snapshot_error": type(exc).__name__,
-                "rotation": json_safe(state),
-                "configuration": {"leader_squeeze": json_safe(self.settings)},
-            }
-            logger.error("轮换现场快照不完整 (%s), 仍记录事件", type(exc).__name__)
+        # 快照要为评分池里每一只票记 score_current, 期间的数据告警属于序列化副作用:
+        # 评分刚过期时它会把同一件事按票打印几十行, 淹没真正的拦截原因。
+        with quiet_data_warnings():
+            try:
+                snapshot = self._rotation_snapshot()
+            except Exception as exc:
+                # Event identity and lifecycle must survive a broken/missing market snapshot.
+                snapshot = {
+                    "snapshot_error": type(exc).__name__,
+                    "rotation": json_safe(state),
+                    "configuration": {"leader_squeeze": json_safe(self.settings)},
+                }
+                logger.error("轮换现场快照不完整 (%s), 仍记录事件", type(exc).__name__)
         snapshot["decision"] = json_safe(details or {})
         pairs = snapshot.get("pairs", {})
         old = pairs.get(weak, {}).get("raw_score")
@@ -3528,9 +3509,11 @@ class LeaderTrendMixin(LeaderMixinContext):
         if not context["available"]:
             reason = "小时趋势数据不足或无效, 禁止开仓"
         elif context["state"] == "weakening":
+            # 快速例外: 强启动票可绕过 1h 早期走弱, 但仍须过当前风险门槛,
+            # 并由 _fast_rotation_quality 强制突破/放量/主动买/核心分 75。
             exception = bool(
                 self.settings["replacement_fast_enabled"]
-                and self._entry_score(pair) >= self._rotation_floor("fast")
+                and self._current_score(pair) >= self._rotation_floor(pair)
                 and self._fast_rotation_quality(pair)
             )
             reason = "" if exception else "小时趋势走弱且未满足快速启动条件"
@@ -3863,7 +3846,7 @@ class LeaderProfitMixin(LeaderMixinContext):
     # Closed-candle replay is throttled to once per holding-timeframe bucket.
     # ------------------------------------------------------------------ 入场上下文
 
-    _PROFIT_RECORD_VERSION = 5
+    _PROFIT_RECORD_VERSION = 6
 
     def _capture_profit_entry_context(self, trade: Trade) -> None:
         """首次入场成交时冻结该笔的 ATR1h, 作为 R 单位与棘轮步长基准。"""
@@ -3984,7 +3967,7 @@ class LeaderProfitMixin(LeaderMixinContext):
             "leader_regime_candidate": None,
             "leader_regime_candidate_bars": 0,
             "leader_regime_reason": "入场后等待龙头确认",
-            "leader_rank_ratio": None,
+            "leader_score": None,
             "holding_trend_state": None,
             "background_trend_state": None,
             "current_atr": atr,
@@ -4004,7 +3987,19 @@ class LeaderProfitMixin(LeaderMixinContext):
             "updated_at": time.time(),
         }
 
-    def _migrate_profit_record(self, record: Any) -> dict[str, Any] | None:
+    @staticmethod
+    def _reset_profit_regime(record: dict[str, Any], reason: str) -> None:
+        """Require fresh closed-bar evidence after a policy change."""
+        record["leader_regime"] = "normal"
+        record["leader_regime_candidate"] = None
+        record["leader_regime_candidate_bars"] = 0
+        record["leader_regime_reason"] = reason
+        record["holding_trend_state"] = None
+        record["background_trend_state"] = None
+
+    def _migrate_profit_record(  # noqa: C901 - linear version chain, one branch per schema
+        self, record: Any
+    ) -> dict[str, Any] | None:
         """Upgrade persisted records whose momentum clock cannot be reused safely."""
         if not isinstance(record, dict):
             return None
@@ -4029,25 +4024,20 @@ class LeaderProfitMixin(LeaderMixinContext):
         if record.get("version") == 3:
             record["version"] = 4
             record["context_source"] = "reconstructed"
-            record["leader_regime"] = "normal"
-            record["leader_regime_candidate"] = None
-            record["leader_regime_candidate_bars"] = 0
-            record["leader_regime_reason"] = "策略升级待确认"
-            record["leader_rank_ratio"] = None
-            record["holding_trend_state"] = None
-            record["background_trend_state"] = None
+            self._reset_profit_regime(record, "策略升级待确认")
             record["current_atr"] = record.get("entry_atr")
         if record.get("version") == 4:
             # Version 4 let historical catch-up bars mutate the live regime.  Keep
             # every latched price, but require current closed-bar evidence again.
+            record["version"] = 5
+            self._reset_profit_regime(record, "状态机修复后待确认")
+        if record.get("version") == 5:
+            # Version 6 replaced the cross-sectional rank with an absolute score, so
+            # the leader regime no longer drifts with the size of the candidate pool.
             record["version"] = self._PROFIT_RECORD_VERSION
-            record["leader_regime"] = "normal"
-            record["leader_regime_candidate"] = None
-            record["leader_regime_candidate_bars"] = 0
-            record["leader_regime_reason"] = "状态机修复后待确认"
-            record["leader_rank_ratio"] = None
-            record["holding_trend_state"] = None
-            record["background_trend_state"] = None
+            self._reset_profit_regime(record, "评分档位升级后待确认")
+            record.pop("leader_rank_ratio", None)
+            record["leader_score"] = None
         if (
             record.get("version") == self._PROFIT_RECORD_VERSION
             and "progress_tracking_from_ts" not in record
@@ -4092,7 +4082,7 @@ class LeaderProfitMixin(LeaderMixinContext):
         optional_numbers = (
             "entry_atr",
             "current_atr",
-            "leader_rank_ratio",
+            "leader_score",
             "r_price",
             "last_scan_bucket",
             "execution_lock_armed_at",
@@ -4112,8 +4102,8 @@ class LeaderProfitMixin(LeaderMixinContext):
             if (value := record.get(key)) is not None
         ):
             return False
-        rank_ratio = record.get("leader_rank_ratio")
-        if rank_ratio is not None and not 0 < float(rank_ratio) <= 1:
+        leader_score = record.get("leader_score")
+        if leader_score is not None and not 0 <= float(leader_score) <= 100:
             return False
         positive_numbers = (
             "entry_atr",
@@ -4148,7 +4138,7 @@ class LeaderProfitMixin(LeaderMixinContext):
             "leader_regime_candidate",
             "leader_regime_candidate_bars",
             "leader_regime_reason",
-            "leader_rank_ratio",
+            "leader_score",
             "holding_trend_state",
             "background_trend_state",
             "current_atr",
@@ -4250,28 +4240,24 @@ class LeaderProfitMixin(LeaderMixinContext):
             return None
         return (float(price) - entry_value) / r_value
 
-    def _profit_rank_ratio(self, pair: str, now: float) -> float | None:
-        """Return the pair's fresh cross-sectional strength rank without network access."""
-        ranked: list[tuple[str, float]] = []
-        metrics = getattr(self, "_metrics", {})
-        for name in getattr(self, "_scores", {}):
-            if not self._metrics_current(metrics.get(name, {}), now):
-                continue
-            score = _finite_float(self._current_score(name, now))
-            if score is not None:
-                ranked.append((name, score))
-        own_score = next((score for name, score in ranked if name == pair), None)
-        minimum_size = math.ceil(1 / float(self.settings["profit_lock_strong_rank_ratio"]))
-        if own_score is None or len(ranked) < minimum_size:
+    def _profit_leader_score(self, pair: str, now: float) -> float | None:
+        """Return the pair's fresh absolute strength score, or None when unusable.
+
+        Absolute scores keep the leader regime independent of how many pairs the
+        candidate pool happens to hold; a percentile would drift whenever the
+        universe grows or shrinks.
+        """
+        metric = getattr(self, "_metrics", {}).get(pair, {})
+        if not self._metrics_current(metric, now):
             return None
-        return (1 + sum(score > own_score for _, score in ranked)) / len(ranked)
+        return _finite_float(self._current_score(pair, now))
 
     def _profit_regime_candidate(
         self,
         record: dict[str, Any],
         holding_state: str | None,
         background_state: str | None,
-        rank_ratio: float | None,
+        leader_score: float | None,
         market_down: bool,
     ) -> tuple[str, str, bool]:
         """Classify leader strength from closed-bar data; return state, reason and urgency."""
@@ -4286,20 +4272,20 @@ class LeaderProfitMixin(LeaderMixinContext):
         if bars >= fading_bars:
             return "fading", f"{bars}根未有效新高", True
 
-        rank = _finite_float(rank_ratio)
-        if holding_state is None or background_state is None or rank is None:
+        score = _finite_float(leader_score)
+        strong_score = float(self.settings["profit_lock_strong_score"])
+        fading_score = float(self.settings["profit_lock_fading_score"])
+        if holding_state is None or background_state is None or score is None:
             return previous, "数据不足保持已确认状态", False
         elif (
             holding_state == "up"
             and background_state == "up"
             and bars <= strong_bars
-            and rank <= float(self.settings["profit_lock_strong_rank_ratio"])
+            and score >= strong_score
         ):
-            candidate, reason = "strong", f"前{100 * rank:.0f}%且多周期上涨"
-        elif rank > float(self.settings["profit_lock_fading_rank_ratio"]) and (
-            holding_state != "up" or bars > strong_bars
-        ):
-            candidate, reason = "fading", f"排名降至前{100 * rank:.0f}%且动量放缓"
+            candidate, reason = "strong", f"评分{score:.1f}>={strong_score:.0f}且多周期上涨"
+        elif score < fading_score and (holding_state != "up" or bars > strong_bars):
+            candidate, reason = "fading", f"评分{score:.1f}<{fading_score:.0f}且动量放缓"
         else:
             candidate, reason = "normal", "龙头强度正常"
 
@@ -4313,7 +4299,7 @@ class LeaderProfitMixin(LeaderMixinContext):
         record: dict[str, Any],
         holding_state: str | None,
         background_state: str | None,
-        rank_ratio: float | None,
+        leader_score: float | None,
         market_down: bool,
     ) -> None:
         """Persist a confirmed regime; ordinary changes need consecutive closed bars."""
@@ -4321,12 +4307,12 @@ class LeaderProfitMixin(LeaderMixinContext):
             record,
             holding_state,
             background_state,
-            rank_ratio,
+            leader_score,
             market_down,
         )
         record["holding_trend_state"] = holding_state
         record["background_trend_state"] = background_state
-        record["leader_rank_ratio"] = rank_ratio
+        record["leader_score"] = leader_score
         if candidate == record.get("leader_regime"):
             record["leader_regime_candidate"] = None
             record["leader_regime_candidate_bars"] = 0
@@ -4358,6 +4344,10 @@ class LeaderProfitMixin(LeaderMixinContext):
 
         已确认的强/常/退档位分别控制比例回吐、冻结 R 上限和当前 ATR 距离;
         三者取更紧者。止损锁存仍只升不降, 因此状态恢复或波动扩大不会放宽保护。
+
+        注: 曾试过"峰值 <1R 时只用 R/ATR 上限、不用利润百分比"的早期宽缓冲变体, 用 124 笔
+        实盘重放做了参数扫描 + 时间留出法检验: 收益全部来自单笔 KERNEL(+6.98R), 其余 123 笔
+        反而更差 0.06R/笔, 且两段时间各自的最优值不一致 → 判定为过拟合, 未采用。
         """
         peak_r = self._profit_r_of(record, peak)
         if peak_r is None or peak_r < float(self.settings["profit_lock_arm_r"]):
@@ -4456,7 +4446,7 @@ class LeaderProfitMixin(LeaderMixinContext):
                     record,
                     record.get("holding_trend_state"),
                     record.get("background_trend_state"),
-                    record.get("leader_rank_ratio"),
+                    record.get("leader_score"),
                     True,
                 )
             return
@@ -4484,7 +4474,7 @@ class LeaderProfitMixin(LeaderMixinContext):
         latest_ts = float(frame["date"].iloc[-1].timestamp())
         background = self._trend_context(record["pair"], self.settings["background_timeframe"])
         background_state = str(background["state"]) if background.get("available") else None
-        rank_ratio = self._profit_rank_ratio(record["pair"], now)
+        leader_score = self._profit_leader_score(record["pair"], now)
         frame_positions = {
             float(value.timestamp()): index for index, value in enumerate(frame["date"])
         }
@@ -4512,7 +4502,7 @@ class LeaderProfitMixin(LeaderMixinContext):
                 current_atr,
                 None if states is None else states.get(row_ts),
                 background_state if is_latest else None,
-                rank_ratio if is_latest else None,
+                leader_score if is_latest else None,
                 market_down if is_latest else False,
                 update_regime=is_latest,
             )
@@ -4545,7 +4535,7 @@ class LeaderProfitMixin(LeaderMixinContext):
         current_atr: float | None,
         trend_state: str | None,
         background_state: str | None = None,
-        rank_ratio: float | None = None,
+        leader_score: float | None = None,
         market_down: bool = False,
         *,
         update_regime: bool = True,
@@ -4587,7 +4577,7 @@ class LeaderProfitMixin(LeaderMixinContext):
                 record,
                 trend_state,
                 background_state,
-                rank_ratio,
+                leader_score,
                 market_down,
             )
         target = self._profit_lock_target(record, peak)
@@ -4869,8 +4859,16 @@ class LeaderProfitMixin(LeaderMixinContext):
             extra=LOG_SCORE,
         )
 
-    def _log_profit_position_table(self, now: float, trades: dict[str, Trade]) -> None:
-        """Render the live ratchet and no-progress state beside the holdings report."""
+    def _log_profit_position_table(
+        self, now: float, trades: dict[str, Trade], order: Sequence[str] = ()
+    ) -> None:
+        """Render the live ratchet and no-progress state beside the holdings report.
+
+        :param now: 当前时间戳
+        :param trades: 数据库未平仓交易, 键为交易对
+        :param order: 持仓明细的排列顺序; 传入后本表与持仓明细同序且沿用同一序号,
+            未在 order 里的仓位按当前 R 排在最后并顺延编号
+        """
         if not self.settings["profit_shadow_enabled"]:
             return
         shadow = getattr(self, "_profit_shadow", {})
@@ -4886,7 +4884,26 @@ class LeaderProfitMixin(LeaderMixinContext):
                 rows.append(row)
         if not rows:
             return
-        rows.sort(key=lambda item: item[0], reverse=True)
+        if order:
+            # 单元格第 0 项就是交易对; 排序键里的 R 只用于 order 之外的兜底排序。
+            rank = {pair: index for index, pair in enumerate(order)}
+            rows.sort(key=lambda item: (rank.get(item[1][0], len(rank)), -item[0]))
+            # 行号取持仓明细的序号, 而不是本表过滤后的行序: 没有盈利保护记录的仓位
+            # (外部仓位、账本缺失、trade_id 不匹配) 会让后面的行整体错位, 同一个
+            # 交易对在两表里就对不上了。因此允许跳号, 跳号表示该仓位没有记录。
+            numbers: dict[str, str] = {}
+            extra = len(order)
+            for _, cells, _ in rows:
+                pair = cells[0]
+                if pair in rank:
+                    numbers[pair] = str(rank[pair] + 1)
+                else:
+                    extra += 1
+                    numbers[pair] = str(extra)
+            rendered = [[numbers[cells[0]], *cells] for _, cells, _ in rows]
+        else:
+            rows.sort(key=lambda item: item[0], reverse=True)
+            rendered = [[str(index), *row] for index, (_, row, _) in enumerate(rows, 1)]
         regimes = self.settings["profit_lock_regimes"]
         profile_summary = "/".join(
             f"{100 * regimes[state]['giveback_frac']:.0f}%回吐、{regimes[state]['trail_r']:g}R"
@@ -4895,6 +4912,7 @@ class LeaderProfitMixin(LeaderMixinContext):
         _log_table(
             "🛡️ 盈利保护状态",
             [
+                "#",
                 "交易对",
                 "1R价幅/占比",
                 "峰值",
@@ -4907,10 +4925,12 @@ class LeaderProfitMixin(LeaderMixinContext):
                 "无进展退出",
                 "影子退出",
             ],
-            [row for _, row, _ in rows],
+            rendered,
             style="magenta",
             row_styles=[style for _, _, style in rows],
-            caption="与持仓明细同周期打印; R在入场时冻结; "
+            caption="与持仓明细同周期打印, 并与持仓明细同序; # 沿用持仓明细的序号, "
+            "没有盈利保护记录的仓位会跳号 (不是本表行号); "
+            "R在入场时冻结; "
             "峰值取账本、trade.max_rate与最新标记价最大值; "
             "止损列显示框架当前值→最新计算目标, 无箭头表示框架已采用; "
             f"龙头状态强/常/退分别使用{profile_summary}上限; "
@@ -4987,9 +5007,11 @@ class LeaderProfitMixin(LeaderMixinContext):
         regime = {"strong": "强", "normal": "常", "fading": "退"}.get(
             str(record.get("leader_regime")), "未知"
         )
-        rank = _finite_float(record.get("leader_rank_ratio"))
+        leader_score = _finite_float(record.get("leader_score"))
         regime_label = (
-            f"{regime}/{100 * rank:.0f}%/{trend}" if rank is not None else f"{regime}/—/{trend}"
+            f"{regime}/{leader_score:.0f}/{trend}"
+            if leader_score is not None
+            else f"{regime}/—/{trend}"
         )
         no_progress = (
             "已满足"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,14 +25,6 @@ def test_entries_allowed_reports_first_score_load_without_expiry_reason() -> Non
     assert not strategy._entries_allowed(NOW)
     assert "首批行情与评分加载中" in strategy._entry_block_reason
     assert "评分数据过期" not in strategy._entry_block_reason
-
-
-def test_disabled_liquidation_component_does_not_gate_entries() -> None:
-    strategy = _entry_ready_strategy(NOW)
-    strategy._liquidation_connected.clear()
-    strategy._liquidation_last_message = 0.0
-
-    assert strategy._entries_allowed(NOW)
 
 
 def test_consume_score_refresh_retries_before_the_earliest_metric_deadline() -> None:
@@ -75,30 +66,6 @@ def test_blocked_score_refresh_retries_before_the_earliest_exit_deadline() -> No
     )
 
 
-@pytest.mark.parametrize(
-    ("started", "last_message", "level", "fragment"),
-    [
-        (0.0, 0.0, logging.INFO, "初始化"),
-        (100.0, 100.0, logging.WARNING, "重新预热"),
-    ],
-)
-def test_reset_liquidation_window_logs_initialization_or_rewarm(
-    caplog, started: float, last_message: float, level: int, fragment: str
-) -> None:
-    strategy = _entry_ready_strategy(NOW)
-    strategy._liquidation_lock = threading.Lock()
-    strategy._liquidations = {}
-    strategy._liquidation_started = started
-    strategy._liquidation_last_message = last_message
-
-    with caplog.at_level(logging.INFO, logger="leader_squeeze_strategy"):
-        strategy._reset_liquidation_window()
-
-    assert any(
-        record.levelno == level and fragment in record.getMessage() for record in caplog.records
-    )
-
-
 def test_entry_pair_outside_whitelist_has_specific_reason_without_data_warning(caplog) -> None:
     strategy = _entry_ready_strategy(NOW)
     del strategy._entry_pair_available
@@ -135,7 +102,7 @@ def test_lost_coverage_requests_refresh_without_bypassing_throttle(
 def test_rankings_hide_removed_candidates_but_retain_their_position_scores():
     strategy = _entry_ready_strategy(NOW)
     strategy._scores = {PAIR: 50.0, "REMOVED": 80.0}
-    strategy._entry_leaders = [PAIR]
+    strategy._candidate_pairs = [PAIR]
     assert strategy._ranked_pairs() == [(PAIR, 50.0)]
     assert strategy._current_score("REMOVED", NOW) == 80.0
 

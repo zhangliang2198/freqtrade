@@ -37,15 +37,15 @@ def test_approved_entry_score_is_saved_on_fill_and_survives_new_strategy(fee, ta
     Trade.session.expire_all()
     restored = Trade.session.get(Trade, trade_id)
     assert restored.get_custom_data("leader_entry_score") == {
-        "score": pytest.approx(89.1),
+        "score": pytest.approx(90.0),
         "source": "confirmation",
     }
     restarted = configured_strategy(LeaderSqueezeStrategy)
-    assert restarted._opening_score_label(restored) == "89.1"
+    assert restarted._opening_score_label(restored) == "90.0"
     restarted.order_filled(
         PAIR, restored, SimpleNamespace(ft_order_side=trade.entry_side, filled=0.5), NOW
     )
-    assert restarted._opening_score_label(restored) == "89.1"
+    assert restarted._opening_score_label(restored) == "90.0"
 
 
 @pytest.mark.usefixtures("init_persistence")

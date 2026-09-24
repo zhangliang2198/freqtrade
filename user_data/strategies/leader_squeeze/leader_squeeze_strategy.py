@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections import defaultdict, deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,7 +24,9 @@ from leader_squeeze_helpers import (
     LeaderReportingMixin,
     LeaderStorageMixin,
     LeaderTrendMixin,
+    candle_cached,
     configure_strategy,
+    coverage_deadline,
     decision_snapshot,
     entry_risk_cluster_size,
     entry_risk_concentration,
@@ -34,7 +35,9 @@ from leader_squeeze_helpers import (
     entry_risk_score_floor,
     entry_risk_stake_amount,
     entry_risk_utilization,
+    install_event_highlight_filter,
     logger,
+    quiet_data_warnings,
     report_cached,
     validate_runtime_settings,
 )
@@ -89,9 +92,10 @@ class LeaderSqueezeStrategy(
         runmode = str(self.config.get("runmode", ""))
         if runmode and runmode not in {"live", "dry_run"}:
             raise OperationalException(
-                "LeaderSqueezeStrategy requires live or dry_run mode because liquidation, "
-                "position-ratio and open-interest inputs have no historical data source."
+                "LeaderSqueezeStrategy requires live or dry_run mode because the remote "
+                "metric inputs have no historical data source."
             )
+        install_event_highlight_filter()
         # The resolver has already normalized framework attributes after __init__.
         # Reloading raw JSON here would restore string ROI keys and break exits.
         configure_strategy(self, self.config, framework=False)
@@ -126,7 +130,16 @@ class LeaderSqueezeStrategy(
         self._position_first_seen: dict[str, float] = {}
         self._last_score_refresh = 0.0
         self._last_score_request = 0.0
-        self._entry_leaders: list[str] | None = None
+        self._core_pairs: list[str] = []
+        self._discovery_pairs: list[str] = []
+        self._scout_pairs: list[str] = []
+        self._candidate_pairs: list[str] = []
+        self._score_pairs: list[str] = []
+        self._scout_local_scores: dict[str, float] = {}
+        self._pools_cache: dict[str, Any] | None = None
+        self._pools_key: tuple[int, tuple[str, ...]] | None = None
+        self._pools_probe_at = -math.inf
+        self._last_score_fetch_seconds = 0.0
         self._next_score_refresh = 0.0
         self._score_pending = False
         self._score_result: tuple[float, list[str], dict[str, dict[str, float]]] | None = None
@@ -135,7 +148,6 @@ class LeaderSqueezeStrategy(
         self._position_data_healthy = False
         self._last_good_data = 0.0
         self._data_healthy = False
-        self._account_stopped = False
         self._risk_state_load_failed = False
         self._risk_state_save_failed = False
         self._last_risk_state_checkpoint = -math.inf
@@ -147,6 +159,7 @@ class LeaderSqueezeStrategy(
         self._last_profit_summary = -math.inf
         self._profit_lock_failures = 0
         self._market_data_healthy = False
+        self._core_coverage_probe_at = -math.inf
         self._market_down = False
         self._market_emergency = False
         self._market_valid_until = 0.0
@@ -169,12 +182,6 @@ class LeaderSqueezeStrategy(
         self._rotation_candidate_channel: str | None = None
         self._rotation_score_snapshot = 0.0
         self._last_rotation = 0.0
-        self._liquidations: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
-        self._liquidation_lock = threading.Lock()
-        self._liquidation_connected = threading.Event()
-        self._liquidation_started = 0.0
-        self._liquidation_last_message = 0.0
-        self._stop_event = threading.Event()
         user_data_dir = Path(self.config.get("user_data_dir", "user_data"))
         state_file = (
             self.settings["state_file_dry_run"]
@@ -263,18 +270,8 @@ class LeaderSqueezeStrategy(
             extra=LOG_INFO,
         )
 
-        if self.settings["weights"]["liquidation"] > 0:
-            threading.Thread(
-                target=self._liquidation_worker,
-                name="leader-squeeze-liquidations",
-                daemon=True,
-            ).start()
-
     def ft_bot_cleanup(self) -> None:
         """请求关闭后台工作线程。"""
-        stop_event = getattr(self, "_stop_event", None)
-        if stop_event is not None:
-            stop_event.set()
         super().ft_bot_cleanup()
 
     def informative_pairs(self):
@@ -307,7 +304,7 @@ class LeaderSqueezeStrategy(
                 1,
                 self._rotation_entry_tag()
                 if metadata["pair"] == getattr(self, "_rotation_target", None)
-                else f"squeeze_{self._entry_score(metadata['pair']):.1f}",
+                else f"squeeze_{self._current_score(metadata['pair']):.1f}",
             )
         return dataframe
 
@@ -343,7 +340,7 @@ class LeaderSqueezeStrategy(
         side: str,
         **kwargs,
     ) -> float:
-        """按入场 ATR 止损距离固定单笔账户风险, 并受保证金比例上限约束。
+        """按当前启用的止损距离固定单笔账户风险, 并受保证金比例上限约束。
 
         :param pair: 待开仓交易对。
         :param current_time: 当前时间。
@@ -359,11 +356,18 @@ class LeaderSqueezeStrategy(
         """
         try:
             capital = float(self._wallets.get_total_stake_amount())
-            atr = self._profit_entry_atr(pair)
-            risk_price = self._profit_r_price(float(current_rate), atr)
-            if risk_price is None:
-                raise ValueError("entry ATR risk is unavailable")
-            stop_fraction = risk_price / float(current_rate)
+            if self.settings["entry_risk_initial_stop_enabled"]:
+                atr = self._profit_entry_atr(pair)
+                risk_price = self._profit_r_price(float(current_rate), atr)
+                if risk_price is None:
+                    raise ValueError("entry ATR risk is unavailable")
+                stop_fraction = risk_price / float(current_rate)
+            else:
+                # Without the 1R stop, the framework stoploss is the active loss budget.
+                stop_ratio = abs(float(self.stoploss))
+                if not math.isfinite(stop_ratio) or not 0 < stop_ratio <= 1:
+                    raise ValueError("invalid framework stoploss")
+                stop_fraction = stop_ratio / float(leverage)
             target = entry_risk_stake_amount(
                 capital=capital,
                 max_stake_ratio=float(self.settings["stake_ratio"]),
@@ -409,6 +413,43 @@ class LeaderSqueezeStrategy(
             return 0.0
 
     def confirm_trade_entry(
+        self,
+        pair: str,
+        order_type: str,
+        amount: float,
+        rate: float,
+        time_in_force: str,
+        current_time: datetime,
+        entry_tag: str | None,
+        side: str,
+        **kwargs,
+    ) -> bool:
+        """Never let an entry-check exception reach the framework's allow-on-error wrapper."""
+        try:
+            # Framework refreshed wallets before this callback; include any manual position
+            # opened since the last bot loop in slot and exposure checks.
+            if hasattr(self, "_position_first_seen"):
+                self._sync_external_pairs()
+            return self._confirm_trade_entry_checked(
+                pair,
+                order_type,
+                amount,
+                rate,
+                time_in_force,
+                current_time,
+                entry_tag,
+                side,
+                **kwargs,
+            )
+        except Exception:
+            try:
+                logger.exception("🚨 开仓复核异常 %s, 拒绝下单", pair, extra=LOG_ERROR)
+            except Exception:
+                # 日志处理器故障也不能让框架的默认 True 重新放行订单。
+                return False
+            return False
+
+    def _confirm_trade_entry_checked(
         self,
         pair: str,
         order_type: str,
@@ -489,7 +530,7 @@ class LeaderSqueezeStrategy(
         pending.pop(pair, None)
         self._pending_entry_scores = pending
         try:
-            score = self._entry_score(pair)
+            score = self._current_score(pair)
             if math.isfinite(score):
                 pending[pair] = {
                     "score": score,
@@ -729,16 +770,20 @@ class LeaderSqueezeStrategy(
             if not self._rotation_in_flight():
                 self._clear_rotation("ETH过滤暂停开仓")
             self._rotation_candidate, self._rotation_seen = None, 0
-        # Pairlist selection defines market breadth. Open holdings are appended by the
-        # framework only to keep their candles available and must not change this universe.
-        self._entry_leaders = self.dp.current_selection_whitelist()
+        # 三池分层: 发现池提供早期小票, 核心池定义市场宽度, 侦察池+核心达标票构成评分池。
+        # 持仓由框架附加到白名单只为保留K线, 不参与宽度和侦察名额。
+        pools = self._pools_for_loop()
+        self._core_pairs = pools["core"]
+        self._discovery_pairs = pools["discovery"]
+        self._scout_pairs = pools["scouts"]
+        self._candidate_pairs = pools["candidates"]
+        self._score_pairs = pools["score"]
         self._consume_score_refresh(now, allow_scoring=eth_allowed)
+        # 覆盖快照按 (K线桶, 白名单) 冻结: 桶边界那一瞬间还在刷新中的票必须重新探测,
+        # 否则数据几秒后就恢复, 闸门仍会关到下一个桶 (最长 15 分钟)。
+        self._reprobe_core_coverage(now)
         # 普跌退出仅依赖本地K线, ETH拦截或远程接口失败时也必须重新评估。
-        leaders = self._entry_leaders
-        self._update_market_state(
-            leaders,
-            {pair: item for pair in leaders if (item := self._candle_metrics(pair)) is not None},
-        )
+        self._update_market_state(self._core_pairs, pools["core_candles"])
         self._advance_score_refresh(now, allow_scoring=eth_allowed)
         if now >= self._next_score_refresh and not self._score_pending:
             self._start_score_refresh(now, exit_only=not eth_allowed)
@@ -757,6 +802,7 @@ class LeaderSqueezeStrategy(
         return max(low, min(high, value))
 
     def _required_leader_count(self, total: int) -> int:
+        """核心池本地K线覆盖率门槛 (市场宽度用)。"""
         if not total:
             return 0
         return min(
@@ -764,13 +810,27 @@ class LeaderSqueezeStrategy(
             max(1, math.ceil(total * float(self.settings["market_min_coverage_ratio"]))),
         )
 
+    def _required_candidate_count(self, total: int) -> int:
+        """候选池远端指标成功率门槛; 低于该比例视为系统性异常。"""
+        if not total:
+            return 0
+        return min(
+            total,
+            max(1, math.ceil(total * float(self.settings["candidate_min_metric_ratio"]))),
+        )
+
+    def _occupied_pairs(self) -> set[str]:
+        """框架持仓 + 手动导入/外部仓位的统一口径, 避免某一处漏算外部仓。"""
+        return {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
+
     def _update_market_state(
         self, leaders: list[str], candle_metrics: dict[str, dict[str, float]]
     ) -> None:
         required = self._required_leader_count(len(leaders))
         available = [candle_metrics[pair] for pair in leaders if pair in candle_metrics]
-        self._market_valid_until = min(
-            (item.get("_candle_valid_until", 0.0) for item in available), default=0.0
+        # 80% 覆盖截止: 单个落后币不得让整个市场状态过期, 但覆盖率仍按同一比例要求。
+        self._market_valid_until = coverage_deadline(
+            [item.get("_candle_valid_until", 0.0) for item in available], required
         )
         self._market_data_healthy = bool(required) and len(available) >= required
         self._market_emergency = False
@@ -786,6 +846,43 @@ class LeaderSqueezeStrategy(
             item["momentum"] <= -self.settings["market_emergency_drop"] for item in available
         ) >= math.ceil(len(leaders) * self.settings["market_emergency_ratio"])
         self._market_down = self._market_down or self._market_emergency
+
+    def _reprobe_core_coverage(self, now: float) -> None:
+        """覆盖快照里缺K线的核心池票, 在数据补齐后重新计入覆盖分子。
+
+        池快照按 (主周期K线桶, 白名单) 缓存, 只在桶边界后 30 秒算一次。那一刻仍在
+        刷新中的票会被记成"无K线", 于是一次几十秒的取数延迟会变成最长 15 分钟的
+        开仓暂停 (闸门一直用旧快照判断)。这里只重新探测快照里缺失的票: 补分子,
+        分母和 80% 门槛都不动, 因此不会放宽判定, 只会让已经恢复的数据立刻生效。
+        重试节奏沿用 score_retry_seconds (数据不全时的统一重试间隔)。
+        """
+        cached = (getattr(self, "_pools_cache", None) or {}).get("core_candles")
+        if cached is None:
+            return
+        interval = float(self.settings["score_retry_seconds"])
+        if now - getattr(self, "_core_coverage_probe_at", -math.inf) < interval:
+            return
+        self._core_coverage_probe_at = now
+        recovered = 0
+        # 这是重试探测, 不是决策路径: 缺失票的"K线过期"告警已由每桶一次的池构建给出,
+        # 这里再按票刷一遍只会淹没真正的拦截原因。
+        with quiet_data_warnings():
+            for pair in self._core_pairs:
+                if pair in cached:
+                    continue
+                item = self._candle_metrics(pair)
+                if item is not None:
+                    cached[pair] = item
+                    recovered += 1
+        if recovered:
+            missing = sum(pair not in cached for pair in self._core_pairs)
+            logger.info(
+                "♻️ 核心池K线补齐 %s 个 (仍缺 %s/%s), 立即重评市场覆盖",
+                recovered,
+                missing,
+                len(self._core_pairs),
+                extra=LOG_INFO,
+            )
 
     def _market_exit_required(self) -> bool:
         """Ordinary breadth weakness blocks entries; only a severe decline forces exits."""
@@ -806,21 +903,32 @@ class LeaderSqueezeStrategy(
             return False
         return True
 
-    def _price_components(self, item: dict[str, float]) -> tuple[float, float, float]:
+    def _momentum_component(self, item: dict[str, float]) -> float:
+        """动量分项: 只用本地K线, 不依赖远端指标。"""
         price_weight = self.settings["momentum_return_weight"]
+        return price_weight * self._clamp(
+            item["momentum"] / self.settings["momentum_full_score"]
+        ) + (1 - price_weight) * self._clamp(item["trend_continuity"])
+
+    def _volume_component(self, item: dict[str, float]) -> float:
+        """放量分项: 只用本地K线, 不依赖远端指标。"""
+        return self.settings["volume_activity_weight"] * self._clamp(
+            (item["volume_activity_ratio"] - 1) / (self.settings["volume_activity_full_ratio"] - 1)
+        ) + (1 - self.settings["volume_activity_weight"]) * self._clamp(
+            (item["volume_ratio"] - 1) / (self.settings["volume_score_full_ratio"] - 1)
+        )
+
+    def _taker_component(self, item: dict[str, float]) -> float:
+        """主动买盘分项: 需要远端买卖量, 只在进入评分池后计算。"""
+        return self._clamp(
+            (item["taker_ratio"] - 1) / (self.settings["taker_score_full_ratio"] - 1)
+        )
+
+    def _price_components(self, item: dict[str, float]) -> tuple[float, float, float]:
         return (
-            price_weight * self._clamp(item["momentum"] / self.settings["momentum_full_score"])
-            + (1 - price_weight) * self._clamp(item["trend_continuity"]),
-            self.settings["volume_activity_weight"]
-            * self._clamp(
-                (item["volume_activity_ratio"] - 1)
-                / (self.settings["volume_activity_full_ratio"] - 1)
-            )
-            + (1 - self.settings["volume_activity_weight"])
-            * self._clamp(
-                (item["volume_ratio"] - 1) / (self.settings["volume_score_full_ratio"] - 1)
-            ),
-            self._clamp((item["taker_ratio"] - 1) / (self.settings["taker_score_full_ratio"] - 1)),
+            self._momentum_component(item),
+            self._volume_component(item),
+            self._taker_component(item),
         )
 
     def _apply_scores(
@@ -843,11 +951,6 @@ class LeaderSqueezeStrategy(
                 "momentum": momentum_score,
                 "volume": volume_score,
                 "taker_buy": taker_score,
-                "liquidation": (
-                    self._liquidation_score(self._market_id(pair), now)
-                    if weights["liquidation"] > 0
-                    else 0.0
-                ),
                 "oi_squeeze": oi_score,
                 "funding": self._funding_score(item, now),
             }
@@ -885,22 +988,14 @@ class LeaderSqueezeStrategy(
             - metric.get("score_funding", 0.0)
         )
 
-    def _entry_score(self, pair: str) -> float:
-        """Discount prospective buys without weakening the score of an existing holding."""
-        score = self._current_score(pair)
-        if not self.settings["entry_heat_max_penalty"]:
-            return score
-        heat = self._entry_heat_metrics(pair)
-        return score * (1 - heat["penalty"]) if heat is not None else math.nan
-
-    @report_cached
+    @candle_cached
     def _entry_heat_metrics(self, pair: str) -> dict[str, float] | None:
         """Measure long-run heat and recognize a breakout in either of the last two bars."""
         frame = self._closed_candles(
             pair,
             self.timeframe,
             self.ENTRY_HEAT_HISTORY_CANDLES,
-            columns=("high", "low", "close"),
+            columns=("high", "low", "close", "volume"),
         )
         if frame is None:
             return None
@@ -922,10 +1017,6 @@ class LeaderSqueezeStrategy(
         )
         gain = close / float(frame["close"].iloc[0]) - 1
         extension = (close - ema) / atr
-        growth = self._clamp(gain / float(self.settings["entry_heat_return_scale"]))
-        start = float(self.settings["entry_heat_extension_start_atr"])
-        full = float(self.settings["entry_heat_extension_full_atr"])
-        heat = self._clamp((extension - start) / (full - start))
         box = reference.tail(self.settings["entry_heat_box_candles"])
         box_high, box_low = float(box["high"].max()), float(box["low"].min())
         breakout_age = math.nan
@@ -954,8 +1045,20 @@ class LeaderSqueezeStrategy(
             signal_high = float(signal_box["high"].max())
             signal_low = float(signal_box["low"].min())
             signal_close = float(frame["close"].iloc[signal_index])
+            # 放量确认: 突破那根必须显著放量, 否则"无量漂移"会被误判成启动。
+            # 实测(317 只快照)显示, 不加这条时命中的突破票 45m/7d 放量中位数只有 0.16。
+            volume_multiple = float(self.settings["entry_setup_breakout_volume_multiple"])
+            volume_ok = True
+            if volume_multiple > 0 and "volume" in frame:
+                baseline_window = int(self.settings["volume_baseline_windows"])
+                volume_baseline = float(signal_reference["volume"].tail(baseline_window).mean())
+                signal_volume = float(frame["volume"].iloc[signal_index])
+                volume_ok = (
+                    volume_baseline > 0 and signal_volume >= volume_multiple * volume_baseline
+                )
             if (
-                signal_high - signal_low
+                volume_ok
+                and signal_high - signal_low
                 <= self.settings["entry_heat_box_max_width_atr"] * signal_atr
                 and abs(float(signal_reference["close"].iloc[-1]) - signal_ema)
                 <= self.settings["entry_heat_prebreak_extension_max_atr"] * signal_atr
@@ -970,12 +1073,6 @@ class LeaderSqueezeStrategy(
                 box_high, box_low = signal_high, signal_low
                 break
         cooled_breakout = math.isfinite(breakout_age)
-        base = self.settings["entry_heat_base_fraction"]
-        penalty = (
-            float(self.settings["entry_heat_max_penalty"]) * growth * (base + (1 - base) * heat)
-        )
-        if cooled_breakout:
-            penalty *= self.settings["entry_heat_cooled_breakout_factor"]
         result = {
             "return_15d": gain,
             "extension_atr": extension,
@@ -983,11 +1080,6 @@ class LeaderSqueezeStrategy(
             "breakout_age_candles": breakout_age,
             "breakout_distance_atr": breakout_distance,
             "box_width_atr": breakout_box_width,
-            "penalty": penalty,
-            "reference_ema": ema,
-            "reference_atr": atr,
-            "box_high": box_high,
-            "box_low": box_low,
         }
         return result
 
@@ -1089,11 +1181,144 @@ class LeaderSqueezeStrategy(
             + float(self.settings["data_grace_seconds"]),
         }
 
+    @candle_cached
+    def _liquidity_quote_volume(self, pair: str) -> float | None:
+        """用已收盘15mK线重建24小时报价成交额。
+
+        币安合约K线成交量是基础币口径, 因此报价成交额按 收盘价 x 成交量 近似。
+        该值只用于划分核心池/发现池, 与 pairlist 的 ticker 口径解耦, 不随其缓存漂移。
+        """
+        candles = int(self.settings["liquidity_volume_candles"])
+        frame = self._closed_candles(pair, self.timeframe, candles, columns=("close", "volume"))
+        if frame is None:
+            return None
+        tail = frame.tail(candles)
+        turnover = float((tail["close"] * tail["volume"]).sum())
+        return turnover if math.isfinite(turnover) and turnover >= 0 else None
+
+    def _scout_local_score(self, item: dict[str, float]) -> float:
+        """侦察池排序只用本地部分: 动量权重 + 放量权重, 不新增指标。"""
+        weights = self.settings["weights"]
+        return 100.0 * (
+            weights["momentum"] * self._momentum_component(item)
+            + weights["volume"] * self._volume_component(item)
+        )
+
+    @report_cached
+    def _universe_pools(self) -> dict[str, Any]:
+        """把白名单拆成发现池、核心池、侦察池、候选池和评分池。
+
+        - 核心池: 本地24h成交额 >= liquidity_core_min_quote_volume, 决定市场宽度;
+        - 发现池: 成交额在 [liquidity_discovery_min_quote_volume, 核心下限) 之间;
+        - 侦察池: 发现池中同时满足动量>门槛、连续性>=门槛、45m/5h>1、45m/7d>1,
+          按本地动量+放量分排序, 最多 scout_max_candidates 个;
+        - 候选池: 核心池中通过动量硬条件的票 + 侦察池;
+        - 评分池由 _pools_for_loop 每轮追加当前持仓, 不缓存仓位快照。
+
+        成交额缺失的票按核心池处理, 让覆盖率检查看到数据缺口而不是缩小分母。
+        """
+        discovery_min = float(self.settings["liquidity_discovery_min_quote_volume"])
+        core_min = float(self.settings["liquidity_core_min_quote_volume"])
+        momentum_floor = float(self.settings["min_absolute_momentum"])
+        continuity_floor = float(self.settings["min_trend_continuity"])
+        volume_floor = float(self.settings["scout_min_volume_ratio"])
+        activity_floor = float(self.settings["scout_min_activity_ratio"])
+        whitelist = list(self.dp.current_selection_whitelist())
+        core: list[str] = []
+        discovery: list[str] = []
+        core_passing: list[str] = []
+        scouts: list[tuple[str, float]] = []
+        core_metrics: dict[str, dict[str, float]] = {}
+        incomplete = False
+        deadlines: list[float] = []
+        for pair in whitelist:
+            turnover = self._liquidity_quote_volume(pair)
+            if turnover is not None and turnover < discovery_min:
+                # 这类票不会进入任一池, 无须为其加载更长历史的评分K线。
+                continue
+            item = self._candle_metrics(pair)
+            if turnover is None or item is None:
+                incomplete = True
+            if item is not None and (deadline := item.get("_candle_valid_until")) is not None:
+                deadlines.append(float(deadline))
+            if turnover is None:
+                core.append(pair)
+                if item is not None:
+                    core_metrics[pair] = item
+                continue
+            if turnover >= core_min:
+                core.append(pair)
+                if item is None:
+                    continue
+                core_metrics[pair] = item
+                if (
+                    item["momentum"] > momentum_floor
+                    and item["trend_continuity"] >= continuity_floor
+                ):
+                    core_passing.append(pair)
+                continue
+            discovery.append(pair)
+            if (
+                item is not None
+                and item["momentum"] > momentum_floor
+                and item["trend_continuity"] >= continuity_floor
+                and item["volume_ratio"] > volume_floor
+                and item["volume_activity_ratio"] > activity_floor
+            ):
+                scouts.append((pair, self._scout_local_score(item)))
+        scouts.sort(key=lambda entry: (-entry[1], entry[0]))
+        scout_limit = int(self.settings["scout_max_candidates"])
+        selected = scouts[:scout_limit]
+        self._scout_local_scores = dict(selected)
+        scout_pairs = [pair for pair, _ in selected]
+        candidates = list(dict.fromkeys([*core_passing, *scout_pairs]))
+        return {
+            "core": core,
+            "discovery": discovery,
+            "scouts": scout_pairs,
+            "candidates": candidates,
+            "core_candles": {pair: item for pair, item in core_metrics.items()},
+            "incomplete": incomplete,
+            "valid_until": min(deadlines, default=math.inf),
+        }
+
+    def _pools_for_loop(self) -> dict[str, Any]:
+        """三池划分按主周期K线缓存, 避免每 5 秒把整份白名单重算一遍。
+
+        本地指标只在新K线收盘后变化; 白名单或K线桶变化时重算一次, 其余轮次复用。
+        评分池每次按当前持仓重建, 开平仓不需要重算本地指标。
+        """
+        period = timeframe_to_seconds(self.timeframe)
+        delay = float(self.settings["score_candle_close_delay_seconds"])
+        now = time.time()
+        bucket = int(max(0.0, now - delay) // period)
+        whitelist = tuple(sorted(self.dp.current_selection_whitelist()))
+        key = (bucket, whitelist)
+        cached = getattr(self, "_pools_cache", None)
+        expired = cached is not None and now > cached.get("valid_until", math.inf)
+        retry = (
+            cached is not None
+            and (cached.get("incomplete", False) or expired)
+            and now - getattr(self, "_pools_probe_at", -math.inf)
+            >= float(self.settings["score_retry_seconds"])
+        )
+        if cached is None or getattr(self, "_pools_key", None) != key or retry:
+            if retry and expired:
+                # A late candle must invalidate per-pair calculations too.
+                self.__dict__.pop("_candle_cache", None)
+            cached = self._universe_pools()
+            self._pools_cache = cached
+            self._pools_key = key
+            self._pools_probe_at = now
+        held = self._occupied_pairs()
+        score_pairs = list(dict.fromkeys([*cached["candidates"], *sorted(held)]))
+        return {**cached, "score": score_pairs}
+
     def _ranked_pairs(self) -> list[tuple[str, float]]:
-        leaders = getattr(self, "_entry_leaders", None)
+        leaders = self._candidate_pairs
         return sorted(
             (
-                (pair, self._entry_score(pair))
+                (pair, self._current_score(pair))
                 for pair in self._scores
                 if leaders is None or pair in leaders
             ),
@@ -1101,14 +1326,7 @@ class LeaderSqueezeStrategy(
             reverse=True,
         )
 
-    def _entry_risk_max_score_floor(self) -> float:
-        """Strictest floor the model can charge, i.e. a fully concentrated book."""
-        return entry_risk_score_floor(
-            base_score=float(self.settings["entry_risk_base_score"]),
-            premium=float(self.settings["entry_risk_premium"]),
-            utilization=1.0,
-        )
-
+    @candle_cached
     def _entry_close_series(self, pair: str) -> dict[Timestamp, float] | None:
         """Timestamped closed prices used only to measure co-movement."""
         window = int(self.settings["entry_risk_correlation_window"])
@@ -1121,13 +1339,12 @@ class LeaderSqueezeStrategy(
             for date, close in zip(tail["date"], tail["close"], strict=True)
         }
 
-    def _entry_risk_correlations(
-        self,
-        pair: str,
-        book: list[str],
-        book_series: dict[str, dict[Timestamp, float]],
-    ) -> list[float]:
-        """Candidate-to-holding correlations; NaN means the overlap was unusable."""
+    @candle_cached
+    def _entry_risk_correlations(self, pair: str, book: tuple[str, ...]) -> list[float]:
+        """Candidate-to-holding correlations; NaN means the overlap was unusable.
+
+        相关性只由已收盘K线决定, 因此按K线缓存: 同一根K线内组合不变时无需重算。
+        """
         if not book:
             return []
         candidate = self._entry_close_series(pair)
@@ -1136,7 +1353,7 @@ class LeaderSqueezeStrategy(
         min_overlap = int(self.settings["entry_risk_correlation_min_overlap"])
         correlations: list[float] = []
         for other in book:
-            holding = book_series.get(other, {})
+            holding = self._entry_close_series(other) or {}
             overlap = sorted(candidate.keys() & holding.keys())
             correlations.append(
                 entry_risk_correlation(
@@ -1152,10 +1369,9 @@ class LeaderSqueezeStrategy(
         pair: str,
         position_count: int,
         book: list[str],
-        book_series: dict[str, dict[Timestamp, float]],
     ) -> tuple[float, float, list[float]]:
         """Score floor, concentration and effective correlations for one entry."""
-        raw_correlations = self._entry_risk_correlations(pair, book, book_series)
+        raw_correlations = self._entry_risk_correlations(pair, tuple(book))
         unknown = float(self.settings["entry_risk_correlation_unknown"])
         correlations = [value if math.isfinite(value) else unknown for value in raw_correlations]
         concentration = entry_risk_concentration(
@@ -1313,11 +1529,15 @@ class LeaderSqueezeStrategy(
             or "—"
         )
 
-    def _entry_setup_shortlist(
+    def _entry_eligible_candidates(
         self,
         ranked: list[tuple[str, float]],
-        rotation_target: str | None,
     ) -> list[tuple[str, float, dict[str, float | str]]]:
+        """只做绝对硬条件与形态最低分, 不再套"形态前40%"的池子百分位。
+
+        池子大小变化不再移动形态门槛; 排序和取舍交给后面的相关性调整风险门槛,
+        它按固定量纲评分决定谁能进, 满仓时门槛最高。
+        """
         eligible: list[tuple[str, float, dict[str, float | str]]] = []
         rejected: list[str] = []
         for pair, score in ranked:
@@ -1332,7 +1552,6 @@ class LeaderSqueezeStrategy(
                 self._entry_decisions[pair] = reason
                 rejected.append(reason)
                 continue
-            self._entry_setup_snapshot[pair] = setup
             eligible.append((pair, score, setup))
         self._entry_funnel_rows.append(
             [
@@ -1343,62 +1562,65 @@ class LeaderSqueezeStrategy(
                 self._funnel_reason_summary(rejected),
             ]
         )
+        return eligible
 
-        if rotation_target or not self.settings["entry_setup_enabled"]:
-            shortlisted = eligible
-        else:
-            shortlist_count = min(
-                len(eligible),
-                max(
-                    int(self.settings["entry_setup_min_candidates"]),
-                    math.ceil(len(eligible) * float(self.settings["entry_setup_shortlist_ratio"])),
-                ),
-            )
-            shortlisted = sorted(
-                eligible,
-                key=lambda item: (float(item[2]["score"]), item[1], item[0]),
-                reverse=True,
-            )[:shortlist_count]
-        shortlist_pairs = {item[0] for item in shortlisted}
-        shortlist_ratio = 100 * float(self.settings["entry_setup_shortlist_ratio"])
-        for pair, _, setup in eligible:
-            if pair not in shortlist_pairs:
-                self._entry_decisions[pair] = (
-                    f"形态排名未进前{shortlist_ratio:.0f}% (形态{float(setup['score']):.1f})"
-                )
-        self._entry_funnel_rows.append(
-            [
-                "3 形态短名单",
-                str(len(eligible)),
-                str(len(shortlisted)),
-                str(len(eligible) - len(shortlisted)),
-                "轮换目标单独复核"
-                if rotation_target
-                else "形态筛选关闭"
-                if not self.settings["entry_setup_enabled"]
-                else (
-                    f"前{shortlist_ratio:.0f}%, 至少{self.settings['entry_setup_min_candidates']}个"
-                ),
-            ]
+    @staticmethod
+    def _breakout_freshness_label(setup: dict[str, float | str]) -> str:
+        age = setup.get("breakout_age_candles")
+        if not isinstance(age, (int, float)) or not math.isfinite(float(age)):
+            return "—"
+        return "本轮突破" if int(age) == 0 else f"{int(age)}根前突破"
+
+    def _relative_volume_label(self, pair: str) -> str:
+        item = self._candle_metrics(pair) or {}
+        activity = item.get("volume_activity_ratio")
+        return f"{float(activity):.1f}x" if isinstance(activity, (int, float)) else "—"
+
+    def _entry_priority_key(
+        self, pair: str, score: float, setup: dict[str, float | str]
+    ) -> tuple[float, float, float, float, str]:
+        """选股优先序: 启动新鲜度 > 整理突破 > 相对放量 > 强度分 > 交易对。
+
+        综合评分只保留"最低门槛"作用, 不再决定谁先拿到稀缺仓位: 名额先给最新鲜的
+        启动票, 再给相对放量最强的整理突破票, 强度分只在同一档内做最后排序。
+        返回升序键, 越小越优先。
+        """
+        item = self._candle_metrics(pair) or {}
+        launch = str(setup.get("stage")) == "启动"
+        age = setup.get("breakout_age_candles")
+        age_value = (
+            float(age) if isinstance(age, (int, float)) and math.isfinite(float(age)) else 99.0
         )
-        return shortlisted
+        activity = item.get("volume_activity_ratio")
+        activity_value = (
+            float(activity)
+            if isinstance(activity, (int, float)) and math.isfinite(float(activity))
+            else 0.0
+        )
+        return (
+            0.0 if launch else 1.0,
+            age_value,
+            -activity_value,
+            -float(score) if math.isfinite(score) else 0.0,
+            pair,
+        )
 
     def _select_strength_entries(
         self,
-        shortlisted: list[tuple[str, float, dict[str, float | str]]],
+        eligible: list[tuple[str, float, dict[str, float | str]]],
         *,
         occupied: set[str],
         capacity: int,
-        rotation_target: str | None,
     ) -> set[str]:
-        ranked = sorted(shortlisted, key=lambda item: (item[1], item[0]), reverse=True)
+        ranked = sorted(
+            eligible, key=lambda item: self._entry_priority_key(item[0], item[1], item[2])
+        )
         selected: list[str] = []
         score_passed = 0
         score_failed = 0
         risk_failed = 0
         capacity_skipped = 0
         execution_reasons: list[str] = []
-        book_series = {pair: self._entry_close_series(pair) or {} for pair in occupied}
         exposure = self._entry_risk_open_exposure(occupied)
         for pair, score, setup in ranked:
             if len(selected) >= capacity:
@@ -1408,11 +1630,10 @@ class LeaderSqueezeStrategy(
             position_count = len(occupied) + len(selected) + 1
             book = sorted(occupied | set(selected))
             score_floor, concentration, correlations = self._entry_risk_floor(
-                pair, position_count, book, book_series
+                pair, position_count, book
             )
-            if pair == rotation_target:
-                channel = (getattr(self, "_rotation_state", None) or {}).get("channel", "normal")
-                score_floor = self._rotation_floor(channel)
+            # 轮换目标与普通新仓共用同一把尺子: 上面的 score_floor 已按当前组合算出,
+            # 不再按通道套固定分数(旧写法会把 "normal"/"fast" 当成交易对)。
             cap_reason = self._entry_risk_cap_reason(exposure, len(selected) + 1, correlations)
             if cap_reason:
                 self._entry_decisions[pair] = cap_reason
@@ -1435,8 +1656,6 @@ class LeaderSqueezeStrategy(
                 continue
             selected.append(pair)
             self._entry_risk_floor_assignments[pair] = score_floor
-            # Later candidates in this same round are measured against this one too.
-            book_series.setdefault(pair, self._entry_close_series(pair) or {})
             setup_enabled = self.settings["entry_setup_enabled"]
             setup_label = f"形态{float(setup['score']):.1f}" if setup_enabled else "形态关闭"
             self._entry_decisions[pair] = (
@@ -1452,12 +1671,14 @@ class LeaderSqueezeStrategy(
                     f"{score:.1f}",
                     f"{score_floor:.1f}",
                     f"{concentration:.2f}",
+                    self._breakout_freshness_label(setup),
+                    self._relative_volume_label(pair),
                 ]
             )
         self._entry_funnel_rows.extend(
             [
                 [
-                    "4 风险门槛/上限",
+                    "3 风险门槛/上限",
                     str(score_passed + score_failed + risk_failed),
                     str(score_passed),
                     str(score_failed + risk_failed),
@@ -1468,14 +1689,14 @@ class LeaderSqueezeStrategy(
                     ),
                 ],
                 [
-                    "5 交易资格/盘口",
+                    "4 交易资格/盘口",
                     str(score_passed),
                     str(len(selected)),
                     str(score_passed - len(selected)),
                     self._funnel_reason_summary(execution_reasons),
                 ],
                 [
-                    "6 容量截断",
+                    "5 容量截断",
                     str(len(ranked)),
                     str(len(ranked) - capacity_skipped),
                     str(capacity_skipped),
@@ -1492,6 +1713,12 @@ class LeaderSqueezeStrategy(
         self._entry_funnel_rows = []
         self._entry_funnel_candidates = []
         if not self._entries_allowed(time.time()):
+            # 全局闸门关闭时逐币筛选不会执行, 这里仍要把原因写进本轮决策: 否则两张
+            # 明细表只会落到兜底文案"尚未评估", 看起来像还没评估, 掩盖真实拦截原因。
+            gate_reason = f"全局闸门: {self._entry_block_reason or '禁止开仓'}"
+            occupied = self._occupied_pairs()
+            self._entry_decisions.update({pair: gate_reason for pair in self._scores})
+            self._entry_decisions.update({pair: "已持仓" for pair in sorted(occupied)})
             return set()
 
         db_open = {trade.pair for trade in Trade.get_open_trades()}
@@ -1515,18 +1742,17 @@ class LeaderSqueezeStrategy(
         self._entry_funnel_rows.append(
             ["1 候选池", str(len(ranked)), str(len(ranked)), "0", "排除已有仓位后"]
         )
-        shortlisted = self._entry_setup_shortlist(ranked, rotation_target)
+        eligible = self._entry_eligible_candidates(ranked)
         return self._select_strength_entries(
-            shortlisted,
+            eligible,
             occupied=occupied,
             capacity=capacity,
-            rotation_target=rotation_target,
         )
 
     def _confirmation_quality_reason(self, pair: str) -> str:
         """成交前按实时仓位数和有效资金费加分复核, 防止追加仓误用基础门槛。"""
         try:
-            occupied = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
+            occupied = self._occupied_pairs()
             rotation = pair == getattr(self, "_rotation_target", None)
             if rotation and self._rotation_pair is None:
                 return "轮换旧仓缺失"
@@ -1534,18 +1760,14 @@ class LeaderSqueezeStrategy(
             live_floor, cap_reason = self._recheck_entry_risk_floor(pair, occupied, assigned)
             if cap_reason:
                 return cap_reason
-            if rotation:
-                channel = (getattr(self, "_rotation_state", None) or {}).get("channel", "normal")
-                floor = self._rotation_floor(channel)
-            else:
-                floor = live_floor
-            reason = self._entry_quality_reason(pair, floor)
+            # live_floor 取"选择时门槛"与"实时组合门槛"的更严者, 轮换与普通入场一致。
+            reason = self._entry_quality_reason(pair, live_floor)
             if reason:
                 return reason
             if (
                 rotation
                 and self._rotation_pair is not None
-                and not self._rotation_scores_qualify(self._rotation_pair, pair)
+                and not self._rotation_scores_qualify(self._rotation_pair, pair, occupied=occupied)
             ):
                 return "轮换分差或目标评分不再达标"
             state = getattr(self, "_rotation_state", None) or {}
@@ -1573,9 +1795,8 @@ class LeaderSqueezeStrategy(
         grew (or grew more correlated) is re-priced rather than grandfathered.
         """
         book = sorted(occupied)
-        book_series = {other: self._entry_close_series(other) or {} for other in book}
         position_count = len(occupied) + 1
-        floor, _, correlations = self._entry_risk_floor(pair, position_count, book, book_series)
+        floor, _, correlations = self._entry_risk_floor(pair, position_count, book)
         if assigned is not None:
             floor = max(floor, float(assigned))
         exposure = self._entry_risk_open_exposure(occupied)
@@ -1586,7 +1807,7 @@ class LeaderSqueezeStrategy(
         reason = self._entry_eligibility_reason(pair)
         if reason:
             return reason
-        score = self._entry_score(pair)
+        score = self._current_score(pair)
         if not math.isfinite(score):
             return "买入评分缺失或无效 (需完整有效的15日行情)"
         if score < score_floor:
@@ -1704,21 +1925,17 @@ class LeaderSqueezeStrategy(
             (not getattr(self, "_risk_state_save_failed", False), "风控状态保存失败"),
             (getattr(self, "_database_time_healthy", True), "数据库持仓时间异常, 请修复UTC时间"),
             (not self._rotation_in_flight(), "轮换买单/旧仓退出尚未完成, 暂停新开仓"),
+            (
+                bool(getattr(self, "_candidate_pairs", None)),
+                "本轮无候选 (核心池无动量达标票, 侦察池为空)",
+            ),
             *score_checks,
-            (
-                self.settings["weights"]["liquidation"] <= 0
-                or self._liquidation_connected.is_set(),
-                "强平数据流断开",
-            ),
-            (
-                self.settings["weights"]["liquidation"] <= 0
-                or now - self._liquidation_last_message
-                <= float(self.settings["liquidation_stream_max_age_seconds"]),
-                "强平流心跳过期",
-            ),
             (self._position_data_healthy, "仓位同步失败"),
             (now - self._last_position_sync <= position_max_age, "仓位数据过期"),
-            (self._market_data_healthy, "龙头K线覆盖不足"),
+            (
+                self._market_data_healthy and now < self._market_valid_until,
+                "龙头K线覆盖不足或过期",
+            ),
             (not getattr(self, "_market_down", False), "龙头市场普跌"),
         )
         self._entry_block_reason = "; ".join(reason for allowed, reason in checks if not allowed)
@@ -1945,7 +2162,7 @@ class LeaderSqueezeStrategy(
 
     def _entry_slot_available(self, pair: str, entry_tag: str | None) -> bool:
         try:
-            occupied = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
+            occupied = self._occupied_pairs()
         except Exception as exc:
             self._entry_block_reason = f"仓位名额检查失败 ({type(exc).__name__})"
             logger.error("🚨 %s, 拒绝新开仓", self._entry_block_reason, extra=LOG_ERROR)
@@ -2137,12 +2354,8 @@ class LeaderSqueezeStrategy(
         return passed
 
     def _rotation_signal_valid(self, weak: str, target: str, channel: str) -> bool:
-        occupied = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
-        return (
-            self._rotation_weak_rank_eligible(weak)
-            and self._rotation_target_rank_eligible(target, occupied)
-            and self._rotation_holding_weak(weak)
-            and (channel != "fast" or self._fast_rotation_quality(target))
+        return self._rotation_holding_weak(weak) and (
+            channel != "fast" or self._fast_rotation_quality(target)
         )
 
     def _plan_rotation(self, now: float, current_time: datetime) -> None:
@@ -2173,58 +2386,23 @@ class LeaderSqueezeStrategy(
         challengers = []
         ranked = self._rotation_target_ranking(occupied)
         for pair, score in ranked:
-            if not self._rotation_target_rank_eligible(pair, occupied, ranked):
-                continue
             reason = ""
             if not self._entry_pair_available(pair):
                 reason = getattr(self, "_pair_entry_block_reason", "交易资格不通过")
             if not reason:
-                reason = self._entry_quality_reason(
-                    pair, min(self._rotation_floor("normal"), self._rotation_floor("fast"))
-                )
+                reason = self._entry_quality_reason(pair, self._rotation_floor(pair, occupied))
             self._audit_rotation_check(
                 target=pair, stage="entry_quality", passed=not bool(reason), reason=reason
             )
             if not reason:
                 challengers.append((pair, score))
-        return challengers
-
-    def _rotation_weak_ranking(self) -> list[tuple[str, float]]:
-        return [
-            item
-            for item in sorted(
-                (
-                    (candidate, self._current_score(candidate))
-                    for candidate in self._scores
-                    if self._pair_score_current(candidate)
-                ),
-                key=lambda item: (item[1], item[0]),
-                reverse=True,
+        # 轮换目标与普通入场共用同一优先序: 先要最新鲜的启动票, 而不是分最高的票。
+        challengers.sort(
+            key=lambda item: self._entry_priority_key(
+                item[0], item[1], self._entry_setup_snapshot.get(item[0], {})
             )
-            if math.isfinite(item[1])
-        ]
-
-    def _rotation_weak_rank_eligible(
-        self, pair: str, ranked: list[tuple[str, float]] | None = None
-    ) -> bool:
-        ranked = self._rotation_weak_ranking() if ranked is None else ranked
-        rank = next((index for index, item in enumerate(ranked, 1) if item[0] == pair), None)
-        bottom_count = (
-            max(1, math.ceil(len(ranked) * self.settings["replacement_weak_bottom_ratio"]))
-            if ranked
-            else 0
         )
-        passed = bool(rank is not None and rank > len(ranked) - bottom_count)
-        self._audit_rotation_check(
-            weak=pair,
-            stage="weak_rank",
-            rank=rank,
-            universe_size=len(ranked),
-            bottom_count=bottom_count,
-            ratio=self.settings["replacement_weak_bottom_ratio"],
-            passed=passed,
-        )
-        return passed
+        return challengers
 
     def _rotation_target_ranking(self, occupied: set[str]) -> list[tuple[str, float]]:
         return [
@@ -2233,38 +2411,6 @@ class LeaderSqueezeStrategy(
             if item[0] not in occupied and math.isfinite(item[1])
         ]
 
-    def _rotation_target_rank_eligible(
-        self,
-        pair: str,
-        occupied: set[str],
-        ranked: list[tuple[str, float]] | None = None,
-    ) -> bool:
-        ranked = self._rotation_target_ranking(occupied) if ranked is None else ranked
-        rank = next((index for index, item in enumerate(ranked, 1) if item[0] == pair), None)
-        top_count = (
-            max(1, math.ceil(len(ranked) * self.settings["replacement_target_top_ratio"]))
-            if ranked
-            else 0
-        )
-        passed = bool(rank is not None and rank <= top_count)
-        self._audit_rotation_check(
-            target=pair,
-            stage="target_rank",
-            rank=rank,
-            universe_size=len(ranked),
-            top_count=top_count,
-            ratio=self.settings["replacement_target_top_ratio"],
-            passed=passed,
-        )
-        return passed
-
-    def _rotation_rank_reason(self, weak: str, target: str, occupied: set[str]) -> str:
-        if not self._rotation_weak_rank_eligible(weak):
-            return "旧仓评分排名已离开后段范围"
-        if not self._rotation_target_rank_eligible(target, occupied):
-            return "目标评分排名已离开前段范围"
-        return ""
-
     def _pending_rotation_reason(self, now: float) -> str:
         if self._rotation_target is None:
             return "轮换目标缺失"
@@ -2272,7 +2418,7 @@ class LeaderSqueezeStrategy(
         channel = state.get("channel", "normal")
         occupied = set(self._external_pairs)
         if "channel" in state:
-            occupied = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
+            occupied = self._occupied_pairs()
             if len(occupied) != self.settings["max_positions"]:
                 return "持仓数量变化, 取消未提交轮换"
         if not self._entry_pair_available(self._rotation_target):
@@ -2281,13 +2427,13 @@ class LeaderSqueezeStrategy(
             return "旧仓评分缺失或过期"
         if not self._pair_score_current(self._rotation_target, now):
             return "目标评分缺失或过期"
-        if rank_reason := self._rotation_rank_reason(
-            self._rotation_pair, self._rotation_target, occupied
+        if not self._rotation_scores_qualify(
+            self._rotation_pair, self._rotation_target, occupied=occupied
         ):
-            return rank_reason
-        if not self._rotation_scores_qualify(self._rotation_pair, self._rotation_target):
             return "轮换评分或分差不再达标"
-        reason = self._entry_quality_reason(self._rotation_target, self._rotation_floor(channel))
+        reason = self._entry_quality_reason(
+            self._rotation_target, self._rotation_floor(self._rotation_target, occupied)
+        )
         if reason:
             return reason
         if not self._rotation_holding_weak(self._rotation_pair):
@@ -2326,7 +2472,7 @@ class LeaderSqueezeStrategy(
             if not trade.is_short and self.is_trade_exit_allowed(trade)
         }
         # Fill ordinary free slots first. Rotation only borrows a slot at the normal limit.
-        occupied = {trade.pair for trade in Trade.get_open_trades()} | self._external_pairs
+        occupied = self._occupied_pairs()
         held_pairs = set(open_trades)
         if len(occupied) != self.settings["max_positions"] or not held_pairs or not self._scores:
             self._rotation_audit_reason = "仓位未满、超限或没有有效持仓评分"
@@ -2347,17 +2493,20 @@ class LeaderSqueezeStrategy(
             ),
             key=lambda pair: (self._current_score(pair), pair),
         )
-        weak_ranking = self._rotation_weak_ranking()
-        scored_held = [
-            pair for pair in scored_held if self._rotation_weak_rank_eligible(pair, weak_ranking)
-        ]
         eligible = challengers.copy()
         if previous and eligible:
             incumbent = next((item for item in eligible if item[0] == previous[1]), None)
+            best = eligible[0]
+            # 保持旧候选只允许打破最后的分数平局, 不能覆盖突破新鲜度或相对放量。
             if (
-                incumbent
-                and eligible[0][1] - incumbent[1]
-                <= self.settings["replacement_candidate_hysteresis"]
+                incumbent is not None
+                and self._entry_priority_key(
+                    incumbent[0], incumbent[1], self._entry_setup_snapshot.get(incumbent[0], {})
+                )[:3]
+                == self._entry_priority_key(
+                    best[0], best[1], self._entry_setup_snapshot.get(best[0], {})
+                )[:3]
+                and best[1] - incumbent[1] <= self.settings["replacement_candidate_hysteresis"]
             ):
                 eligible.remove(incumbent)
                 eligible.insert(0, incumbent)
@@ -2462,6 +2611,8 @@ class LeaderSqueezeStrategy(
         scored_held: list[str],
         challengers: list[tuple[str, float]],
     ) -> tuple[str, str, str, float, float] | None:
+        # 组合口径只算一次: 内层是 (通道 / 弱仓 / 目标) 三重循环。
+        occupied = set(open_trades) | self._external_pairs
         for channel in ("fast", "normal"):
             if channel == "fast" and not self.settings["replacement_fast_enabled"]:
                 continue
@@ -2499,7 +2650,7 @@ class LeaderSqueezeStrategy(
                 if weak_bar is None:
                     continue
                 for target, score in challengers:
-                    if not self._rotation_scores_qualify(weak, target, channel):
+                    if not self._rotation_scores_qualify(weak, target, channel, occupied=occupied):
                         continue
                     if channel == "fast" and not self._fast_rotation_quality(target):
                         continue
@@ -2523,27 +2674,39 @@ class LeaderSqueezeStrategy(
                     return weak, target, channel, bar, score
         return None
 
-    def _rotation_floor(self, channel: str) -> float:
-        prefix = "replacement_fast_" if channel == "fast" else "replacement_"
-        return max(
-            self._entry_risk_max_score_floor(),
-            self.settings[prefix + "entry_score"],
-        )
+    def _rotation_floor(self, target: str, occupied: set[str] | None = None) -> float:
+        """轮换目标按当前账户占用收取与普通入场相同的相关性调整门槛。
 
-    def _rotation_scores_qualify(self, weak: str, target: str, channel: str | None = None) -> bool:
+        旧实现取"满仓且完全同向"的最严门槛, 池子或风险溢价一变就整体抬高/降低
+        轮换频率; 现在轮换目标与普通新仓共用同一把尺子, 不再叠加固定分数。
+        """
+        if occupied is None:
+            occupied = self._occupied_pairs()
+        book = sorted(occupied)
+        score_floor, _, _ = self._entry_risk_floor(target, len(book) + 1, book)
+        return score_floor
+
+    def _rotation_scores_qualify(
+        self,
+        weak: str,
+        target: str,
+        channel: str | None = None,
+        occupied: set[str] | None = None,
+    ) -> bool:
         if channel is None:
             channel = (getattr(self, "_rotation_state", None) or {}).get("channel", "normal")
         if channel not in ("normal", "fast") or (
             channel == "fast" and not self.settings["replacement_fast_enabled"]
         ):
             return False
-        old_score, new_score = self._current_score(weak), self._entry_score(target)
+        old_score, new_score = self._current_score(weak), self._current_score(target)
         prefix = "replacement_fast_" if channel == "fast" else "replacement_"
+        floor = self._rotation_floor(target, occupied)
         qualifies = (
             math.isfinite(old_score)
             and math.isfinite(new_score)
             and (channel == "fast" or old_score < self.settings["replacement_weak_score"])
-            and new_score >= self._rotation_floor(channel)
+            and new_score >= floor
             and new_score - old_score >= self.settings[prefix + "score_gap"]
         )
         self._audit_rotation_check(
@@ -2553,7 +2716,7 @@ class LeaderSqueezeStrategy(
             stage="score",
             old_score=old_score,
             new_score=new_score,
-            minimum=self._rotation_floor(channel),
+            minimum=floor,
             minimum_gap=self.settings[prefix + "score_gap"],
             weak_ceiling=self.settings["replacement_weak_score"] if channel == "normal" else None,
             passed=qualifies,
@@ -2606,33 +2769,3 @@ class LeaderSqueezeStrategy(
             state["updated_at"] = current_time.astimezone(UTC).isoformat()
             if self._save_risk_state():
                 self._last_risk_state_checkpoint = now
-
-    def _liquidation_score(self, symbol: str, now: float) -> float:
-        with self._liquidation_lock:
-            events = self._liquidations.get(symbol, ())
-            while events and events[0][0] < now - self.settings["liquidation_window_seconds"]:
-                events.popleft()
-            if (
-                not self._liquidation_started
-                or now - self._liquidation_started < self.settings["liquidation_window_seconds"]
-            ):
-                return self.settings["liquidation_warmup_score"]
-            recent = sum(
-                value
-                for timestamp, value in events
-                if now - self.settings["liquidation_recent_seconds"] <= timestamp <= now
-            )
-            previous = sum(
-                value
-                for timestamp, value in events
-                if timestamp < now - self.settings["liquidation_recent_seconds"]
-            )
-        # Scale the preceding 45m to a 15m baseline, with a minimum notional floor.
-        periods = (
-            self.settings["liquidation_window_seconds"]
-            - self.settings["liquidation_recent_seconds"]
-        ) / self.settings["liquidation_recent_seconds"]
-        baseline = max(previous / periods, float(self.settings["liquidation_min_notional"]))
-        return self._clamp(
-            (recent / baseline - 1.0) / (self.settings["liquidation_score_full_ratio"] - 1)
-        )

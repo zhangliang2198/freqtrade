@@ -140,7 +140,7 @@ def test_real_decision_snapshot_contains_rejections_heat_config_and_no_credentia
             }
         )
     )
-    strategy._entry_quality_reason = Mock(return_value="评分48低于门槛50")
+    strategy._entry_quality_reason = Mock(return_value="评分48低于动态风险门槛")
     with patch.object(MODULE.Trade, "get_open_trades", return_value=trades):
         strategy._plan_rotation(NOW.timestamp(), NOW)
         strategy._plan_rotation(NOW.timestamp() + 5, NOW)
@@ -151,7 +151,7 @@ def test_real_decision_snapshot_contains_rejections_heat_config_and_no_credentia
     assert snapshot["configuration"]["leader_squeeze"]["replacement_score_gap"] == 10
     assert snapshot["pairs"][TARGET]["entry_score"] == 48
     assert any(
-        check.get("reason") == "评分48低于门槛50" for check in snapshot["decision"]["checks"]
+        check.get("reason") == "评分48低于动态风险门槛" for check in snapshot["decision"]["checks"]
     )
     assert "DO-NOT-STORE" not in json.dumps(snapshot)
     assert len(snapshot["holdings"]) == 5
@@ -198,12 +198,17 @@ def test_config_has_no_code_fallback_and_framework_values_are_available_before_s
 
 
 def test_candidate_pool_configuration_contract():
-    volume, *_, final = PUBLIC_CONFIG["pairlists"]
+    volume, contract_filter, underlying_filter, *_, final = PUBLIC_CONFIG["pairlists"]
     assert volume["method"] == "VolumePairList"
-    assert volume["number_assets"] == 200
-    assert volume["min_value"] == 20_000_000
-    assert final["method"] == "PercentChangePairList"
-    assert final["number_assets"] == 50
+    assert volume["number_assets"] == 1000
+    assert volume["min_value"] == 3_000_000
+    assert (
+        volume["min_value"]
+        <= PUBLIC_CONFIG["leader_squeeze"]["liquidity_discovery_min_quote_volume"]
+    )
+    assert contract_filter["info_compare_value"] == "PERPETUAL"
+    assert underlying_filter["info_compare_value"] == "COIN"
+    assert final["method"] == "SpreadFilter"
 
 
 @pytest.mark.parametrize(
@@ -212,7 +217,7 @@ def test_candidate_pool_configuration_contract():
         ("atr_period", 0),
         ("oi_sample_count", 1),
         ("rotation_audit_enabled", "false"),
-        ("liquidation_recent_seconds", 3600),
+        ("profit_lock_arm_r", -1),
         ("score_candle_close_delay_seconds", 900),
     ],
 )

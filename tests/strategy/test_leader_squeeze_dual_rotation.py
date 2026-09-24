@@ -49,15 +49,16 @@ def _rotation_strategy(
         trades.append(_trade(pair, 120.0, index + 1))
 
     strategy = _entry_ready_strategy(NOW.timestamp())
+    # The shared fixture still serves legacy strategy tests; this file models
+    # the current public settings contract.
+    strategy.settings.pop("entry_heat_max_penalty", None)
     strategy.settings["max_positions"] = held_count
     strategy.settings["entry_risk_cluster_max_positions"] = held_count + 1
     strategy.settings.update(
         {
-            "replacement_entry_score": 50.0,
             "replacement_weak_score": 45.0,
             "replacement_score_gap": 10.0,
             "replacement_fast_enabled": True,
-            "replacement_fast_entry_score": 60.0,
             "replacement_fast_score_gap": 15.0,
             "replacement_fast_confirmations": 1,
             "replacement_fast_min_age_minutes": 15,
@@ -65,14 +66,14 @@ def _rotation_strategy(
             "replacement_fast_core_score": 40.0,
             "replacement_min_age_minutes": 30,
             "replacement_cooldown_minutes": 30,
-            "replacement_weak_bottom_ratio": 0.20,
-            "replacement_target_top_ratio": 0.10,
         }
     )
     strategy._entries_allowed = Mock(return_value=True)
     strategy._scores = scores
     strategy._score_leaders = list(scores)
+    strategy._candidate_pairs = list(scores)
     strategy._metrics = {pair: _fresh_score_metric() for pair in scores}
+    strategy._entry_setup_snapshot = {}
     strategy._last_score_refresh = 1000.0
     strategy._rotation_score_snapshot = -1.0
     strategy._rotation_pair = None
@@ -109,19 +110,25 @@ def _plan(
         strategy._plan_rotation(now, current_time)
 
 
-def test_rotation_score_channels_apply_heat_adjusted_floor_and_old_weak_floor() -> None:
-    strategy, _ = _rotation_strategy(weak_score=44.0, target_score=70.0)
-    discounted = {TARGET: 49.0}
-    strategy._entry_score = lambda pair: discounted.get(pair, strategy._scores[pair])
-    strategy._current_score = lambda pair: strategy._scores[pair]
+def test_rotation_channels_use_dynamic_floor_and_normal_weak_score_limit() -> None:
+    strategy, _ = _rotation_strategy(weak_score=44.0, target_score=54.0)
+    strategy._rotation_floor = Mock(return_value=55.0)
 
+    # A normal target that clears the removed fixed 50-point threshold still
+    # fails when the current risk floor is higher.
     assert not strategy._rotation_scores_qualify(WEAK, TARGET, "normal")
 
-    discounted[TARGET] = 54.0
+    strategy._scores[TARGET] = 55.0
     assert strategy._rotation_scores_qualify(WEAK, TARGET, "normal")
 
+    # Fast rotation has no fixed 60-point target floor, but still uses the
+    # same dynamic risk floor and its larger score gap.
+    strategy._scores[WEAK] = 40.0
+    strategy._scores[TARGET] = 56.0
+    assert strategy._rotation_scores_qualify(WEAK, TARGET, "fast")
+
     strategy._scores[WEAK] = 52.0
-    discounted[TARGET] = 67.0
+    strategy._scores[TARGET] = 67.0
     assert not strategy._rotation_scores_qualify(WEAK, TARGET, "normal")
     assert strategy._rotation_scores_qualify(WEAK, TARGET, "fast")
     strategy._rotation_state = {"channel": "fast"}
@@ -220,16 +227,16 @@ def test_normal_rotation_requires_two_adjacent_closed_bars() -> None:
     assert strategy._rotation_state["signal_bar"] == pytest.approx(NOW.timestamp())
 
 
-def test_normal_confirmation_is_cleared_when_heat_discount_lowers_target_score() -> None:
-    strategy, trades = _rotation_strategy(held_count=5, weak_age_minutes=60, target_score=70)
-    discounted = {TARGET: 55.0}
-    strategy._entry_score = lambda pair: discounted.get(pair, strategy._scores[pair])
+def test_normal_confirmation_is_cleared_when_dynamic_floor_rises() -> None:
+    strategy, trades = _rotation_strategy(held_count=5, weak_age_minutes=60, target_score=60)
+    floors = {TARGET: 55.0}
+    strategy._rotation_floor = Mock(side_effect=lambda target, occupied=None: floors[target])
     strategy._rotation_bar.return_value = NOW.timestamp() - PERIOD
 
     _plan(strategy, trades, NOW.timestamp(), NOW)
     assert strategy._rotation_seen == 1
 
-    discounted[TARGET] = 49.0
+    floors[TARGET] = 61.0
     strategy._last_score_refresh += 900.0
     strategy._rotation_bar.return_value = NOW.timestamp()
     _plan(strategy, trades, NOW.timestamp() + 900.0, NOW + timedelta(minutes=15))
@@ -256,47 +263,87 @@ def test_fast_rotation_can_replace_a_still_acceptable_old_score() -> None:
     assert strategy._rotation_state["weak"] == WEAK
 
 
-def test_rotation_only_replaces_holdings_in_bottom_score_percentile() -> None:
+def test_rotation_does_not_require_old_holding_to_rank_in_bottom_percentile() -> None:
     strategy, trades = _rotation_strategy(target_score=75.0, fast_quality=True)
     lower_scores = {f"LOW-{index}/USDT:USDT": float(index) for index in range(1, 7)}
     strategy._scores.update(lower_scores)
     strategy._metrics.update({pair: _fresh_score_metric() for pair in lower_scores})
     strategy._score_leaders = list(strategy._scores)
+    strategy._candidate_pairs = list(strategy._scores)
 
     _plan(strategy, trades, NOW.timestamp(), NOW)
 
-    assert strategy._rotation_state is None
-    assert strategy._rotation_candidate is None
+    assert strategy._rotation_state is not None
+    assert strategy._rotation_state["weak"] == WEAK
+    assert strategy._rotation_state["target"] == TARGET
 
 
-def test_rotation_target_must_rank_in_top_percentile_before_quality_filters() -> None:
+def test_rotation_checks_eligible_targets_without_a_top_percentile_gate() -> None:
     strategy, trades = _rotation_strategy(target_score=75.0, fast_quality=True)
     higher_scores = {f"HIGH-{index}/USDT:USDT": 90.0 - index for index in range(1, 5)}
     strategy._scores.update(higher_scores)
     strategy._metrics.update({pair: _fresh_score_metric() for pair in higher_scores})
     strategy._score_leaders = list(strategy._scores)
+    strategy._candidate_pairs = list(strategy._scores)
     strategy._entry_pair_available = Mock(side_effect=lambda pair: pair not in higher_scores)
 
     _plan(strategy, trades, NOW.timestamp(), NOW)
 
-    assert strategy._rotation_state is None
-    assert strategy._rotation_candidate is None
+    assert strategy._rotation_state is not None
+    assert strategy._rotation_state["target"] == TARGET
 
 
-def test_rotation_rank_is_rechecked_before_target_order() -> None:
+@pytest.mark.parametrize("different_field", [None, "stage", "freshness", "relative_volume"])
+def test_candidate_hysteresis_requires_matching_priority_fields(different_field) -> None:
+    strategy, trades = _rotation_strategy(target_score=62.0, fast_quality=True)
+    incumbent = "INCUMBENT/USDT:USDT"
+    best = "BEST/USDT:USDT"
+    strategy._scores.update({incumbent: 60.0, best: 62.0})
+    strategy._metrics.update(
+        {
+            incumbent: _fresh_score_metric(volume_activity_ratio=2.0),
+            best: _fresh_score_metric(volume_activity_ratio=2.0),
+        }
+    )
+    strategy._score_leaders = list(strategy._scores)
+    strategy._candidate_pairs = list(strategy._scores)
+    incumbent_setup = {"stage": "启动", "breakout_age_candles": 0.0}
+    best_setup = {"stage": "启动", "breakout_age_candles": 0.0}
+    if different_field == "stage":
+        incumbent_setup = {"stage": "中继"}
+    elif different_field == "freshness":
+        incumbent_setup["breakout_age_candles"] = 1.0
+    elif different_field == "relative_volume":
+        strategy._metrics[best]["volume_activity_ratio"] = 3.0
+    strategy._entry_setup_snapshot = {incumbent: incumbent_setup, best: best_setup}
+    strategy._rotation_floor = Mock(return_value=40.0)
+    strategy._rotation_candidate = (WEAK, incumbent)
+    strategy._rotation_candidate_channel = "fast"
+    strategy._rotation_candidate_bar = NOW.timestamp() - PERIOD
+    strategy._rotation_seen = 1
+    strategy._rotation_score_snapshot = -1.0
+    strategy._last_score_refresh += PERIOD
+    strategy._rotation_bar = Mock(return_value=NOW.timestamp())
+
+    _plan(strategy, trades, NOW.timestamp(), NOW)
+
+    expected = incumbent if different_field is None else best
+    assert strategy._rotation_state is not None
+    assert strategy._rotation_state["target"] == expected
+
+
+def test_rotation_risk_floor_is_rechecked_before_target_order() -> None:
     strategy, trades = _rotation_strategy(target_score=75.0, fast_quality=True)
+    strategy._rotation_floor = Mock(return_value=54.0)
     _plan(strategy, trades, NOW.timestamp(), NOW)
     assert strategy._rotation_state is not None
 
-    higher_scores = {f"HIGH-{index}/USDT:USDT": 90.0 - index for index in range(1, 5)}
-    strategy._scores.update(higher_scores)
-    strategy._metrics.update({pair: _fresh_score_metric() for pair in higher_scores})
-    strategy._score_leaders = list(strategy._scores)
+    strategy._rotation_floor.return_value = 76.0
 
     with patch.object(MODULE.Trade, "get_open_trades", return_value=trades):
         reason = strategy._confirmation_quality_reason(TARGET)
 
-    assert "轮换" in reason
+    assert reason == "轮换分差或目标评分不再达标"
 
 
 def test_fast_rotation_requires_breakout_quality_when_old_score_is_still_high() -> None:

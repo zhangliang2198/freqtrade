@@ -114,7 +114,7 @@ def test_score_refresh_does_not_request_adl_and_can_score_the_result() -> None:
             "volume_activity_ratio": 3.0,
         }
     )
-    strategy._liquidation_score = Mock(return_value=0.0)
+    strategy._candidate_pairs = [PAIR]
     strategy._market_id = Mock(return_value="BTCUSDT")
 
     strategy._apply_scores(NOW, {PAIR: metric}, {PAIR: metric})

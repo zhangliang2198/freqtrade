@@ -165,7 +165,7 @@ def test_invalid_strategy_capacity_fails_early(limit):
         "max_open_trades": 21,
         "leader_squeeze": {**configured_settings(), "max_positions": limit},
     }
-    with pytest.raises(ValueError, match="max_positions must be a positive integer"):
+    with pytest.raises(ValueError, match="max_positions must be an integer within"):
         strategy.bot_start()
 
 

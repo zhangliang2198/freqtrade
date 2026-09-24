@@ -33,10 +33,6 @@
     "volume_score_full_ratio": 2.0,
     "taker_score_full_ratio": 1.5,
     "oi_score_full_drop": 0.03,
-    "liquidation_score_full_ratio": 5.0,
-    "liquidation_warmup_score": 0.0,
-    "entry_heat_max_penalty": 0.2,
-    "entry_heat_return_scale": 1.0,
     "entry_heat_extension_start_atr": 2.0,
     "entry_heat_extension_full_atr": 6.0,
     "entry_heat_ema_candles": 96,
@@ -44,9 +40,13 @@
     "entry_heat_box_max_width_atr": 4.0,
     "entry_heat_prebreak_extension_max_atr": 2.0,
     "entry_heat_breakout_overshoot_atr": 1.0,
-    "entry_heat_cooled_breakout_factor": 0.25,
-    "entry_heat_base_fraction": 0.25,
-    "liquidation_min_notional": 1000.0,
+    "liquidity_discovery_min_quote_volume": 3000000.0,
+    "liquidity_core_min_quote_volume": 10000000.0,
+    "liquidity_volume_candles": 96,
+    "scout_max_candidates": 30,
+    "scout_min_volume_ratio": 1.0,
+    "scout_min_activity_ratio": 1.0,
+    "candidate_min_metric_ratio": 0.8,
     "market_min_coverage_ratio": 0.8,
     "market_down_ratio": 0.8,
     "score_refresh_seconds": 900,
@@ -57,7 +57,6 @@
     "raw_metrics_log_enabled": false,
     "data_grace_seconds": 30,
     "remote_metric_max_age_seconds": 1860,
-    "liquidation_stream_max_age_seconds": 15,
     "max_spread_ratio": 0.001,
     "max_slippage_ratio": 0.0025,
     "reversal_lookback_candles": 20,
@@ -66,19 +65,15 @@
     "reversal_fast_atr_buffer": 1.5,
     "reversal_slow_candles": 5,
     "reversal_slow_atr_drop": 1.0,
-    "replacement_entry_score": 50.0,
     "replacement_weak_score": 45.0,
     "replacement_score_gap": 10.0,
     "replacement_confirmations": 2,
     "replacement_min_age_minutes": 30,
     "replacement_cooldown_minutes": 30,
     "replacement_no_new_high_candles": 4,
-    "replacement_weak_bottom_ratio": 0.2,
-    "replacement_target_top_ratio": 0.1,
     "replacement_candidate_hysteresis": 3.0,
     "replacement_reentry_cooldown_minutes": 30,
     "replacement_fast_enabled": true,
-    "replacement_fast_entry_score": 60.0,
     "replacement_fast_score_gap": 15.0,
     "replacement_fast_confirmations": 1,
     "replacement_fast_min_age_minutes": 15,
@@ -94,7 +89,6 @@
       "momentum": 0.44,
       "volume": 0.27,
       "taker_buy": 0.26,
-      "liquidation": 0.0,
       "oi_squeeze": 0.0,
       "funding": 0.03
     },
@@ -114,8 +108,6 @@
     "volume_baseline_windows": 20,
     "candle_min_history": 21,
     "oi_sample_count": 4,
-    "liquidation_window_seconds": 3600,
-    "liquidation_recent_seconds": 900,
     "position_sync_seconds": 30,
     "position_stale_seconds": 60,
     "risk_state_checkpoint_seconds": 60,
@@ -125,12 +117,7 @@
     "funding_request_timeout_seconds": 5,
     "funding_max_age_seconds": 930,
     "metric_workers": 10,
-    "liquidation_open_timeout_seconds": 10,
-    "liquidation_close_timeout_seconds": 1,
-    "liquidation_receive_timeout_seconds": 30,
-    "liquidation_reconnect_seconds": 5,
     "rest_base_url": "https://fapi.binance.com",
-    "liquidation_stream_url": "wss://fstream.binance.com/market/stream?streams=!forceOrder@arr/!markPrice@arr@1s",
     "state_file_live": "strategies/leader_squeeze/runtime/leader_squeeze_state.live.json",
     "state_file_dry_run": "strategies/leader_squeeze/runtime/leader_squeeze_state.json",
     "rotation_audit_enabled": true,
@@ -145,15 +132,15 @@
     "profit_r_min_pct": 0.008,
     "profit_r_max_pct": 0.12,
     "profit_lock_enabled": true,
-    "profit_lock_arm_r": 1.0,
+    "profit_lock_arm_r": 0.5,
     "profit_lock_fee_buffer": 0.0025,
     "profit_lock_regimes": {
       "strong": {"giveback_frac": 0.5, "trail_r": 1.5, "atr_multiple": 2.25},
       "normal": {"giveback_frac": 0.4, "trail_r": 1.0, "atr_multiple": 1.5},
       "fading": {"giveback_frac": 0.25, "trail_r": 0.5, "atr_multiple": 0.75}
     },
-    "profit_lock_strong_rank_ratio": 0.2,
-    "profit_lock_fading_rank_ratio": 0.5,
+    "profit_lock_strong_score": 45.0,
+    "profit_lock_fading_score": 20.0,
     "profit_lock_strong_max_bars": 2,
     "profit_lock_fading_min_bars": 6,
     "profit_lock_state_confirm_bars": 2,
@@ -182,7 +169,7 @@
     "rotation_recovery_confirmations": 2,
     "rotation_recovery_history_limit": 1000,
     "entry_risk_base_score": 40.0,
-    "entry_risk_premium": 14.0,
+    "entry_risk_premium": 20.0,
     "entry_risk_per_trade": 0.01,
     "entry_risk_initial_stop_enabled": true,
     "entry_risk_correlation_weight": 0.5,
@@ -203,9 +190,8 @@
       "proximity": 15.0
     },
     "entry_setup_min_score": 50.0,
-    "entry_setup_shortlist_ratio": 0.4,
-    "entry_setup_min_candidates": 10,
     "entry_setup_launch_candles": 2,
+    "entry_setup_breakout_volume_multiple": 1.5,
     "entry_setup_late_extension_atr": 5.0
   },
   "exchange": {
@@ -214,16 +200,22 @@
   "pairlists": [
     {
       "method": "VolumePairList",
-      "number_assets": 200,
+      "number_assets": 1000,
       "sort_key": "quoteVolume",
-      "min_value": 20000000,
+      "min_value": 3000000,
       "refresh_period": 300
     },
     {
       "method": "PairInformationFilter",
-      "selection_mode": "blacklist",
+      "selection_mode": "whitelist",
       "info_key": "info.contractType",
-      "info_compare_value": "TRADIFI_PERPETUAL"
+      "info_compare_value": "PERPETUAL"
+    },
+    {
+      "method": "PairInformationFilter",
+      "selection_mode": "whitelist",
+      "info_key": "info.underlyingType",
+      "info_compare_value": "COIN"
     },
     {
       "method": "AgeFilter",
@@ -232,14 +224,6 @@
     {
       "method": "SpreadFilter",
       "max_spread_ratio": 0.0015
-    },
-    {
-      "method": "PercentChangePairList",
-      "number_assets": 50,
-      "lookback_timeframe": "15m",
-      "lookback_period": 4,
-      "refresh_period": 900,
-      "sort_direction": "desc"
     }
   ]
 }
